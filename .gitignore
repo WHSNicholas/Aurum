@@ -1,4 +1,12 @@
 # Git Ignore
-.venv
-.idea
 
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# PyCharm
+.idea/
+
+# macOS
+.DS_Store
