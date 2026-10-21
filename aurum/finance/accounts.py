@@ -1,29 +1,38 @@
 # -------------------------------------------------------------------------------------------------------------------- #
 #                                                        Aurum                                                         #
-#                                                  Finance - Account                                                   #
+#                                                  Finance - Accounts                                                  #
 # -------------------------------------------------------------------------------------------------------------------- #
 """
-Define and validate Aurum's standalone accounts.
+Aurum uses accounts to organise financial activity and identify where each transaction belongs.
 
-AccountType identifies an account's fundamental accounting classification. BankDetails stores optional
-Australian bank identifiers. Account describes identity, classification, institution, and lifecycle dates.
+This file defines an account's identity, accounting type, institution and opening and closing dates,
+along with optional Australian bank details. It keeps accounts in a read-only registry and checks that
+their configuration keys and UUIDs are unique.
 
-AccountRegistry checks account keys and UUIDs and provides read-only lookups. Account balances will eventually
-be derived from journal entries, starting at zero.
+Account definitions are loaded from private JSON configuration with saved UUIDs, so an account keeps the
+same identity between runs. Bank details identify a single configured account, allowing statement imports
+to link transactions to the right account.
 
-This module defines the accounting structure only. Configuration loading, journal processing, balance
-calculations, report grouping, and any account subdivisions will be considered in later steps.
+Accounts are currently flat. Balances will be calculated from journal entries, starting at zero. Journal
+processing, report groupings and account subdivisions are planned for later steps.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
+# Imports
 from collections.abc import Mapping
 from datetime import date
 from enum import Enum
+import json
+from pathlib import Path
 from types import MappingProxyType
 from typing import Self
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# Default paths
+DEFAULT_ACCOUNTS = Path(__file__).resolve().parents[2] / "config" / "accounts.json"
+
 
 # %% 1. Accounts ---------------------------------------------------------------------------------------------
 class AccountType(Enum):
@@ -64,8 +73,10 @@ class BankDetails(BaseModel):
         ValidationError: The BSB or account number has an invalid format.
     """
 
+    # Configuration
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    # Bank identifiers
     bsb: str = Field(min_length=6, max_length=6, pattern=r"^[0-9]+$")
     account_number: str = Field(min_length=1, pattern=r"^[0-9]+$")
 
@@ -89,7 +100,7 @@ class Account(BaseModel):
     closing date means the account is active. Closed accounts remain available for historical reporting.
 
     Attributes:
-        key: Stable, case-sensitive identifier used in configuration and transactions.
+        key: Stable, case-sensitive identifier used in configuration and account lookups.
         name: Human-readable label shown in dashboards and reports.
         account_type: Fundamental accounting classification.
         opening_date: Real opening date if known and applicable, or None.
@@ -101,8 +112,8 @@ class Account(BaseModel):
 
     Pydantic accepts valid string forms of account_type, UUID, and dates. Fields cannot be reassigned after
     construction. To change an account, validate a new Account from its data, then rebuild the registry.
-    Pydantic's model_copy(update=...) does not validate updates. The UUID must later be persisted by
-    configuration so a reload retains the same identity.
+    Pydantic's model_copy(update=...) does not validate updates. Persist UUIDs in account configuration so
+    load_accounts restores the same identities on every run.
 
     Example:
         Create an account with synthetic bank identifiers::
@@ -128,7 +139,7 @@ class Account(BaseModel):
     name: str = Field(min_length=1)
     id: UUID = Field(default_factory=uuid4)
 
-    # Core Fields
+    # Core fields
     account_type: AccountType
     bank_details: BankDetails | None = None
     institution: str | None = None
@@ -204,9 +215,11 @@ class AccountRegistry:
             TypeError: If the input or an item has the wrong type.
             ValueError: If a key or UUID is duplicated.
         """
+        # Input validation
         if not isinstance(accounts, list):
             raise TypeError("accounts must be a list of Account objects")
 
+        # Account lookup
         by_key: dict[str, Account] = {}
         seen_ids: set[UUID] = set()
         for account in accounts:
@@ -219,7 +232,6 @@ class AccountRegistry:
             by_key[account.key] = account
             seen_ids.add(account.id)
 
-        # A mapping proxy prevents changes to the lookup after validation.
         self._accounts: Mapping[str, Account] = MappingProxyType(by_key)
 
     @property
@@ -231,3 +243,39 @@ class AccountRegistry:
             Accounts in input order, including closed accounts.
         """
         return self._accounts
+
+
+# %% 2. Account Configuration --------------------------------------------------------------------------------
+def load_accounts(path: Path | str = DEFAULT_ACCOUNTS) -> AccountRegistry:
+    """
+    Load and validate account definitions, requiring persistent UUIDs and unambiguous bank identifiers.
+
+    Args:
+        path: Private JSON file containing a list of Account definitions.
+
+    Returns:
+        An AccountRegistry with unique keys, UUIDs, and any supplied bank identifiers.
+
+    Raises:
+        OSError: The configuration file cannot be read.
+        ValueError: JSON, account fields, UUIDs, keys, or bank identifiers are invalid or ambiguous.
+    """
+    # Configuration file
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError("Account configuration must be a JSON list")
+
+    # Account definitions
+    accounts = []
+    seen_bank_details = set()
+    for index, fields in enumerate(data, start=1):
+        if not isinstance(fields, dict) or "id" not in fields:
+            raise ValueError(f"Account {index} must include an explicit persistent UUID in id")
+        account = Account.model_validate(fields)
+        if account.bank_details is not None:
+            identifiers = (account.bank_details.bsb, account.bank_details.account_number)
+            if identifiers in seen_bank_details:
+                raise ValueError("Multiple configured accounts use the same bank identifiers")
+            seen_bank_details.add(identifiers)
+        accounts.append(account)
+    return AccountRegistry(accounts)
