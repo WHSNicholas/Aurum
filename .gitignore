@@ -9,3 +9,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Private financial inputs and generated data
+/data/
+/config/accounts.json

@@ -2,30 +2,41 @@
 
 ## Purpose
 
-Aurum helps the user understand financial activity and position for everyday decisions and longer-term goals. Use EigenOne (`../Eigen One/`) only as a reference for intended functionality; leave it unchanged and write Aurum from scratch. Use synthetic examples, never personal financial data or secrets, during development.
+Aurum is a personal finance app for understanding financial activity and position, with dashboards and PDF reports planned. Rebuild from scratch; use EigenOne (`../Eigen One/`) only as a requirements reference and leave it unchanged. Develop with synthetic examples, never personal financial data or secrets.
 
 ## Working Agreement
 
-- Agree on design before implementation. Build one small step at a time, explaining its purpose and affected files first.
-- After each step, explain the code in plain language, give a simple way to check it, and pause for review. Answer questions without advancing implementation.
-- Record agreed decisions here, separate from open questions. Do not create test files or `__init__.py` files for now.
+- Agree on design, purpose and affected files before one small, reviewable step. Explain the code in plain language and give a simple check afterwards, then pause. Answer questions without advancing implementation.
+- Prefer straightforward Python. Explain unfamiliar concepts and dependencies; add packages only when needed.
+- Use PyCharm, one project `.venv` and `python -m pip`. Record dependencies in `requirements.txt`. Keep `.venv`, `.idea`, `data/` and private account configuration out of Git.
+- Preserve local edits: read current files, save through PyCharm and verify them on disk. Keep agreed decisions here, with open questions below; current decisions override older notes.
+- Do not create test files or `__init__.py` files for now. Use small synthetic checks where appropriate.
 
 ## Python Style
 
-- Begin each Python file with a 120-character banner: `#` at both ends, hyphen borders, a centred `Aurum` title, and a centred location subtitle separated by ` - `. Put a module docstring immediately below it.
-- Group related code under consecutive `# %%` section headings, starting with `# %% 0. Preamble`. Extend each heading with hyphens to column 110.
-- Give every class, function, and method a purpose-focused docstring. Put opening and closing `"""` on their own lines; document parameters, returns, and exceptions where relevant.
-- Comment on accounting rules and non-obvious steps. Wrap comment and docstring prose naturally at column 110, preserving paragraph breaks and code examples; only the banner uses 120 columns.
+- Begin Python files with a 120-character banner: `#` at both ends, hyphen borders, centred `Aurum` title and location subtitle using ` - `. Follow it with the module docstring.
+- Number Title Case `# %%` sections consecutively from `# %% 0. Preamble`, padding with hyphens to column 110. Group by purpose; main functions precede standalone private helpers in a `Helpers` section. Keep methods inside classes and omit unused sections.
+- Module docstrings explain the file's contribution in natural paragraphs. Give every class, function and method a purpose-focused docstring, with arguments, returns and exceptions where relevant. Put opening and closing `"""` on separate lines.
+- Use short, unnumbered, unpadded sentence-case grouping comments, such as `# Core fields` or `# Validation`, selectively. Label standard-library/third-party imports `# Imports` and project imports `# Aurum imports`; preserve order and omit empty groups.
+- Explain accounting rules and non-obvious steps. Wrap comments and docstrings at column 110, preserving paragraphs and examples; only banners use 120 columns.
 
 ## Accounting Decisions
 
-- Use five account types: asset, liability, equity, income, and expense. Accounts are flat, without subtypes or subaccounts for now. Configure report groupings separately.
-- Keep account definitions immutable. Validate replacements and rebuild `AccountRegistry`, the chart of accounts. Keep closed accounts for historical reporting.
-- Give each account a persistent UUID and stable configuration key. Opening dates are optional; an account without a closing date is active. Do not store a separate active flag.
-- Australian bank details and an institution display name are optional.
-- Derive AUD balances from journal entries, using balanced opening entries for an existing position.
-- Track savings goals separately from the ledger; a bank account retains its full balance.
+- Use immutable Pydantic models and five account types: asset, liability, equity, income and expense. Accounts are flat; configure report groups separately. Subtypes and subaccounts are deferred.
+- Accounts have persistent UUIDs and stable keys. Opening dates, Australian bank details and institution display names are optional. No closing date means active; retain closed accounts for history and omit separate active flags.
+- Validate replacements and rebuild `AccountRegistry`. Journal entries will determine AUD balances; represent existing positions with balanced opening entries.
+- Keep savings goals separate from the ledger so allocations never reduce a bank account's full balance.
 
-## Open Questions
-- Design journal entries, ingestion, entity links, report grouping, and savings-goal tracking when those features are built.
-- Revisit subaccounts only after agreeing on their relationship to accounts, postings, types, and balances.
+## Importing Decisions
+
+- Layout: `finance/` models, with account definitions, registry and configuration loading together in `accounts.py`; `importers/` PDF parsing; `database/` SQLite; `scripts/` runnable commands.
+- ANZ Plus PDFs live in `data/bank_statements/`; SQLite at `data/aurum.sqlite3`; private account definitions, requiring explicit UUIDs, at `config/accounts.json`. Run `python aurum/scripts/pdf_importer.py`. Support folder/config/database overrides: defaults resolve from the script's project root, supplied relative paths from the working directory.
+- Use one immutable `Transaction` per statement line, retaining original descriptions, dates, signed AUD dollars, a required source account UUID and filename stem (no directory or extension). Keep both transfer observations. Bank identifiers stay on accounts; match each PDF header to exactly one configured account.
+- Validate statement totals and available running balances. SQLite stores numeric dollars (`REAL`, approximate); validate whole cents and use `Decimal` for Python calculations and reconstructed transactions. Inspect SQLite in PyCharm; no CSV exports.
+- Store successful PDF content hashes only in `imports`, alongside filename stems; skip unchanged or renamed PDFs before parsing. Save each PDF's transactions/history atomically; failures remain retryable. Page/row positions are temporary diagnostics.
+- For changed or overlapping PDFs, compare account UUID, transaction/effective dates, amount, whitespace-normalised description and running balance. Compute keys/counts during import, saving only additional identical-row occurrences. Preserve existing UUIDs, descriptions and source details; never persist fingerprints or occurrence counters.
+
+## Next Steps
+
+- Next agree a unified double-entry journal: counterpart matching, categorisation and transfer reconciliation, plus manual investment, debt and other entries. Dashboards and PDF reports will use this journal.
+- Keep journal work out of importing. Resolve corrections/deletions, entity links, report grouping and savings goals when those features are built. Revisit subaccounts only after agreeing their relationship to accounts, postings, types and balances.
