@@ -10,6 +10,7 @@ __pycache__/
 # macOS
 .DS_Store
 
-# Private financial inputs and generated data
+# Aurum files
 /data/
 /config/accounts.json
+/aurum/scratch.py
