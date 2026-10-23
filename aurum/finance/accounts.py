@@ -5,16 +5,17 @@
 """
 Aurum uses accounts to organise financial activity and identify where each transaction belongs.
 
-This file defines an account's identity, accounting type, institution and opening and closing dates,
+This file defines an account's identity, accounting type, institution and optional closing date,
 along with optional Australian bank details. It keeps accounts in a read-only registry and checks that
 their configuration keys and UUIDs are unique.
 
-Account definitions are loaded from private JSON configuration with saved UUIDs, so an account keeps the
-same identity between runs. Bank details identify a single configured account, allowing statement imports
-to link transactions to the right account.
+Account definitions are loaded from private YAML configuration.
+New accounts receive UUIDs that are saved back to the configuration before use, keeping their identity
+stable between runs. Bank details identify one configured account for statement imports.
 
-Accounts are currently flat. Balances will be calculated from journal entries, starting at zero. Journal
-processing, report groupings and account subdivisions are planned for later steps.
+Accounts are flat. Balances start at zero and change only through posted journal entries. Starting positions
+are recorded as balanced manual entries with debit and credit legs. Report groupings and account subdivisions
+remain separate future work.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -22,16 +23,24 @@ processing, report groupings and account subdivisions are planned for later step
 from collections.abc import Mapping
 from datetime import date
 from enum import Enum
-import json
+import io
+import os
 from pathlib import Path
+import stat
+import tempfile
 from types import MappingProxyType
-from typing import Self
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.error import YAMLError
+
+# Aurum imports
+from aurum.finance.dates import parse_input_date
 
 # Default paths
-DEFAULT_ACCOUNTS = Path(__file__).resolve().parents[2] / "config" / "accounts.json"
+DEFAULT_ACCOUNTS = Path(__file__).resolve().parents[2] / "config" / "accounts.yaml"
 
 
 # %% 1. Accounts ---------------------------------------------------------------------------------------------
@@ -96,14 +105,13 @@ class Account(BaseModel):
     Describe one standalone account that can receive journal postings.
 
     Accounts are flat: they have no reporting hierarchy or nested balances. Bank details and institution are
-    optional metadata; no balance is stored here. The opening date may be unknown or not applicable. A missing
-    closing date means the account is active. Closed accounts remain available for historical reporting.
+    optional metadata; no balance is stored here. A missing closing date means the account is active.
+    Closed accounts remain available for historical reporting.
 
     Attributes:
         key: Stable, case-sensitive identifier used in configuration and account lookups.
         name: Human-readable label shown in dashboards and reports.
         account_type: Fundamental accounting classification.
-        opening_date: Real opening date if known and applicable, or None.
         id: UUID generated on first construction, or supplied again when restoring a saved account.
         bank_details: Optional Australian BSB and bank account number.
         institution: Optional display name of the bank or other institution, without an entity link.
@@ -122,13 +130,12 @@ class Account(BaseModel):
                 key="everyday",
                 name="Everyday bank account",
                 account_type=AccountType.ASSET,
-                opening_date="2020-01-01",
                 institution="Example Bank",
                 bank_details=BankDetails(bsb="123456", account_number="00012345")
             )
 
     Raises:
-        ValidationError: Required text is blank, a field is invalid, or known dates are out of order.
+        ValidationError: Required text is blank or a field, including the closing date, is invalid.
     """
 
     # Configuration
@@ -145,11 +152,18 @@ class Account(BaseModel):
     institution: str | None = None
 
     # Miscellaneous
-    opening_date: date | None = None
     closing_date: date | None = None
     notes: str | None = None
 
     # Validation
+    @field_validator("closing_date", mode="before")
+    @classmethod
+    def _parse_closing_date(cls, value: object) -> date | None:
+        """
+        Accept either supported input format for an optional closing date.
+        """
+        return parse_input_date(value)
+
     @field_validator("key", "name", "institution")
     @classmethod
     def _reject_blank_text(cls, value: str | None) -> str | None:
@@ -168,25 +182,6 @@ class Account(BaseModel):
         if value is not None and not value.strip():
             raise ValueError("text must not be blank")
         return value
-
-    @model_validator(mode="after")
-    def _check_dates(self) -> Self:
-        """
-        Reject a closing date before a known opening date.
-
-        Returns:
-            This account when its dates are valid.
-
-        Raises:
-            ValueError: If both dates are known and the closing date is earlier.
-        """
-        if (
-            self.opening_date is not None
-            and self.closing_date is not None
-            and self.closing_date < self.opening_date
-        ):
-            raise ValueError("closing_date must not precede opening_date")
-        return self
 
 
 class AccountRegistry:
@@ -246,36 +241,113 @@ class AccountRegistry:
 
 
 # %% 2. Account Configuration --------------------------------------------------------------------------------
-def load_accounts(path: Path | str = DEFAULT_ACCOUNTS) -> AccountRegistry:
+def load_accounts(
+    path: Path | str = DEFAULT_ACCOUNTS, *, initialise_ids: bool = True,
+) -> AccountRegistry:
     """
-    Load and validate account definitions, requiring persistent UUIDs and unambiguous bank identifiers.
+    Load account definitions and save missing UUIDs once, after validating the complete configuration.
+
+    An omitted or null id creates a new UUID; an existing id is never replaced. YAML comments, quoted text
+    and field order are retained when IDs are added. A file with every UUID already saved is not rewritten.
+    Quote bank identifiers in YAML so leading zeros remain part of the text.
 
     Args:
-        path: Private JSON file containing a list of Account definitions.
+        path: Private .yaml or .yml file containing a list of Account definitions.
+        initialise_ids: Save missing identities when True; reject them without writing when False.
 
     Returns:
         An AccountRegistry with unique keys, UUIDs, and any supplied bank identifiers.
 
     Raises:
-        OSError: The configuration file cannot be read.
-        ValueError: JSON, account fields, UUIDs, keys, or bank identifiers are invalid or ambiguous.
+        OSError: The configuration cannot be read or generated UUIDs cannot be saved.
+        ValueError: File syntax, account fields or identifiers are invalid, or the file changed while saving.
     """
     # Configuration file
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    path = Path(path).resolve()
+    if path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError("Account configuration must use a .yaml or .yml extension")
+    original = path.read_bytes()
+    text = original.decode("utf-8")
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    yaml.allow_duplicate_keys = False
+    yaml.width = 110
+    try:
+        data = yaml.load(text)
+    except YAMLError as error:
+        mark = getattr(error, "problem_mark", None)
+        line, column = getattr(mark, "line", None), getattr(mark, "column", None)
+        location = ""
+        if isinstance(line, int) and isinstance(column, int):
+            location = f" at line {line + 1}, column {column + 1}"
+        raise ValueError(
+            f"Invalid YAML account configuration{location}; check syntax and duplicate keys"
+        ) from None
     if not isinstance(data, list):
-        raise ValueError("Account configuration must be a JSON list")
+        raise ValueError("Account configuration must contain a list of accounts")
 
     # Account definitions
     accounts = []
+    generated = []
+    seen_mappings = set()
     seen_bank_details = set()
     for index, fields in enumerate(data, start=1):
-        if not isinstance(fields, dict) or "id" not in fields:
-            raise ValueError(f"Account {index} must include an explicit persistent UUID in id")
-        account = Account.model_validate(fields)
+        if not isinstance(fields, dict):
+            raise ValueError(f"Account {index} must be a mapping of field names to values")
+        if id(fields) in seen_mappings:
+            raise ValueError("Each account needs its own definition; do not repeat an account mapping alias")
+        seen_mappings.add(id(fields))
+        missing_id = fields.get("id") is None
+        if missing_id and not initialise_ids:
+            raise ValueError(
+                f"Account {index} needs a saved UUID; load accounts normally before using read-only mode"
+            )
+        values = {key: value for key, value in fields.items() if key != "id"} if missing_id else fields
+        account = Account.model_validate(values)
         if account.bank_details is not None:
             identifiers = (account.bank_details.bsb, account.bank_details.account_number)
             if identifiers in seen_bank_details:
                 raise ValueError("Multiple configured accounts use the same bank identifiers")
             seen_bank_details.add(identifiers)
         accounts.append(account)
-    return AccountRegistry(accounts)
+        if missing_id:
+            own_fields = dict(fields.non_merged_items()) if isinstance(fields, CommentedMap) else fields
+            generated.append((fields, account.id, "id" in own_fields))
+    registry = AccountRegistry(accounts)
+
+    # Persist identities only after every account and duplicate check has passed.
+    if generated:
+        for fields, identifier, has_id in generated:
+            if isinstance(fields, CommentedMap) and not has_id:
+                # Section comments can belong to the last field; insert before them, not after them.
+                fields.insert(0, "id", str(identifier))
+            else:
+                fields["id"] = str(identifier)
+        stream = io.StringIO()
+        yaml.dump(data, stream)
+        _save_account_ids(path, stream.getvalue().encode("utf-8"), original)
+    return registry
+
+
+# %% 3. Helpers ----------------------------------------------------------------------------------------------
+def _save_account_ids(path: Path, content: bytes, original: bytes) -> None:
+    """
+    Replace validated configuration atomically, keeping permissions and detecting concurrent content edits.
+
+    Any write failure leaves the caller without a registry, so unsaved UUIDs cannot escape into transactions.
+    A temporary file in the same folder is removed after a failed write or content conflict.
+    """
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.read_bytes() != original:
+            raise ValueError("Account configuration changed while UUIDs were being saved; load it again")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
