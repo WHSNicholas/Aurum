@@ -12,5 +12,4 @@ __pycache__/
 
 # Aurum files
 /data/
-/config/accounts.json
-/aurum/scratch.py
+/config/

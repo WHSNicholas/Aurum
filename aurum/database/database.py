@@ -3,42 +3,41 @@
 #                                                 Database - Database                                                  #
 # -------------------------------------------------------------------------------------------------------------------- #
 """
-This file keeps Aurum's imported transactions in a local SQLite database between runs.
+Aurum uses one local SQLite database for imported statements, journal postings and human review history.
 
-The `transactions` table holds bank statement lines, and the `imports` table records which PDFs have been
-processed. Other parts of Aurum can load the saved rows as Transaction objects.
+This module defines the current tables and opens connections with foreign-key checks enabled. Missing tables
+are created together. Existing tables must have the current columns; development databases with an older
+layout need to be recreated manually. Aurum does not migrate records or make automatic schema backups.
 
-Import history identifies PDFs already processed. For overlapping statements, the code compares transaction
-values and counts, keeping legitimate repeated lines and saving only the additional ones.
-
-Each PDF's transactions and import record are saved together. If any part of the save fails, its changes
-are undone so the database is not left with a partially imported file.
-
-Money is stored as signed AUD dollar amounts in SQLite and restored as Decimal values for calculations
-in Python.
+Investment quantities and prices use exact decimal text. Manual instructions, review history and reusable
+guidance stay separate from their accounting postings. Storage modules share this schema and commit complete
+changes atomically, so a failed operation cannot leave partially saved accounting.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
-from collections import Counter
-from datetime import UTC, datetime
-from decimal import Decimal
-import math
+from contextlib import closing
 from pathlib import Path
-import re
 import sqlite3
-from uuid import UUID
 
 # Aurum imports
-from aurum.finance.transaction import Transaction
+from aurum.database.prices import PRICE_SCHEMA
 
 
 # %% 1. Database Setup ---------------------------------------------------------------------------------------
 # Default paths
 DEFAULT_DATABASE = Path(__file__).resolve().parents[2] / "data" / "aurum.sqlite3"
 
+# Investment posting constraints
+INVESTMENT_CHECK = """
+    (security_id IS NULL AND units IS NULL AND unit_price IS NULL AND fees IS NULL)
+    OR (security_id IS NOT NULL AND length(trim(security_id)) > 0
+        AND units IS NOT NULL AND length(trim(units)) > 0
+        AND status = 'posted' AND account_type = 'asset' AND transaction_id IS NULL)
+"""
+
 # Table definitions
-SCHEMA = """
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS imports (
     source_hash TEXT PRIMARY KEY NOT NULL,
     source_file TEXT NOT NULL,
@@ -48,7 +47,7 @@ CREATE TABLE IF NOT EXISTS imports (
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS transactions (
-    id TEXT PRIMARY KEY NOT NULL,
+    transaction_id TEXT PRIMARY KEY NOT NULL,
     account_id TEXT NOT NULL,
     date TEXT NOT NULL,
     effective_date TEXT,
@@ -57,243 +56,215 @@ CREATE TABLE IF NOT EXISTS transactions (
     statement_balance REAL CHECK (statement_balance = ROUND(statement_balance, 2)),
     source_file TEXT NOT NULL
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS journal (
+    id INTEGER PRIMARY KEY,
+    date TEXT NOT NULL,
+    effective_date TEXT,
+    description TEXT NOT NULL CHECK (length(trim(description)) > 0),
+    account_name TEXT NOT NULL CHECK (length(trim(account_name)) > 0),
+    account_type TEXT NOT NULL CHECK (account_type IN ('asset', 'liability', 'equity', 'income', 'expense')),
+    debit REAL NOT NULL CHECK (debit >= 0 AND debit = ROUND(debit, 2)),
+    credit REAL NOT NULL CHECK (credit >= 0 AND credit = ROUND(credit, 2)),
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'requesting', 'needs_review', 'failed', 'posted')
+    ),
+    journal_entry_id TEXT,
+    line_number INTEGER,
+    account_id TEXT NOT NULL,
+    transaction_id TEXT UNIQUE REFERENCES transactions(transaction_id),
+    security_id TEXT,
+    units TEXT,
+    unit_price TEXT,
+    fees TEXT CHECK ({INVESTMENT_CHECK}),
+    UNIQUE (journal_entry_id, line_number),
+    CHECK (debit = 0 OR credit = 0),
+    CHECK (
+        (status = 'posted' AND journal_entry_id IS NOT NULL AND line_number IS NOT NULL
+            AND line_number >= 1 AND (debit > 0 OR credit > 0))
+        OR (status != 'posted' AND journal_entry_id IS NULL AND line_number IS NULL
+            AND transaction_id IS NOT NULL)
+    )
+) STRICT;
+"""
+
+# Guidance assessment constraints
+GUIDANCE_CHECK = """
+    (guidance_status IS NULL AND guidance_result IS NULL AND guidance_disposition IS NULL
+        AND guidance_model IS NULL AND guidance_skill_version IS NULL AND guidance_error IS NULL
+        AND guidance_created_at IS NULL AND guidance_updated_at IS NULL)
+    OR (kind = 'case' AND guidance_status IS NOT NULL
+        AND guidance_status IN ('requesting', 'completed', 'failed')
+        AND guidance_model IS NOT NULL AND length(trim(guidance_model)) > 0
+        AND guidance_skill_version IS NOT NULL AND length(trim(guidance_skill_version)) > 0
+        AND guidance_created_at IS NOT NULL AND guidance_updated_at IS NOT NULL
+        AND ((guidance_result IS NULL AND guidance_disposition IS NULL)
+            OR (guidance_result IS NOT NULL AND guidance_disposition IS NOT NULL))
+        AND (
+            (guidance_status = 'requesting' AND guidance_result IS NULL AND guidance_error IS NULL)
+            OR (guidance_status = 'completed' AND guidance_result IS NOT NULL AND guidance_error IS NULL)
+            OR (guidance_status = 'failed' AND guidance_error IS NOT NULL
+                AND length(trim(guidance_error)) > 0)
+        ))
+"""
+
+# Private review history and reusable instructions
+REVIEW_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS review_actions (
+    id TEXT PRIMARY KEY NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('export', 'answer', 'case', 'categorisation')),
+    transaction_id TEXT REFERENCES transactions(transaction_id),
+    revision TEXT,
+    request_key TEXT UNIQUE,
+    status TEXT NOT NULL CHECK (
+        status IN ('exported', 'submitted', 'requesting', 'applied', 'needs_review', 'failed', 'superseded')
+    ),
+    payload TEXT NOT NULL,
+    outcome TEXT,
+    before_snapshot TEXT,
+    after_snapshot TEXT,
+    model TEXT,
+    skill_version TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    guidance_status TEXT,
+    guidance_result TEXT,
+    guidance_disposition TEXT,
+    guidance_model TEXT,
+    guidance_skill_version TEXT,
+    guidance_error TEXT,
+    guidance_created_at TEXT,
+    guidance_updated_at TEXT CHECK ({GUIDANCE_CHECK}),
+    CHECK (
+        (kind = 'export' AND transaction_id IS NOT NULL AND status = 'exported')
+        OR (kind = 'answer' AND transaction_id IS NOT NULL AND revision IS NOT NULL AND status = 'submitted')
+        OR (kind = 'categorisation' AND transaction_id IS NOT NULL AND revision IS NULL
+            AND request_key IS NULL
+            AND status IN ('requesting', 'applied', 'needs_review', 'failed') AND skill_version IS NOT NULL)
+        OR (kind = 'case' AND transaction_id IS NULL AND revision IS NOT NULL AND request_key IS NOT NULL
+            AND status IN ('requesting', 'applied', 'needs_review', 'failed', 'superseded')
+            AND model IS NOT NULL AND skill_version IS NOT NULL AND before_snapshot IS NOT NULL)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS review_categorisation_source
+    ON review_actions(transaction_id) WHERE kind = 'categorisation';
+
+CREATE TABLE IF NOT EXISTS categorisation_guidance (
+    id TEXT PRIMARY KEY NOT NULL,
+    scope TEXT NOT NULL CHECK (length(trim(scope)) > 0),
+    instruction TEXT NOT NULL CHECK (length(trim(instruction)) > 0),
+    account_ids TEXT NOT NULL,
+    supersedes TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    review_action_id TEXT NOT NULL REFERENCES review_actions(id),
+    superseded_by TEXT REFERENCES categorisation_guidance(id),
+    retired_by_action_id TEXT REFERENCES review_actions(id),
+    created_at TEXT NOT NULL,
+    CHECK (
+        (active = 1 AND superseded_by IS NULL AND retired_by_action_id IS NULL)
+        OR (active = 0 AND retired_by_action_id IS NOT NULL)
+    )
+) STRICT;
+"""
+
+# Manual instructions and their complete revision history
+MANUAL_COLUMNS = (
+    "id", "manual_id", "submission", "status", "case_payload", "revision", "question", "outcome",
+    "journal_entry_id", "before_snapshot", "after_snapshot", "model", "skill_version", "error",
+    "created_at", "updated_at", "investment_proposal",
+)
+MANUAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS manual_entries (
+    id TEXT PRIMARY KEY NOT NULL,
+    manual_id TEXT NOT NULL,
+    submission TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'pending', 'requesting', 'applied', 'needs_review', 'unsupported', 'failed',
+            'superseded', 'withdrawn'
+        )
+    ),
+    case_payload TEXT,
+    revision TEXT,
+    question TEXT,
+    outcome TEXT,
+    journal_entry_id TEXT,
+    before_snapshot TEXT,
+    after_snapshot TEXT,
+    model TEXT,
+    skill_version TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    investment_proposal TEXT,
+    CHECK (status != 'requesting' OR (
+        case_payload IS NOT NULL AND revision IS NOT NULL AND before_snapshot IS NOT NULL
+        AND model IS NOT NULL AND skill_version IS NOT NULL
+    )),
+    CHECK (status != 'applied' OR (outcome IS NOT NULL AND journal_entry_id IS NOT NULL)),
+    CHECK (status != 'failed' OR (error IS NOT NULL AND length(trim(error)) > 0))
+) STRICT;
+CREATE INDEX IF NOT EXISTS manual_entries_manual_id ON manual_entries(manual_id);
 """
 
 
 def open_database(path: Path | str = DEFAULT_DATABASE) -> sqlite3.Connection:
     """
-    Open SQLite and create missing tables.
+    Open a current SQLite database or create its missing tables.
 
     Args:
-        path: Database file, or ":memory:" for an in-memory check.
+        path: Database file, or ":memory:" for a synthetic check.
 
     Returns:
-        An open connection. The caller must close it, for example with contextlib.closing.
+        An open connection, which the caller must close.
 
     Raises:
+        ValueError: Existing table columns are incompatible or evidence references are broken.
         OSError: The database directory cannot be created.
-        ValueError: An existing transactions table uses an incompatible schema.
-        sqlite3.Error: The database cannot be opened or its schema cannot be initialised.
+        sqlite3.Error: Opening or initialising the database fails.
     """
-    # Database connection
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     try:
-        # Schema validation
-        columns = {row[1]: row[2] for row in connection.execute("PRAGMA table_info(transactions)")}
-        if columns and (
-            set(columns) != set(Transaction.model_fields)
-            or columns.get("amount") != "REAL"
-            or columns.get("statement_balance") != "REAL"
-        ):
-            raise ValueError("Database schema has changed; migrate it or rebuild from the original PDFs")
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.executescript(SCHEMA)
-    except (ValueError, sqlite3.Error):
+        _check_schema(connection)
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _create_tables(connection)
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise ValueError("The database contains broken evidence references")
+    except Exception:
         connection.close()
         raise
     return connection
 
 
-# %% 2. Transaction Storage ----------------------------------------------------------------------------------
-def is_imported(connection: sqlite3.Connection, source_hash: str) -> bool:
+# %% 2. Helpers ----------------------------------------------------------------------------------------------
+def _create_tables(connection: sqlite3.Connection) -> None:
     """
-    Return whether this exact PDF content has already been imported successfully.
+    Create current tables inside the caller's transaction without an implicit commit.
     """
-    return connection.execute(
-        "SELECT 1 FROM imports WHERE source_hash = ?", (source_hash,)
-    ).fetchone() is not None
+    for statement in (SCHEMA + REVIEW_SCHEMA + MANUAL_SCHEMA + PRICE_SCHEMA).split(";"):
+        if statement.strip():
+            connection.execute(statement)
 
 
-def save_import(
-    connection: sqlite3.Connection,
-    source_file: Path | str,
-    source_hash: str,
-    transactions: list[Transaction],
-) -> int:
+def _check_schema(connection: sqlite3.Connection) -> None:
     """
-    Save one PDF's additional transactions and import history together, or roll back on failure.
-
-    Args:
-        connection: Open database connection without a pending write transaction.
-        source_file: Original PDF path. Only its filename stem is stored.
-        source_hash: SHA-256 hash of the same PDF bytes that were parsed.
-        transactions: Complete validated transaction list, including an empty list for an empty statement.
-
-    Returns:
-        Number of additional transactions inserted. Existing records and their UUIDs are never overwritten.
-
-    Raises:
-        ValueError: Source data is inconsistent, a write is pending, or money cannot round-trip safely.
-        sqlite3.Error: The save fails. Neither partial transactions nor completed import history is retained.
+    Compare existing columns with a fresh in-memory schema without changing the selected database.
     """
-    # Input validation
-    source_name = Path(source_file).stem
-    if not source_name.strip():
-        raise ValueError("Expected a nonblank source filename stem")
-    if not re.fullmatch(r"[0-9a-f]{64}", source_hash):
-        raise ValueError("Expected a SHA-256 PDF content hash")
-    if any(item.source_file != source_name for item in transactions):
-        raise ValueError("All transactions must belong to the supplied PDF filename")
-    if len({item.account_id for item in transactions}) > 1:
-        raise ValueError("All transactions in a PDF must belong to the same source account")
-    if connection.in_transaction:
-        raise ValueError("Finish the pending database write before saving an import")
-
-    # Atomic import
-    # The lock covers reading existing counts and inserting rows, so simultaneous imports cannot both add
-    # the same additional occurrences. Both tables commit together.
-    with connection:
-        connection.execute("BEGIN IMMEDIATE")
-        if is_imported(connection, source_hash):
-            return 0
-
-        # Existing transactions
-        existing_counts = Counter()
-        if transactions:
-            existing_counts.update(
-                _matching_key(saved)
-                for saved in _read_transactions(connection, transactions[0].account_id)
-            )
-        # Import history
-        connection.execute(
-            """
-            INSERT INTO imports (source_hash, source_file, imported_at, parsed_count, inserted_count)
-            VALUES (?, ?, ?, ?, 0)
-            """,
-            (source_hash, source_name, datetime.now(UTC).isoformat(), len(transactions)),
-        )
-
-        # Additional transactions
-        incoming_counts = Counter()
-        inserted = 0
-        for item in transactions:
-            key = _matching_key(item)
-            incoming_counts[key] += 1
-            # Match the first N identical rows already saved. A larger count in this PDF adds only the
-            # surplus, preserving legitimate repeated transactions without saved matching metadata.
-            if incoming_counts[key] <= existing_counts[key]:
-                continue
-            connection.execute(
-                """
-                INSERT INTO transactions (
-                    id, account_id, date, effective_date, description, amount, statement_balance, source_file
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(item.id),
-                    str(item.account_id),
-                    item.date.isoformat(),
-                    item.effective_date.isoformat() if item.effective_date is not None else None,
-                    item.description,
-                    _dollars(item.amount),
-                    _dollars(item.statement_balance),
-                    item.source_file,
-                ),
-            )
-            inserted += 1
-        # Import summary
-        connection.execute(
-            "UPDATE imports SET inserted_count = ? WHERE source_hash = ?", (inserted, source_hash)
-        )
-    return inserted
-
-
-def load_transactions(connection: sqlite3.Connection) -> list[Transaction]:
-    """
-    Reconstruct saved statement lines as validated Transaction objects in a stable order.
-
-    Args:
-        connection: Open database connection using the current schema.
-
-    Returns:
-        Transactions ordered by date, source filename stem, and UUID. Dollars have two decimal places.
-
-    Raises:
-        ValueError: Stored money is non-finite or contains fractional cents.
-        ValidationError: Stored data fails Transaction validation.
-        sqlite3.Error: The records cannot be read.
-    """
-    return _read_transactions(connection)
-
-
-# %% 3. Helpers ----------------------------------------------------------------------------------------------
-def _dollars(amount: Decimal | None) -> float | None:
-    """
-    Convert money to numeric SQLite dollars, rejecting fractional cents and lost cent values.
-
-    REAL uses floating point. Compare its shortest decimal representation with the original amount before
-    saving; this prevents accepting a value whose cents would change when reconstructed in Python.
-    """
-    if amount is None:
-        return None
-    if not amount.is_finite():
-        raise ValueError("Money must be finite")
-    numerator, denominator = amount.as_integer_ratio()
-    if numerator * 100 % denominator:
-        raise ValueError("Money must not contain fractional cents")
-    value = float(amount)
-    if not math.isfinite(value) or Decimal(str(value)) != amount:
-        raise ValueError("Money cannot round-trip through SQLite REAL without changing its cent value")
-    return value
-
-
-def _decimal_amount(value: float | None) -> Decimal | None:
-    """
-    Restore numeric dollars to a two-decimal Decimal, retaining None for a missing statement balance.
-    """
-    if value is None:
-        return None
-    amount = Decimal(str(value))
-    if not amount.is_finite():
-        raise ValueError("Stored money must be finite")
-    formatted = Decimal(format(amount, ".2f"))
-    if formatted != amount:
-        raise ValueError("Stored money must not contain fractional cents")
-    return formatted
-
-
-def _matching_key(transaction: Transaction) -> tuple:
-    """
-    Group matching statement facts independently of transaction UUIDs and filenames.
-
-    Dollar values are Decimals in both imported and loaded records. Normalise description whitespace for
-    comparison only; keep the original wording in the transaction itself.
-    """
-    return (
-        transaction.account_id,
-        transaction.date,
-        transaction.effective_date,
-        transaction.amount,
-        " ".join(transaction.description.split()),
-        transaction.statement_balance,
-    )
-
-
-def _read_transactions(
-    connection: sqlite3.Connection, account_id: UUID | None = None
-) -> list[Transaction]:
-    """
-    Read validated transactions, optionally selecting one source account for repeat-import comparisons.
-    """
-    # Saved rows
-    query = """
-        SELECT id, account_id, date, effective_date, description, amount, statement_balance, source_file
-        FROM transactions
-    """
-    parameters = ()
-    if account_id is not None:
-        query += " WHERE account_id = ?"
-        parameters = (str(account_id),)
-    query += " ORDER BY date, source_file, id"
-    cursor = connection.execute(query, parameters)
-    # Transaction objects
-    columns = [column[0] for column in cursor.description]
-    transactions = []
-    for row in cursor:
-        fields = dict(zip(columns, row))
-        fields["amount"] = _decimal_amount(fields["amount"])
-        fields["statement_balance"] = _decimal_amount(fields["statement_balance"])
-        transactions.append(Transaction(**fields))
-    return transactions
+    with closing(sqlite3.connect(":memory:")) as expected:
+        _create_tables(expected)
+        tables = expected.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        for (table,) in tables:
+            current = {(row[1], row[2]) for row in connection.execute(f'PRAGMA table_info("{table}")')}
+            required = {(row[1], row[2]) for row in expected.execute(f'PRAGMA table_info("{table}")')}
+            if current and current != required:
+                raise ValueError(
+                    f"The {table} table uses an outdated or incompatible layout. "
+                    "Recreate the development database or select a fresh path with --database; "
+                    "automatic upgrades are not supported."
+                )

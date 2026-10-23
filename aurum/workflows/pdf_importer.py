@@ -1,6 +1,6 @@
 # -------------------------------------------------------------------------------------------------------------------- #
 #                                                        Aurum                                                         #
-#                                               Importers - PDF Importer                                               #
+#                                               Workflows - PDF Importer                                               #
 # -------------------------------------------------------------------------------------------------------------------- #
 """
 This file turns ANZ Plus PDF statements into the Transaction objects Aurum can save and use.
