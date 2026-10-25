@@ -49,6 +49,7 @@ from aurum.database.journal import posted_transaction_ids, prepare_journal, save
 from aurum.database.transactions import load_transactions
 from aurum.database.manual import load_manual_entries, manual_claims
 from aurum.finance.accounts import DEFAULT_ACCOUNTS, Account, AccountRegistry, AccountType, load_accounts
+from aurum.finance.budget import DEFAULT_BUDGET_SETTINGS, BudgetSettings, load_budget_settings
 from aurum.finance.journal import JournalEntry, JournalLine
 from aurum.finance.manual import ManualOutcome
 from aurum.finance.securities import DEFAULT_SECURITIES, SecurityRegistry, load_securities
@@ -76,6 +77,7 @@ def process_journal(
     reviews: Path | None = None,
     manuals: Path | None = None,
     securities: SecurityRegistry | None = None,
+    budget: BudgetSettings | None = None,
     quote_fetcher: Callable | None = None,
     client_factory: Callable[[], AbstractContextManager[ChatGPTConnection]] = connect,
     progress: Callable[[str], None] | None = None,
@@ -91,6 +93,7 @@ def process_journal(
         reviews: Monthly CSV directory; None leaves CSV exchange disabled for library calls.
         manuals: Manual instruction CSV directory; None leaves manual processing disabled for library calls.
         securities: Configured instruments; None leaves investment posting unavailable for library calls.
+        budget: Optional category catalogue for explicit gift and savings labels supplied through review.
         quote_fetcher: Optional synthetic market provider used by isolated checks.
         client_factory: Connection factory, replaceable with a synthetic client for local checks.
         progress: Optional callback for brief stage messages; library calls are quiet by default.
@@ -110,16 +113,19 @@ def process_journal(
         "already_posted": len(posted_transaction_ids(connection)),
         "requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
         "reviews_applied": 0, "review_questions": 0, "review_failed": 0,
-        "manual_posted": 0, "manual_questions": 0, "manual_failed": 0,
+        "manual_posted": 0, "manual_questions": 0, "manual_failed": 0, "savings_applied": 0,
     }
     skill = load_categorisation_skill()
-    session = read_reviews(connection, accounts, reviews, retry_errors=retry_errors) if reviews else None
+    session = (
+        read_reviews(connection, accounts, reviews, retry_errors=retry_errors, budget=budget)
+        if reviews else None
+    )
     manual_session = manual_skill = None
     if manuals:
         manual_skill = load_manual_skill()
         manual_session = read_manuals(
             connection, accounts, manuals, retry_errors=retry_errors, skill_version=manual_skill.version,
-            securities=securities,
+            securities=securities, budget=budget,
         )
     prepare_journal(connection, accounts)
     try:
@@ -141,18 +147,24 @@ def process_journal(
                 process_manuals(
                     connection, accounts, manual_session, get_client, counts, model=model,
                     skill=manual_skill, retry_errors=retry_errors,
-                    securities=securities, quote_fetcher=quote_fetcher, progress=report,
+                    securities=securities, budget=budget, quote_fetcher=quote_fetcher, progress=report,
                 )
             if session is not None:
                 process_reviews(
                     connection, accounts, session, get_client, counts, model=model, skill=skill,
-                    retry_errors=retry_errors, progress=report,
+                    retry_errors=retry_errors, budget=budget, progress=report,
                 )
             _process_transactions(
                 connection, accounts, get_client, counts, model=model, skill=skill,
                 retry_errors=retry_errors, blocked=(session.blocked if session else set())
                 | (manual_session.blocked if manual_session else set()), progress=report,
             )
+            if manual_session is not None and manual_skill is not None:
+                process_manuals(
+                    connection, accounts, manual_session, get_client, counts, model=model,
+                    skill=manual_skill, retry_errors=retry_errors, savings_only=True,
+                    securities=securities, budget=budget, quote_fetcher=quote_fetcher, progress=report,
+                )
     finally:
         if manual_session is not None:
             export_manuals(connection, accounts, manual_session)
@@ -215,6 +227,9 @@ def main() -> int:
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE, help="SQLite database path.")
     parser.add_argument("--accounts", type=Path, default=DEFAULT_ACCOUNTS, help="Private account YAML path.")
     parser.add_argument(
+        "--budget", type=Path, default=DEFAULT_BUDGET_SETTINGS, help="Private budget category YAML path.",
+    )
+    parser.add_argument(
         "--securities", type=Path, default=DEFAULT_SECURITIES, help="Private security YAML path.",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"ChatGPT model; default: {DEFAULT_MODEL}.")
@@ -250,8 +265,12 @@ def main() -> int:
             uri = args.database.resolve().as_uri() + "?mode=ro"
             with closing(sqlite3.connect(uri, uri=True)) as database:
                 return 0 if _show_review(database, accounts) else 1
-        securities = None
+        securities = budget = None
         if not args.learn_guidance:
+            if args.budget.exists():
+                budget = load_budget_settings(args.budget, accounts)
+            elif args.budget != DEFAULT_BUDGET_SETTINGS:
+                raise ValueError("The selected budget configuration does not exist")
             if args.securities.exists():
                 securities = load_securities(args.securities)
             elif args.securities != DEFAULT_SECURITIES:
@@ -287,7 +306,7 @@ def main() -> int:
                     database, accounts, model=args.model, retry_errors=args.retry_errors,
                     reviews=args.reviews or args.database.resolve().parent / "reviews",
                     manuals=args.manuals or args.database.resolve().parent / "manual",
-                    securities=securities, progress=lambda message: print(message, flush=True),
+                    securities=securities, budget=budget, progress=lambda message: print(message, flush=True),
                 )
             except (KeyboardInterrupt, EOFError):
                 print("\nStopped. Saved decisions remain; interrupted requests need --retry-errors.")
@@ -318,7 +337,7 @@ def main() -> int:
             return 1 if incomplete else 0
     except (ValueError, sqlite3.Error, OSError) as error:
         print(f"Could not load Aurum: {_safe_error(error)}", file=sys.stderr)
-        print("Check --accounts, --securities and --database.", file=sys.stderr)
+        print("Check --accounts, --securities, --budget and --database.", file=sys.stderr)
         if args.review:
             print(
                 "--review is read-only. If accounts have no IDs yet, call load_accounts() once to save them.",
@@ -780,6 +799,8 @@ def _print_summary(result: dict[str, int]) -> None:
             f"{result.get('reviews_applied', 0)} human reviews applied."
         )
         requests, tokens = result["requests"], result["total_tokens"]
+        if result.get("savings_applied"):
+            print(f"Savings: {result['savings_applied']} pot allocations applied; journal balances unchanged.")
         usage = f"{tokens} reported tokens" if tokens else "token usage unavailable"
         print(f"AI: {requests} requests; {usage}." if requests else "AI: no requests sent.")
     print(
@@ -813,6 +834,7 @@ def _journal_command(args: argparse.Namespace, *flags: str) -> str:
     parts = ["python", "aurum/scripts/journal.py"]
     defaults = {
         "accounts": DEFAULT_ACCOUNTS, "securities": DEFAULT_SECURITIES, "database": DEFAULT_DATABASE,
+        "budget": DEFAULT_BUDGET_SETTINGS,
         "model": DEFAULT_MODEL, "reviews": None, "manuals": None,
     }
     for name, default in defaults.items():

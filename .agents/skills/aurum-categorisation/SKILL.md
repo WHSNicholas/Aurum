@@ -72,6 +72,26 @@ balanced replacements for the whole case, using whole-cent AUD amounts:
 - Every event must include a supplied source. Do not introduce unrelated manual events or alter unrelated
   posted entries.
 
+## Budget labels in human corrections
+
+Budget categories are reporting labels, separate from ledger accounts. Use only the supplied
+`budget_categories` keys. Ordinary income and expense accounts already have configured report mappings.
+Use the human's confirmed purpose to select a supported exception; they need not name a configuration key.
+Otherwise leave `budget_category` null and preserve labels on unchanged postings.
+
+- When the human identifies a received gift credited to Capital and the catalogue has exactly one compatible
+  gift income category, label that Capital credit with its key. "This was a gift; increase Capital, not income
+  accounts" is sufficient: the ledger account stays Capital while the budget records gift income. Honour an
+  explicit budget exclusion or `default` instead. Do not infer gifts from other Capital movements, opening
+  balances, transfers of existing money or bank wording alone. Clarify an ambiguous category choice.
+- An explicit savings allocation labels the receiving asset debit or debt-principal debit once. Do not label
+  both sides of the transfer. Debt principal and ordinary transfers stay unlabelled unless instructed.
+- A savings withdrawal can label the corresponding asset credit or liability credit as a reversal.
+- Use `exclude` when the human excludes a posting from the budget; use `default` to remove an exception and
+  restore its ordinary configured treatment. Null retains an existing label during a correction; an explicit
+  different key replaces it. If the requested category is absent, ask for it to be
+  configured. Never invent a label or change accounting to make a report category fit.
+
 ## Learning only: `learn_guidance`
 
 The supplied `accepted_entries` are already posted and supported by human answers. Assess reusable guidance

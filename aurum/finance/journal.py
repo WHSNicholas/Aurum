@@ -81,6 +81,7 @@ class JournalLine(BaseModel):
         credit: Positive AUD amount on the credit side, or zero for a debit line.
         transaction_id: Supporting imported transaction UUID, or None for a line without a statement source.
         investment: Optional security movement on an asset line without a bank statement link.
+        budget_category: Optional reporting category key; exclude omits this line from the budget.
 
     Exactly one side must be positive. The account type determines how a debit or credit changes its balance;
     for an asset account, a debit increases the balance and a credit decreases it. Imported transactions
@@ -102,6 +103,9 @@ class JournalLine(BaseModel):
     credit: Decimal = Field(default=Decimal("0"), ge=0, decimal_places=2, allow_inf_nan=False)
     transaction_id: UUID | None = None
     investment: InvestmentDetails | None = None
+    budget_category: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None,
+    )
 
     # Validation
     @field_validator("description")
@@ -112,6 +116,16 @@ class JournalLine(BaseModel):
         """
         if not value.strip():
             raise ValueError("description must not be blank")
+        return value
+
+    @field_validator("budget_category")
+    @classmethod
+    def _check_budget_key(cls, value: str | None) -> str | None:
+        """
+        Keep an optional reporting key distinct from accounting accounts and reject blank labels.
+        """
+        if value is not None and (not value.strip() or value != value.strip()):
+            raise ValueError("budget_category must be a nonblank key without surrounding whitespace")
         return value
 
     @model_validator(mode="after")
@@ -179,3 +193,59 @@ class JournalEntry(BaseModel):
         if debit_cents != credit_cents:
             raise ValueError("journal entry debits and credits must balance exactly")
         return self
+
+
+# %% 2. Budget Labels ----------------------------------------------------------------------------------------
+def preserve_budget_categories(
+    entries: tuple[JournalEntry, ...], previous: tuple[JournalEntry, ...],
+) -> tuple[JournalEntry, ...]:
+    """
+    Keep labels through a correction unless its replacement explicitly chooses a category or default.
+
+    Match source links and event lineage first, then account, posting side and amount. Ambiguous changes
+    require explicit labels rather than dropping, duplicating or combining competing budget choices.
+    """
+    proposed = {}
+    for old_entry in previous:
+        old_sources = {line.transaction_id for line in old_entry.lines if line.transaction_id is not None}
+        related = [
+            (index, entry) for index, entry in enumerate(entries)
+            if entry.id == old_entry.id or old_sources & {
+                line.transaction_id for line in entry.lines if line.transaction_id is not None
+            }
+        ]
+        for old in old_entry.lines:
+            if old.budget_category is None:
+                continue
+            candidates = [
+                (index, number, line) for index, entry in related
+                for number, line in enumerate(entry.lines)
+                if line.transaction_id == old.transaction_id and (line.debit > 0) == (old.debit > 0)
+            ]
+            same_account = [item for item in candidates if item[2].account_id == old.account_id]
+            if same_account:
+                candidates = same_account
+            same_amount = [
+                item for item in candidates if (item[2].debit, item[2].credit) == (old.debit, old.credit)
+            ]
+            if len(same_amount) == 1:
+                candidates = same_amount
+            if candidates and all(line.budget_category is not None for _, _, line in candidates):
+                continue
+            if len(candidates) != 1:
+                raise ValueError("Assign budget categories explicitly when splitting labelled postings")
+            index, number, line = candidates[0]
+            # Explicit choices win. Inherited choices must agree when old postings are merged.
+            if line.budget_category is None:
+                proposed.setdefault((index, number), set()).add(old.budget_category)
+    results = []
+    for index, entry in enumerate(entries):
+        lines = []
+        for number, line in enumerate(entry.lines):
+            labels = proposed.get((index, number), set())
+            if len(labels) > 1:
+                raise ValueError("Merged postings have different budget labels; choose one explicitly")
+            category = next(iter(labels)) if labels else line.budget_category
+            lines.append(JournalLine.model_validate({**line.model_dump(), "budget_category": category}))
+        results.append(JournalEntry(id=entry.id, date=entry.date, lines=tuple(lines)))
+    return tuple(results)

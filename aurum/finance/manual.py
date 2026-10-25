@@ -7,7 +7,8 @@ Aurum carries written manual-entry instructions through the same validated journ
 
 A submission keeps the user's accounting date, explanation and optional statement references together.
 Its case adds relevant bank evidence and existing events without changing those facts. An outcome either
-supplies one complete balanced entry or explains what still prevents posting. Database reservations, CSV
+supplies one complete balanced entry, a budget-only monthly savings split, or explains what still prevents it.
+Savings splits have no journal lines and cannot claim bank sources. Database reservations, CSV
 editing and AI calls remain separate from these immutable models.
 """
 
@@ -24,6 +25,7 @@ from aurum.finance.dates import parse_input_date
 from aurum.finance.journal import JournalEntry
 from aurum.finance.investments import InvestmentCalculation, InvestmentInstruction
 from aurum.finance.transaction import Transaction
+from aurum.finance.savings import SavingsAllocation, SavingsContext
 
 
 # %% 1. Manual Instructions ----------------------------------------------------------------------------------
@@ -81,6 +83,7 @@ class ManualCase(BaseModel):
     candidates are available for selection, but choosing a source from an existing event requires preserving
     that event's complete source group. The catalogue version identifies the configuration used for an
     interpretation, so changed instruments can release an earlier investment question once.
+    The separate budget revision prevents a saved proposal from silently adopting different report labels.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
@@ -92,12 +95,20 @@ class ManualCase(BaseModel):
     entries: tuple[JournalEntry, ...] = ()
     question: str | None = None
     catalogue_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    savings_context: SavingsContext | None = Field(default=None, exclude_if=lambda value: value is None)
+    budget_revision: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def _check_context(self) -> Self:
         """
         Require complete, distinct evidence and keep all required references inside the case.
         """
+        if self.savings_context is not None and (
+            self.transactions or self.required_sources or self.entries
+        ):
+            raise ValueError("Virtual savings cannot claim bank sources or change journal entries")
         source_ids = {row.transaction_id for row in self.transactions}
         if len(source_ids) != len(self.transactions):
             raise ValueError("A manual case cannot contain duplicate transactions.")
@@ -125,16 +136,21 @@ class ManualOutcome(BaseModel):
     Model and skill metadata record the instructions used to interpret this submission. A pricing result
     retains a validated investment instruction while Python retrieves its quote; it cannot be posted yet.
     Completed investments retain both that instruction and their calculation outside the journal table.
+    An optional investment budget label follows the saved interpretation onto the receiving holding line.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
     manual_id: UUID
     status: Literal["apply", "needs_review", "unsupported", "pricing"]
-    event_kind: Literal["general", "opening", "investment"] = "general"
+    event_kind: Literal["general", "opening", "investment", "savings"] = "general"
     entry: JournalEntry | None = None
+    savings: SavingsAllocation | None = Field(default=None, exclude_if=lambda value: value is None)
     investment: InvestmentInstruction | None = None
     pricing: InvestmentCalculation | None = None
+    investment_budget_category: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None,
+    )
     reason: str = Field(min_length=1)
     question: str | None = Field(default=None, min_length=1)
     model: str = Field(min_length=1)
@@ -159,10 +175,20 @@ class ManualOutcome(BaseModel):
         if self.updated_at.tzinfo is None or self.updated_at.utcoffset() is None:
             raise ValueError("Manual result timestamps must include a timezone.")
         if self.status == "apply":
-            if self.entry is None or self.question is not None:
+            if self.event_kind == "savings":
+                if self.savings is None or self.entry is not None or self.question is not None:
+                    raise ValueError("Applied savings needs an allocation without a journal or question")
+            elif self.entry is None or self.question is not None:
                 raise ValueError("An applied manual result needs an entry and no question.")
         elif self.entry is not None:
             raise ValueError("An unresolved manual result cannot contain postings.")
+        if self.savings is not None and (self.event_kind != "savings" or self.status != "apply"):
+            raise ValueError("Only an applied savings result can contain an allocation")
+        if self.event_kind == "savings" and (
+            self.investment is not None or self.pricing is not None
+            or self.investment_budget_category is not None or self.entry is not None
+        ):
+            raise ValueError("Savings allocations cannot contain investment facts or accounting postings")
         if self.status == "needs_review" and self.question is None:
             raise ValueError("An unresolved manual result needs a question.")
         if self.status == "unsupported" and self.question is not None:

@@ -31,6 +31,8 @@ from aurum.database.journal import (
 )
 from aurum.database.transactions import from_sqlite_dollars, load_transactions
 from aurum.finance.accounts import AccountRegistry
+from aurum.finance.budget import BudgetSettings, budget_revision, validate_budget_labels
+from aurum.finance.journal import preserve_budget_categories
 from aurum.finance.review import Guidance, GuidanceResult, ReviewAnswer, ReviewCase, ReviewOutcome
 
 
@@ -144,6 +146,7 @@ def load_review_cases(connection: sqlite3.Connection) -> list[dict]:
 def reserve_review_case(
     connection: sqlite3.Connection, case: ReviewCase, accounts: AccountRegistry,
     *, model: str, skill_version: str, retry_errors: bool = False,
+    budget: BudgetSettings | None = None,
 ) -> bool:
     """
     Commit a current review request before inference, skipping unchanged completed or interrupted requests.
@@ -158,6 +161,8 @@ def reserve_review_case(
         raise ValueError("Edit investment corrections in their original manual CSV row.")
     if not model.strip() or not skill_version.strip():
         raise ValueError("A review request needs a model and skill version")
+    if case.budget_revision != budget_revision(budget):
+        raise ValueError("Budget categories changed; refresh this request before retrying")
     key = _request_key(case)
     with connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -235,6 +240,7 @@ def fail_review_case(connection: sqlite3.Connection, case: ReviewCase, reason: s
 
 def save_review_outcome(
     connection: sqlite3.Connection, case: ReviewCase, outcome: ReviewOutcome, accounts: AccountRegistry,
+    *, budget: BudgetSettings | None = None,
 ) -> None:
     """
     Save a review result, replacing complete affected events and activating guidance in one atomic commit.
@@ -246,6 +252,12 @@ def save_review_outcome(
     _require_idle(connection)
     case = ReviewCase.model_validate(case.model_dump())
     outcome = ReviewOutcome.model_validate(outcome.model_dump())
+    if case.budget_revision != budget_revision(budget):
+        raise ValueError("Budget categories changed after this review was prepared")
+    if outcome.status == "apply":
+        entries = preserve_budget_categories(outcome.entries, case.entries)
+        validate_budget_labels(entries, accounts, budget, case.entries)
+        outcome = ReviewOutcome.model_validate({**outcome.model_dump(), "entries": entries})
     if outcome.case_id != case.id:
         raise ValueError("The review outcome belongs to a different request")
     with connection:
@@ -811,6 +823,7 @@ def _request_key(case: ReviewCase) -> str:
     """
     return _digest({
         "revision": case.revision,
+        **({"budget_revision": case.budget_revision} if case.budget_revision is not None else {}),
         "sources": sorted(str(item.transaction_id) for item in case.transactions),
         "answers": [
             answer.model_dump(mode="json")

@@ -53,12 +53,16 @@ class ReviewCase(BaseModel):
 
     Transactions include every source linked to an affected event, even when only one source row has an
     answer. The revision describes this complete group's accounting state before any correction.
+    An optional budget revision records the category catalogue supplied to this specific review request.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
     id: UUID = Field(default_factory=uuid4)
     revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    budget_revision: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None,
+    )
     transactions: tuple[Transaction, ...] = Field(min_length=1)
     entries: tuple[JournalEntry, ...] = ()
     answers: tuple[ReviewAnswer, ...] = Field(min_length=1)
