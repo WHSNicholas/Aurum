@@ -1,0 +1,271 @@
+/* All visible colours come from reports.yaml through the renderer's --report-* variables. */
+@font-face {
+    font-family: Geist;
+    src: url("assets/Geist.ttf");
+    font-weight: 100 900;
+}
+@font-face {
+    font-family: "Geist Mono";
+    src: url("assets/GeistMono.ttf");
+    font-weight: 100 900;
+}
+@font-face {
+    font-family: Cormorant;
+    src: url("assets/Cormorant.ttf");
+    font-weight: 300 700;
+}
+@page {
+    size: A4;
+    margin: 10mm 10mm 16mm;
+    background: var(--report-page);
+    @bottom-center {
+        content: element(report-footer);
+        width: 100%;
+    }
+}
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    color: var(--report-text);
+    background: var(--report-page);
+    font: 10pt/1.4 Geist, sans-serif;
+}
+.report-page + .report-page { break-before: page; }
+.header {
+    padding: 28px 0 16px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+h1 {
+    margin: 0;
+    color: var(--report-heading-text);
+    font: 600 40px/1.4 Cormorant, serif;
+    text-transform: uppercase;
+    letter-spacing: 4px;
+}
+.subtitle, .author {
+    margin: 4px 0 0;
+    color: var(--report-muted);
+    font-size: 10px;
+}
+.subtitle, .author { font-weight: 500; }
+.subtitle sup { font-size: 70%; line-height: 0; vertical-align: super; }
+.header-divider { width: 90%; margin: 20px auto 0; border: 0; border-top: 1px solid var(--report-divider); }
+.summary-grid {
+    display: flex;
+    gap: 10px;
+    margin: 28px 0 32px;
+    break-inside: avoid;
+}
+.summary-card {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid transparent;
+    border-radius: 14px;
+    padding: 12px 14px;
+    text-align: center;
+    background: var(--report-surface);
+}
+.summary-card.highlight {
+    color: var(--report-on-highlight);
+    background: var(--report-highlight);
+}
+.summary-icon { width: 28px; height: 28px; margin-bottom: 6px; object-fit: contain; }
+.summary-label {
+    margin-bottom: 4px;
+    color: var(--report-muted);
+    font-size: 9px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+}
+.summary-value { font: 500 18px/1.4 "Geist Mono", monospace; white-space: nowrap; }
+.summary-value.compact { font-size: 14px; }
+.summary-subtext { margin-top: 4px; color: var(--report-muted); font-size: 9px; font-weight: 500; }
+.highlight .summary-label, .highlight .summary-subtext { color: var(--report-highlight-text); }
+.two-column { display: flex; gap: 16px; align-items: stretch; }
+.column { width: calc(50% - 8px); flex-shrink: 0; display: flex; flex-direction: column; }
+.section { margin-bottom: 16px; break-inside: avoid; display: flex; flex-direction: column; }
+/* Preserve natural content height before stretching paired panels to the same bottom edge. */
+.column > .section:last-child { flex: 1 0 auto; margin-bottom: 0; }
+.section-title, .chart-title {
+    margin: 0;
+    border-radius: 12px 12px 0 0;
+    padding: 8px 12px;
+    color: var(--report-on-primary);
+    background: var(--report-primary);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    flex-shrink: 0;
+}
+.section-content {
+    padding: 8px;
+    border: 1px solid transparent;
+    border-top: none;
+    border-radius: 0 0 12px 12px;
+    background: var(--report-surface);
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+table { width: 100%; border-spacing: 0; table-layout: fixed; font-size: 9px; flex-shrink: 0; }
+table, th, td { border: 0; }
+thead tr { background: var(--report-table-header); border-radius: 8px; }
+th {
+    color: var(--report-on-table-header);
+    background: transparent;
+    font-size: 8px;
+    font-weight: 600;
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+}
+th:first-child { width: 61%; border-radius: 8px 0 0 8px; }
+th:last-child { text-align: right; border-radius: 0 8px 8px 0; }
+td { height: 32px; padding: 4px 8px; font-weight: 400; vertical-align: middle; }
+.section-content tbody tr:not(:last-child) td {
+    border-bottom: 1px solid transparent;
+}
+/* Solid SVG lines avoid Preview's gradient fills; keep both edges of group highlights clear. */
+.section-content tbody tr:not(:last-child):not(.group):not(:has(+ tr.group)) td {
+    background-image: url("aurum-divider:middle");
+    background-size: 100% 1px;
+    background-position: left bottom;
+    background-repeat: no-repeat;
+    background-origin: border-box;
+}
+.section-content tbody tr:not(:last-child):not(.group):not(:has(+ tr.group)) td:first-child {
+    background-image: url("aurum-divider:left");
+}
+.section-content tbody tr:not(:last-child):not(.group):not(:has(+ tr.group)) td:last-child {
+    background-image: url("aurum-divider:right");
+}
+td:first-child { overflow-wrap: anywhere; }
+td:last-child { text-align: right; font: 400 9px/1.4 "Geist Mono", monospace; white-space: nowrap; }
+/* Match the header pill dimensions while retaining the group rows' existing text size. */
+th, .section-content tbody tr.group td {
+    height: auto;
+    padding: 6px 10px;
+    line-height: 11.2px;
+    border-bottom: 0;
+}
+.group { background: var(--report-group); border-radius: 8px; }
+.group td { color: var(--report-group-text); font-weight: 400; }
+.group td:first-child { border-radius: 8px 0 0 8px; }
+.group td:last-child { border-radius: 0 8px 8px 0; }
+.indent td:first-child { padding-left: 22px; }
+.section-total {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+    padding: 6px 10px;
+    color: var(--report-on-table-header);
+    border: none;
+    background: var(--report-table-header);
+    border-radius: 8px;
+    font-size: 8px;
+    line-height: 1.4;
+    font-weight: 600;
+    letter-spacing: .5px;
+}
+.section-total span:first-child { text-transform: uppercase; }
+.section-total span:last-child { font: 500 8px/1.4 "Geist Mono", monospace; white-space: nowrap; }
+.negative { color: var(--report-negative); }
+.positive { color: var(--report-positive); }
+.balance-sheet .negative { color: inherit; }
+.empty { color: var(--report-muted); font-style: italic; }
+.chart { width: 55%; margin: 0 auto 18px; break-inside: avoid; }
+.chart-title { border-radius: 8px; margin-bottom: 6px; }
+.chart svg { display: block; width: 100%; }
+.draft {
+    margin: 0 0 16px;
+    padding: 10px 12px;
+    border: 1px solid var(--report-draft-border);
+    border-radius: 8px;
+    color: var(--report-draft-text);
+    background: var(--report-draft-bg);
+    font-size: 9px;
+}
+.draft strong { text-transform: uppercase; letter-spacing: .5px; }
+footer {
+    position: running(report-footer);
+    color: var(--report-muted);
+    font-size: 8px;
+    text-align: center;
+}
+footer::before {
+    content: "";
+    display: block;
+    width: 80%;
+    margin: 0 auto 8px;
+    border-top: 1px solid var(--report-divider);
+}
+
+/* Additional columns retain the same panels, subtle row dividers and natural font proportions. */
+.budget-table th:first-child, .investment-table th:first-child { width: auto; }
+.investment-table th {
+    padding: 6px 10px;
+    font-size: 8px;
+    letter-spacing: .5px;
+}
+.investment-table { table-layout: auto; }
+.investment-table th:not(:first-child) { text-align: right; }
+.investment-table td.numeric {
+    text-align: right;
+    white-space: nowrap;
+    font: 400 9px/1.4 "Geist Mono", monospace;
+}
+/* Put spare height between stacked panels instead of stretching their tables. */
+.budget-report .column:first-child,
+.balance-sheet .column:last-child { justify-content: space-between; }
+.budget-report .column:first-child > .section,
+.balance-sheet .column:last-child > .section { flex: 0 0 auto; }
+.budget-report .column:first-child .section-content,
+.balance-sheet .column:last-child .section-content { flex: 0 0 auto; }
+.budget-table th { padding: 6px 10px; font-size: 8px; letter-spacing: .5px; }
+.budget-table td { height: 32px; padding: 4px 8px; font-size: 9px; }
+.budget-table td.numeric { font: 400 9px/1.4 Geist, sans-serif; white-space: nowrap; }
+.budget-table th:not(:first-child), .budget-table td.numeric { text-align: right; }
+.budget-table th:nth-child(4), .budget-table td:nth-child(4) { text-align: center; padding-left: 16px; }
+.budget-table td:last-child { font-family: "Geist Mono", monospace; }
+.budget-table td.budget-remaining { color: var(--report-remaining); }
+.budget-income .budget-table td.budget-remaining-negative { color: var(--report-budget-income); }
+.budget-expenses .budget-table td.budget-remaining-negative { color: var(--report-budget-expenses); }
+.budget-savings .budget-table td.budget-remaining-negative { color: var(--report-budget-savings); }
+.budget-table td:nth-child(2), .budget-table td:nth-child(3), .budget-table td:last-child {
+    font-variant-numeric: tabular-nums;
+}
+.progress-track {
+    display: inline-block;
+    width: 50px;
+    height: 12px;
+    border-radius: 6px;
+    position: relative;
+    overflow: hidden;
+    vertical-align: middle;
+    background: var(--report-income-track);
+}
+.progress-fill {
+    height: 100%;
+    border-radius: 6px;
+    position: absolute;
+    left: 0;
+    top: 0;
+    background: var(--report-income-fill);
+}
+.budget-expenses .progress-track { background: var(--report-expenses-track); }
+.budget-expenses .progress-fill { background: var(--report-expenses-fill); }
+.budget-savings .progress-track { background: var(--report-savings-track); }
+.budget-savings .progress-fill { background: var(--report-savings-fill); }
+.investment-table td { height: auto; padding: 6px 10px; font-size: 9px; }
+.holding-detail { display: block; color: var(--report-muted); font: 400 6.5px/1.4 Geist, sans-serif; }
+.investment-table .portfolio-total { color: var(--report-on-table-header); background: var(--report-table-header); }
+.investment-table .portfolio-total td:first-child { text-transform: uppercase; font-size: 9px; }
+.investment-table .portfolio-total td:first-child { border-radius: 8px 0 0 8px; }
+.investment-table .portfolio-total td:last-child { border-radius: 0 8px 8px 0; }
+.investment-report .allocation-chart { width: 50%; margin: 10px auto; }

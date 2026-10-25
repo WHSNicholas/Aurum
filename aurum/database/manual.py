@@ -11,6 +11,7 @@ identities connect later CSV corrections to their original events, including eve
 
 Candidate statement rows are protected while an instruction needs attention. Bank reviews cannot replace
 manual-owned events, and manual corrections retire review guidance whose accounting evidence they supersede.
+Virtual savings splits reuse this review history but save only in savings_allocations, without postings.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -29,10 +30,13 @@ from aurum.database.journal import (
 from aurum.database.reviews import _context, _digest, _json, _now, _require_idle, load_review_cases
 from aurum.database.transactions import load_transactions
 from aurum.finance.accounts import AccountRegistry, AccountType
+from aurum.finance.budget import BudgetSettings, budget_revision, validate_budget_labels
+from aurum.finance.journal import preserve_budget_categories
 from aurum.finance.investments import calculate_investment
 from aurum.finance.securities import SecurityRegistry
 from aurum.database.prices import load_quote
 from aurum.finance.manual import ManualCase, ManualInput, ManualOutcome
+from aurum.database.savings import load_savings_allocations, savings_context, save_savings_allocation
 
 
 # %% 1. Manual Submissions -----------------------------------------------------------------------------------
@@ -57,6 +61,12 @@ def load_manual_entries(connection: sqlite3.Connection) -> list[dict]:
         )
         record["journal_entry_id"] = UUID(record["journal_entry_id"]) if record["journal_entry_id"] else None
         record["context_revision"] = record["submission"].context_revision
+        previous = latest.get(record["manual_id"], {})
+        record["is_savings"] = (
+            previous.get("is_savings", False)
+            or record["case"] is not None and record["case"].savings_context is not None
+            or record["outcome"] is not None and record["outcome"].event_kind == "savings"
+        )
         latest[record["manual_id"]] = record
     return list(latest.values())
 
@@ -129,6 +139,7 @@ def manual_context_revision(
     if saved["case"] is not None:
         sources.update(item.transaction_id for item in saved["case"].transactions)
     snapshot = _live_context(connection, sources, {saved["journal_entry_id"]}, accounts)
+    snapshot = _with_savings(connection, manual_id, snapshot)
     return _digest({"input_revision": str(saved["input_revision"]), "context": snapshot})
 
 
@@ -145,6 +156,7 @@ def manual_case_revision(
     )
     if actual != expected:
         raise ValueError("Manual candidates are stale or omit part of an existing event")
+    actual = _with_savings(connection, submission.id, actual)
     return _digest({"submission": _input_values(submission), "context": actual})
 
 
@@ -238,13 +250,14 @@ def defer_manual_case(
 
 def manual_needs_processing(
     saved: dict, *, skill_version: str, retry_errors: bool = False,
-    catalogue_revision: str | None = None,
+    catalogue_revision: str | None = None, budget_version: str | None = None,
 ) -> bool:
     """
     Reuse one eligibility rule for CSV preparation and atomic request reservation.
 
     Investment questions are reconsidered once after the account/security catalogue changes. The saved case
     carries its catalogue version, including questions without a priced proposal; no schema change is needed.
+    A changed budget catalogue alone needs an edited instruction or explicit retry before another AI request.
     """
     status = saved["status"]
     if status == "pending" or (
@@ -256,6 +269,7 @@ def manual_needs_processing(
     if (
         status == "needs_review" and outcome is not None and outcome.event_kind == "investment"
         and catalogue_revision is not None
+        and (previous is None or previous.budget_revision == budget_version)
         and (previous is None or previous.catalogue_revision != catalogue_revision)
     ):
         return True
@@ -269,20 +283,36 @@ def manual_needs_processing(
 def reserve_manual_case(
     connection: sqlite3.Connection, case: ManualCase, accounts: AccountRegistry,
     *, model: str, skill_version: str, retry_errors: bool = False,
+    budget: BudgetSettings | None = None,
 ) -> bool:
     """
     Reserve a current instruction before inference, skipping completed or unchanged unresolved attempts.
     """
     _require_idle(connection)
     case = ManualCase.model_validate(case.model_dump())
+    if case.budget_revision != budget_revision(budget):
+        raise ValueError("Budget categories changed; refresh this manual request before retrying")
     if not model.strip() or not skill_version.strip():
         raise ValueError("A manual request needs a model and skill version")
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         saved = _check_case(connection, case, accounts)
+        if case.savings_context is not None:
+            schema = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manual_entries'"
+            ).fetchone()[0]
+            if "'$.savings'" not in schema:
+                raise ValueError(
+                    "This database requires the manual-entry constraint update before savings allocations "
+                    "can be saved. No AI request was sent; existing accounting is unchanged."
+                )
+            if budget is None or savings_context(
+                connection, case.submission.id, case.submission.date, accounts, budget,
+            ).revision != case.savings_context.revision:
+                raise ValueError("Monthly savings changed before this request; refresh its context")
         if not manual_needs_processing(
             saved, skill_version=skill_version, retry_errors=retry_errors,
-            catalogue_revision=case.catalogue_revision,
+            catalogue_revision=case.catalogue_revision, budget_version=case.budget_revision,
         ):
             return False
         _check_claims(connection, case)
@@ -350,7 +380,7 @@ def save_investment_proposal(
 
 def save_manual_outcome(
     connection: sqlite3.Connection, case: ManualCase, outcome: ManualOutcome, accounts: AccountRegistry,
-    *, securities: SecurityRegistry | None = None,
+    *, securities: SecurityRegistry | None = None, budget: BudgetSettings | None = None,
 ) -> None:
     """
     Save a result and complete accounting replacement together, preserving original bank evidence.
@@ -360,6 +390,8 @@ def save_manual_outcome(
     """
     _require_idle(connection)
     outcome = ManualOutcome.model_validate(outcome.model_dump())
+    if case.budget_revision != budget_revision(budget):
+        raise ValueError("Budget categories changed after this manual request was prepared")
     if outcome.status == "pricing":
         raise ValueError("Resolve investment pricing before saving an accounting outcome")
     if outcome.manual_id != case.submission.id:
@@ -373,11 +405,26 @@ def save_manual_outcome(
         before = _audit_snapshot(connection, case)
         event_id = saved["journal_entry_id"]
         entry = outcome.entry
-        if outcome.status == "apply":
+        if outcome.status == "apply" and outcome.event_kind == "savings":
+            if case.savings_context is None or budget is None or outcome.savings is None:
+                raise ValueError("A savings allocation needs its configured monthly context")
+            if event_id is not None or case.required_sources or case.entries or case.transactions:
+                raise ValueError("Savings allocations cannot replace or claim accounting events")
+            if outcome.savings.date != case.submission.date:
+                raise ValueError("A savings allocation must keep the manual accounting date")
+            save_savings_allocation(connection, case.submission.id, outcome.savings, accounts, budget)
+            after = _audit_snapshot(connection, case)
+            status = "applied"
+        elif outcome.status == "apply":
+            if case.savings_context is not None:
+                raise ValueError("A virtual-pot instruction cannot create journal postings")
             if entry is None:
                 raise ValueError("An applied manual outcome needs a complete entry")
             _check_claims(connection, case)
             replaced = _check_replacement(connection, case, outcome, saved, accounts, securities)
+            entry = preserve_budget_categories((entry,), tuple(replaced))[0]
+            validate_budget_labels((entry,), accounts, budget, tuple(replaced))
+            outcome = ManualOutcome.model_validate({**outcome.model_dump(), "entry": entry})
             _replace_entry(connection, replaced, outcome, accounts)
             source_ids = {line.transaction_id for line in entry.lines if line.transaction_id is not None}
             _retire_reviews(connection, source_ids, case.submission.id)
@@ -401,6 +448,16 @@ def save_manual_outcome(
 
 
 # %% 3. Helpers ----------------------------------------------------------------------------------------------
+def _with_savings(connection: sqlite3.Connection, manual_id: UUID, snapshot: dict) -> dict:
+    """
+    Add only this instruction's current split, preserving older unallocated CSV revision hashes.
+    """
+    allocation = load_savings_allocations(connection).get(manual_id)
+    if allocation is not None:
+        return {**snapshot, "savings": allocation.model_dump(mode="json")}
+    return snapshot
+
+
 def _latest(connection: sqlite3.Connection, manual_id: UUID) -> dict | None:
     """
     Find the latest stored revision of one manual instruction.
@@ -567,7 +624,10 @@ def _check_investment_result(
     if instruction is None or calculation is None or cached is None:
         raise ValueError("An investment needs its saved interpretation and calculation")
     proposal = ManualOutcome.model_validate(cached["outcome"])
-    if proposal.investment != instruction or cached["case_revision"] != case.revision:
+    if (
+        proposal.investment != instruction or cached["case_revision"] != case.revision
+        or proposal.investment_budget_category != outcome.investment_budget_category
+    ):
         raise ValueError("Investment facts changed after the interpreted proposal was saved")
     security = securities.securities.get(instruction.security_key)
     asset = accounts.accounts.get(instruction.account_key)
@@ -604,6 +664,8 @@ def _check_investment_result(
         or details.fees != expected.fees or holding.debit != expected.total_cost
         or funding.account_id != counterpart.id or funding.credit != expected.total_cost
         or funding.transaction_id != instruction.transaction_id or funding.investment is not None
+        or (outcome.investment_budget_category is not None
+            and holding.budget_category != outcome.investment_budget_category)
     ):
         raise ValueError("Investment units, carrying cost or funding differ from the saved calculation")
 
@@ -673,9 +735,9 @@ def _audit_snapshot(
     cursor = connection.execute("SELECT * FROM journal ORDER BY id")
     columns = [item[0] for item in cursor.description]
     rows = [dict(zip(columns, values)) for values in cursor]
-    return {
+    return _with_savings(connection, case.submission.id, {
         "submission": case.submission.model_dump(mode="json"),
         "journal": [
             row for row in rows if row["transaction_id"] in sources or row["journal_entry_id"] in entries
         ],
-    }
+    })

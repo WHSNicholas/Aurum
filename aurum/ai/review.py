@@ -30,7 +30,8 @@ from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
 from aurum.ai.skills import Skill, guidance_context, load_categorisation_skill
 from aurum.finance.accounts import AccountRegistry, AccountType
-from aurum.finance.journal import JournalEntry, JournalLine
+from aurum.finance.budget import BudgetSettings, budget_catalogue, validate_budget_labels
+from aurum.finance.journal import JournalEntry, JournalLine, preserve_budget_categories
 from aurum.finance.review import Guidance, GuidanceResult, ReviewCase, ReviewOutcome
 from aurum.finance.transaction import Transaction
 
@@ -60,6 +61,7 @@ class _Posting(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     account_key: str
+    budget_category: str | None = None
     source_ref: str | None
     debit: str = Field(pattern=r"^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$")
     credit: str = Field(pattern=r"^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$")
@@ -121,6 +123,7 @@ def review_batch(
     guidance: list[Guidance] | None = None,
     skill: Skill | None = None,
     questions: dict[UUID, str | None] | None = None,
+    budget: BudgetSettings | None = None,
 ) -> tuple[list[ReviewOutcome], dict[UUID, str], dict]:
     """
     Request complete accounting plans for answered review cases without writing any database records.
@@ -132,6 +135,7 @@ def review_batch(
         guidance: Previously inferred private guidance, used as context rather than automatic rules.
         skill: Accounting instructions loaded once by the command, or None to load the project skill here.
         questions: Current saved review questions, used to interpret brief answers without changing them.
+        budget: Optional permitted reporting labels for explicit human exceptions to ordinary account mapping.
 
     Returns:
         Valid outcomes in input order, safe failure messages keyed by case UUID, and provider-reported usage.
@@ -150,11 +154,11 @@ def review_batch(
         raise ValueError("Select a model before resolving reviews")
     skill = skill or load_categorisation_skill()
     references, sources, guidance_refs, payload = _request_context(
-        cases, accounts, guidance, questions=questions,
+        cases, accounts, guidance, questions=questions, budget=budget,
     )
     response, usage = client.request(
         instructions=skill.instructions, payload=payload,
-        output_schema=_response_schema(references, sources, accounts, guidance_refs),
+        output_schema=_response_schema(references, sources, accounts, guidance_refs, budget),
     )
     grouped = _read_response(response, references, usage)
     outcomes = []
@@ -169,7 +173,7 @@ def review_batch(
             continue
         try:
             result, extra = _read_case(records[0])
-            entries = _build_entries(case, result, sources, accounts)
+            entries = _build_entries(case, result, sources, accounts, budget)
             inferred = (
                 _read_guidance(extra, accounts, guidance_refs) if entries
                 else GuidanceResult(reason="Accounting review is unresolved.")
@@ -251,7 +255,7 @@ def learn_guidance_batch(
 # %% 4. Helpers ----------------------------------------------------------------------------------------------
 def _request_context(
     cases: list[ReviewCase], accounts: AccountRegistry, guidance: list[Guidance] | None,
-    *, questions: dict[UUID, str | None] | None = None,
+    *, questions: dict[UUID, str | None] | None = None, budget: BudgetSettings | None = None,
 ) -> tuple[dict, dict, dict, dict]:
     """
     Validate distinct review groups and prepare the same redacted evidence for accounting and guidance.
@@ -275,13 +279,13 @@ def _request_context(
         + [answer.human_review for case in cases for answer in case.answers]
     )
     learned, guidance_refs = guidance_context(guidance, accounts, context)
-    payload = _review_payload(references, source_refs, accounts, learned, questions=questions)
+    payload = _review_payload(references, source_refs, accounts, learned, questions=questions, budget=budget)
     return references, sources, guidance_refs, payload
 
 
 def _review_payload(
     references: dict, source_refs: dict, accounts: AccountRegistry, guidance: list,
-    *, questions: dict[UUID, str | None] | None = None,
+    *, questions: dict[UUID, str | None] | None = None, budget: BudgetSettings | None = None,
 ) -> dict:
     """
     Send short references and relevant facts while retaining UUIDs and bank identifiers locally.
@@ -323,6 +327,7 @@ def _review_payload(
                             "source_ref": source_refs.get(line.transaction_id),
                             "debit": format(line.debit, ".2f"), "credit": format(line.credit, ".2f"),
                             "description": redact_bank_details(line.description, accounts),
+                            "budget_category": line.budget_category,
                         }
                         for line in entry.lines
                     ],
@@ -342,6 +347,10 @@ def _review_payload(
         })
     return {
         "mode": "review", "currency": "AUD", "cases": cases, "guidance": guidance,
+        "budget_categories": [
+            {**item, "name": redact_bank_details(item["name"], accounts)}
+            for item in budget_catalogue(budget)
+        ] if budget is not None else [],
         "accounts": [
             {
                 "key": key, "name": redact_bank_details(account.name, accounts),
@@ -462,7 +471,7 @@ def _validation_message(error: TypeError | ValueError) -> str:
 
 def _build_entries(
     case: ReviewCase, result: _Review, sources: dict[str, Transaction],
-    accounts: AccountRegistry,
+    accounts: AccountRegistry, budget: BudgetSettings | None = None,
 ) -> tuple[JournalEntry, ...]:
     """
     Reconstruct every source exactly once and validate complete events with Python-owned persistent UUIDs.
@@ -495,7 +504,7 @@ def _build_entries(
                     raise ValueError("A counterpart posting needs a description")
                 lines.append(JournalLine(
                     account_id=account.id, debit=debit, credit=credit, description=text,
-                    effective_date=effective_date,
+                    effective_date=effective_date, budget_category=posting.budget_category,
                 ))
                 continue
             source = sources.get(posting.source_ref)
@@ -512,6 +521,7 @@ def _build_entries(
                 account_id=source.account_id, transaction_id=source.transaction_id,
                 debit=debit, credit=credit,
                 description=source.description, effective_date=source.effective_date,
+                budget_category=posting.budget_category,
             ))
         source_ids = {line.transaction_id for line in lines if line.transaction_id is not None}
         if not source_ids:
@@ -528,7 +538,9 @@ def _build_entries(
         ))
     if seen != expected:
         raise ValueError("A resolved review must preserve every supplied source transaction")
-    return tuple(entries)
+    entries = preserve_budget_categories(tuple(entries), case.entries)
+    validate_budget_labels(entries, accounts, budget, case.entries)
+    return entries
 
 
 def _read_guidance(record: dict, accounts: AccountRegistry, references: dict) -> GuidanceResult:
@@ -578,7 +590,10 @@ def _read_guidance(record: dict, accounts: AccountRegistry, references: dict) ->
     return GuidanceResult(guidance=tuple(retained), reason=reason, errors=tuple(errors))
 
 
-def _response_schema(cases: dict, sources: dict, accounts: AccountRegistry, guidance: dict) -> dict:
+def _response_schema(
+    cases: dict, sources: dict, accounts: AccountRegistry, guidance: dict,
+    budget: BudgetSettings | None = None,
+) -> dict:
     """
     Constrain response references and account keys while keeping optional text separate from accounting.
     """
@@ -587,6 +602,15 @@ def _response_schema(cases: dict, sources: dict, accounts: AccountRegistry, guid
     definitions["_Review"]["properties"]["case_ref"]["enum"] = list(cases)
     posting = definitions["_Posting"]["properties"]
     posting["account_key"]["enum"] = list(accounts.accounts)
+    labels = (
+        [item["key"] for item in budget_catalogue(budget)] if budget is not None else
+        sorted({line.budget_category for case in cases.values() for entry in case.entries
+                for line in entry.lines if line.budget_category is not None})
+    )
+    posting["budget_category"] = (
+        {"anyOf": [{"type": "string", "enum": labels}, {"type": "null"}]} if labels else {"type": "null"}
+    )
+    definitions["_Posting"]["required"] = list(posting)
     posting["source_ref"]["anyOf"][0]["enum"] = list(sources)
     fields = _guidance_fields(accounts, guidance)
     result = definitions["_Review"]

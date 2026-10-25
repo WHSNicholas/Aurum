@@ -22,6 +22,7 @@ import sqlite3
 
 # Aurum imports
 from aurum.database.prices import PRICE_SCHEMA
+from aurum.database.savings import SAVINGS_SCHEMA
 
 
 # %% 1. Database Setup ---------------------------------------------------------------------------------------
@@ -85,6 +86,14 @@ CREATE TABLE IF NOT EXISTS journal (
         OR (status != 'posted' AND journal_entry_id IS NULL AND line_number IS NULL
             AND transaction_id IS NOT NULL)
     )
+) STRICT;
+"""
+
+# Optional reporting labels leave the accounting table unchanged.
+BUDGET_SCHEMA = """
+CREATE TABLE IF NOT EXISTS journal_budget (
+    journal_row_id INTEGER PRIMARY KEY REFERENCES journal(id) ON DELETE CASCADE,
+    budget_category TEXT NOT NULL CHECK (length(trim(budget_category)) > 0)
 ) STRICT;
 """
 
@@ -203,7 +212,12 @@ CREATE TABLE IF NOT EXISTS manual_entries (
         case_payload IS NOT NULL AND revision IS NOT NULL AND before_snapshot IS NOT NULL
         AND model IS NOT NULL AND skill_version IS NOT NULL
     )),
-    CHECK (status != 'applied' OR (outcome IS NOT NULL AND journal_entry_id IS NOT NULL)),
+    CHECK (status != 'applied' OR (outcome IS NOT NULL AND (
+        journal_entry_id IS NOT NULL OR (
+            COALESCE(json_extract(outcome, '$.event_kind'), '') = 'savings'
+            AND COALESCE(json_type(outcome, '$.savings'), '') = 'object'
+        )
+    ))),
     CHECK (status != 'failed' OR (error IS NOT NULL AND length(trim(error)) > 0))
 ) STRICT;
 CREATE INDEX IF NOT EXISTS manual_entries_manual_id ON manual_entries(manual_id);
@@ -247,7 +261,8 @@ def _create_tables(connection: sqlite3.Connection) -> None:
     """
     Create current tables inside the caller's transaction without an implicit commit.
     """
-    for statement in (SCHEMA + REVIEW_SCHEMA + MANUAL_SCHEMA + PRICE_SCHEMA).split(";"):
+    schema = SCHEMA + REVIEW_SCHEMA + MANUAL_SCHEMA + PRICE_SCHEMA + BUDGET_SCHEMA + SAVINGS_SCHEMA
+    for statement in schema.split(";"):
         if statement.strip():
             connection.execute(statement)
 

@@ -5,3 +5,6 @@ PyJWT[crypto]==2.15.1
 truststore==0.10.5
 ruamel.yaml==0.19.1
 yfinance==1.7.0
+weasyprint==70.0
+fonttools==4.67.0
+Pillow==13.0.0

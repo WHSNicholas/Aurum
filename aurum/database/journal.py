@@ -16,6 +16,9 @@ security against the supplied catalogue; ordinary bank entries need no security 
 
 Account names make saved rows readable, while persistent UUIDs remain the authoritative links. Processing
 commentary and request history belong to review storage, outside the journal.
+
+Optional budget labels live in a companion table and are saved with their postings. Older databases without
+that table remain readable, and unlabelled entries retain their original serialized form and review revisions.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -27,6 +30,7 @@ from uuid import UUID
 # Aurum imports
 from aurum.database.transactions import from_sqlite_dollars, to_sqlite_dollars
 from aurum.finance.accounts import AccountRegistry, AccountType
+from aurum.finance.budget import BudgetSettings, validate_budget_labels
 from aurum.finance.journal import InvestmentDetails, JournalEntry, JournalLine
 from aurum.finance.securities import SecurityRegistry
 
@@ -52,7 +56,7 @@ def prepare_journal(connection: sqlite3.Connection, accounts: AccountRegistry) -
 
 def save_journal_entry(
     connection: sqlite3.Connection, entry: JournalEntry, accounts: AccountRegistry,
-    *, securities: SecurityRegistry | None = None,
+    *, securities: SecurityRegistry | None = None, budget: BudgetSettings | None = None,
 ) -> None:
     """
     Save a complete balanced event, reusing its source rows and inserting any counterpart rows atomically.
@@ -62,6 +66,7 @@ def save_journal_entry(
         entry: Validated event, including ordered lines, accounts and source links.
         accounts: Registry containing every actual account in the event.
         securities: Security catalogue, required when the event includes investment units.
+        budget: Optional category configuration, required when assigning new reporting labels.
 
     Raises:
         ValueError: Accounts, source links or money are invalid, or a database write is pending.
@@ -72,6 +77,7 @@ def save_journal_entry(
     """
     entry = JournalEntry.model_validate(entry)
     _check_investment_securities(entry, securities)
+    validate_budget_labels((entry,), accounts, budget)
     if connection.in_transaction:
         raise ValueError("Finish the pending database write before saving a journal entry")
     with connection:
@@ -96,12 +102,18 @@ def load_journal_entries(
         ValueError: Saved events or their account/source references are invalid.
         sqlite3.Error: The journal cannot be read.
     """
+    labelled = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'journal_budget'"
+    ).fetchone() is not None
+    label = "b.budget_category" if labelled else "NULL"
+    join = "LEFT JOIN journal_budget b ON b.journal_row_id = j.id" if labelled else ""
     return _entries_from_rows(connection, connection.execute(
-        """
-        SELECT journal_entry_id, line_number, date,
-               account_id, debit, credit, transaction_id, description, effective_date,
-               security_id, units, unit_price, fees
-        FROM journal WHERE status = 'posted' ORDER BY date, journal_entry_id, line_number
+        f"""
+        SELECT j.journal_entry_id, j.line_number, j.date,
+               j.account_id, j.debit, j.credit, j.transaction_id, j.description, j.effective_date,
+               j.security_id, j.units, j.unit_price, j.fees, {label}
+        FROM journal j {join} WHERE j.status = 'posted'
+        ORDER BY j.date, j.journal_entry_id, j.line_number
         """
     ), accounts, securities=securities)
 
@@ -193,7 +205,7 @@ def _write_entry(
             *_investment_values(line.investment),
         )
         if line.transaction_id is None:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO journal (
                     journal_entry_id, line_number, date, effective_date, description,
@@ -203,6 +215,7 @@ def _write_entry(
                 """,
                 values,
             )
+            _save_budget_label(connection, cursor.lastrowid, line.budget_category)
             continue
         _ensure_source_row(connection, line.transaction_id, accounts)
         identifier = str(line.transaction_id)
@@ -222,6 +235,10 @@ def _write_entry(
             """,
             (*values, identifier),
         )
+        row_id = connection.execute(
+            "SELECT id FROM journal WHERE transaction_id = ?", (identifier,),
+        ).fetchone()[0]
+        _save_budget_label(connection, row_id, line.budget_category)
 
 
 def _entries_from_rows(
@@ -245,6 +262,7 @@ def _entries_from_rows(
             JournalLine(
                 account_id=row[3], debit=from_sqlite_dollars(row[4]), credit=from_sqlite_dollars(row[5]),
                 transaction_id=row[6], description=row[7], effective_date=row[8],
+                budget_category=row[13],
                 investment=InvestmentDetails(
                     security_id=row[9], units=row[10], unit_price=row[11], fees=row[12],
                 ) if any(value is not None for value in row[9:13]) else None,
@@ -332,3 +350,22 @@ def _check_journal_sources(
         amount = line.debit if line.debit > 0 else line.credit.copy_negate()
         if amount != from_sqlite_dollars(source[1]):
             raise ValueError("The journal line must match its source transaction's full signed amount")
+
+
+def _save_budget_label(connection: sqlite3.Connection, row_id: int, category: str | None) -> None:
+    """
+    Replace one row's optional reporting label inside its posting transaction.
+    """
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'journal_budget'"
+    ).fetchone()
+    if not exists:
+        if category is not None:
+            raise ValueError("Open the database normally before saving budget labels")
+        return
+    connection.execute("DELETE FROM journal_budget WHERE journal_row_id = ?", (row_id,))
+    if category is not None:
+        connection.execute(
+            "INSERT INTO journal_budget (journal_row_id, budget_category) VALUES (?, ?)",
+            (row_id, category),
+        )

@@ -5,12 +5,13 @@
 """
 Aurum exchanges manual-entry instructions through monthly CSV files while keeping SQLite authoritative.
 
-Each row has a stable identity and one accounting instruction. The workflow saves generated IDs before
+Each row has a stable identity and one accounting instruction or virtual savings split. It saves IDs before
 inference, presents relevant statement evidence, and keeps unanswered or failed requests from becoming
 ordinary bank categorisations. A valid result posts automatically; a correction replaces its whole event.
 
 CSV export preserves concurrent edits and shows saved questions and proposed postings. The same models and
 AI/storage functions can later serve a GUI without changing how instructions become journal entries.
+Virtual savings run after journal preparation and divide monthly income left after expenses without postings.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -43,6 +44,9 @@ from aurum.database.manual import (
 )
 from aurum.database.reviews import load_active_guidance
 from aurum.database.transactions import load_transactions
+from aurum.finance.budget import BudgetSettings, budget_revision
+from aurum.finance.savings import SavingsCapacityError
+from aurum.database.savings import load_savings_allocations, savings_context
 from aurum.finance.accounts import AccountRegistry
 from aurum.finance.investments import get_quote
 from aurum.finance.journal import JournalEntry
@@ -77,6 +81,7 @@ class ManualSession:
 def read_manuals(
     connection: sqlite3.Connection, accounts: AccountRegistry, folder: Path, *, retry_errors: bool = False,
     skill_version: str | None = None, securities: SecurityRegistry | None = None,
+    budget: BudgetSettings | None = None,
 ) -> ManualSession:
     """
     Read instructions, persist row IDs, and prepare new answers, catalogue updates or explicit retries.
@@ -90,7 +95,7 @@ def read_manuals(
     entries = load_journal_entries(connection, accounts)
     records = {row["submission"].id: row for row in load_manual_entries(connection)}
     skill_version = skill_version or load_manual_skill().version
-    catalogue_revision = _catalogue_revision(accounts, securities)
+    catalogue_revision = _catalogue_revision(accounts, securities, budget)
     months = {date.today().strftime("%Y-%m")} | {row.date.strftime("%Y-%m") for row in transactions}
     seen = set()
 
@@ -155,11 +160,11 @@ def read_manuals(
                 records[identifier] = record
                 case = _build_case(
                     connection, record, transactions, entries, accounts,
-                    catalogue_revision=catalogue_revision,
+                    catalogue_revision=catalogue_revision, budget=budget,
                 )
                 if manual_needs_processing(
                     record, skill_version=skill_version, retry_errors=retry_errors,
-                    catalogue_revision=catalogue_revision,
+                    catalogue_revision=catalogue_revision, budget_version=budget_revision(budget),
                 ):
                     if len(case.transactions) > 20:
                         defer_manual_case(
@@ -303,26 +308,38 @@ def process_manuals(
     client_provider: Callable[[], ChatGPTConnection], counts: dict[str, int],
     *, model: str, skill: Skill, retry_errors: bool = False,
     securities: SecurityRegistry | None = None, quote_fetcher: Callable | None = None,
-    progress: Callable[[str], None] | None = None,
+    progress: Callable[[str], None] | None = None, budget: BudgetSettings | None = None,
+    savings_only: bool = False,
 ) -> None:
     """
     Interpret new instructions, resume saved pricing and save validated complete events independently.
 
     Cached proposals require the same input, accounting context, model, skill and configuration. Price
     retrieval follows durable proposal storage, so an interrupted market request need not spend AI tokens.
-    quote_fetcher supports synthetic checks without contacting a provider.
+    quote_fetcher supports synthetic checks without contacting a provider. The default phase handles
+    accounting; savings_only divides the budget surplus after journal preparation using each month's context.
     """
     report = progress or (lambda message: None)
-    catalogue_revision = _catalogue_revision(accounts, securities)
-    if session.cases:
-        report(f"Manual entries: {len(session.cases)} ready for processing.")
-    for start in range(0, len(session.cases), MAX_MANUAL_BATCH_SIZE):
+    catalogue_revision = _catalogue_revision(accounts, securities, budget)
+    cases = [case for case in session.cases if (case.savings_context is not None) == savings_only]
+    batch_size = 1 if savings_only else MAX_MANUAL_BATCH_SIZE
+    if cases:
+        label = "Savings allocations" if savings_only else "Manual entries"
+        report(f"{label}: {len(cases)} ready for processing.")
+    for start in range(0, len(cases), batch_size):
         batch = []
-        for case in session.cases[start:start + MAX_MANUAL_BATCH_SIZE]:
+        for case in cases[start:start + batch_size]:
             try:
+                if savings_only:
+                    records = {item["manual_id"]: item for item in load_manual_entries(connection)}
+                    case = _build_case(
+                        connection, records[case.submission.id], load_transactions(connection),
+                        load_journal_entries(connection, accounts), accounts,
+                        catalogue_revision=catalogue_revision, budget=budget,
+                    )
                 if reserve_manual_case(
                     connection, case, accounts, model=model, skill_version=skill.version,
-                    retry_errors=retry_errors,
+                    retry_errors=retry_errors, budget=budget,
                 ):
                     batch.append(case)
             except ValueError as error:
@@ -350,7 +367,7 @@ def process_manuals(
                 counts["requests"] += 1
                 interpreted, failures, usage = manual_batch(
                     client, fresh, accounts, skill=skill, guidance=load_active_guidance(connection),
-                    securities=securities,
+                    securities=securities, budget=budget,
                 )
                 expected = {case.submission.id for case in fresh}
                 if set(interpreted) & set(failures) or set(interpreted) | set(failures) != expected:
@@ -378,9 +395,19 @@ def process_manuals(
                 if outcome.status == "pricing":
                     save_investment_proposal(connection, case, outcome, accounts, catalogue_revision)
                     outcome = _price_investment(
-                        connection, case, outcome, accounts, securities, quote_fetcher,
+                        connection, case, outcome, accounts, securities, quote_fetcher, budget,
                     )
-                save_manual_outcome(connection, case, outcome, accounts, securities=securities)
+                try:
+                    save_manual_outcome(
+                        connection, case, outcome, accounts, securities=securities, budget=budget,
+                    )
+                except SavingsCapacityError as error:
+                    outcome = ManualOutcome(
+                        manual_id=outcome.manual_id, status="needs_review", event_kind="savings",
+                        reason="The requested split exceeds the available monthly savings.",
+                        question=str(error), model=outcome.model, skill_version=outcome.skill_version,
+                    )
+                    save_manual_outcome(connection, case, outcome, accounts, budget=budget)
             except (ValueError, sqlite3.Error) as error:
                 fail_manual_case(
                     connection, case,
@@ -388,7 +415,10 @@ def process_manuals(
                 )
                 counts["manual_failed"] += 1
                 continue
-            if outcome.status == "apply":
+            if outcome.status == "apply" and outcome.event_kind == "savings":
+                counts["savings_applied"] = counts.get("savings_applied", 0) + 1
+                report("Saved monthly savings allocation; journal balances were unchanged.")
+            elif outcome.status == "apply":
                 counts["manual_posted"] += 1
             else:
                 counts["manual_questions"] += 1
@@ -397,7 +427,9 @@ def process_manuals(
 
 
 # %% 3. Helpers ----------------------------------------------------------------------------------------------
-def _catalogue_revision(accounts: AccountRegistry, securities: SecurityRegistry | None) -> str:
+def _catalogue_revision(
+    accounts: AccountRegistry, securities: SecurityRegistry | None, budget: BudgetSettings | None = None,
+) -> str:
     """
     Identify the immutable configuration used to interpret a cached investment proposal.
     """
@@ -408,12 +440,15 @@ def _catalogue_revision(accounts: AccountRegistry, securities: SecurityRegistry 
         ]
         if securities is not None else [],
     }
+    if budget is not None:
+        payload["budget_revision"] = budget_revision(budget)
     return sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def _price_investment(
     connection, case: ManualCase, outcome: ManualOutcome, accounts: AccountRegistry,
     securities: SecurityRegistry | None, quote_fetcher: Callable | None,
+    budget: BudgetSettings | None = None,
 ) -> ManualOutcome:
     """
     Resolve required market pricing or return a focused question while retaining the saved interpretation.
@@ -434,7 +469,7 @@ def _price_investment(
             )
         ):
             quote = get_quote(connection, security, case.submission.date, fetcher=quote_fetcher)
-        return complete_investment(case, outcome, accounts, securities, quote=quote)
+        return complete_investment(case, outcome, accounts, securities, quote=quote, budget=budget)
     except ValueError as error:
         message = "Investment figures could not be validated; check the supplied facts."
         if not isinstance(error, ValidationError):
@@ -442,6 +477,7 @@ def _price_investment(
         return ManualOutcome(
             manual_id=outcome.manual_id, status="needs_review", event_kind="investment",
             investment=outcome.investment, reason="The investment needs pricing or corrected trade facts.",
+            investment_budget_category=outcome.investment_budget_category,
             question=message, model=outcome.model, skill_version=outcome.skill_version,
         )
 
@@ -449,11 +485,34 @@ def _price_investment(
 def _build_case(
     connection, record: dict, transactions: list[Transaction], entries: list[JournalEntry],
     accounts: AccountRegistry, *, catalogue_revision: str | None = None,
+    budget: BudgetSettings | None = None,
 ) -> ManualCase:
     """
     Find nearby statement evidence and expand existing events to their complete source groups.
     """
     submission = record["submission"]
+    stored = load_savings_allocations(connection)
+    prior_case = record.get("case")
+    savings_mode = (
+        submission.id in stored
+        or record.get("is_savings", False)
+        or (prior_case is not None and prior_case.savings_context is not None)
+        or _is_savings_instruction(submission, budget)
+    )
+    if savings_mode:
+        text = submission.instruction + " " + submission.human_response
+        references = re.findall(r"\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\b", text)
+        if submission.source_transactions or references or record.get("journal_entry_id") is not None:
+            raise ValueError("Virtual savings splits cannot use source IDs or replace an accounting entry")
+        if budget is None or budget.savings is None:
+            raise ValueError("Configure the budget's virtual pots before allocating savings")
+        return ManualCase(
+            submission=submission,
+            revision=manual_case_revision(connection, submission, (), (), accounts),
+            question=record.get("question"), catalogue_revision=catalogue_revision,
+            budget_revision=budget_revision(budget),
+            savings_context=savings_context(connection, submission.id, submission.date, accounts, budget),
+        )
     by_id = {row.transaction_id: row for row in transactions}
     required = set(submission.source_transactions)
     previous_id = record.get("journal_entry_id")
@@ -491,6 +550,28 @@ def _build_case(
         revision=manual_case_revision(connection, submission, selected, selected_entries, accounts),
         transactions=selected, required_sources=tuple(sorted(required, key=str)), entries=selected_entries,
         question=record.get("question"), catalogue_revision=catalogue_revision,
+        budget_revision=budget_revision(budget),
+    )
+
+
+def _is_savings_instruction(submission: ManualInput, budget: BudgetSettings | None) -> bool:
+    """
+    Route explicit virtual-pot language to budget context without interpreting amounts or bank transfers.
+    """
+    if budget is None or budget.savings is None:
+        return False
+    text = (submission.instruction + " " + submission.human_response).casefold()
+    if not re.search(r"\b(allocat(?:e|ed|ion|ions|ing)|sav(?:e|ed|ing|ings)|pots?)\b", text):
+        return False
+    # A residual named Savings must not route ordinary savings-bank activity into virtual allocations.
+    explicit_allocation = re.search(r"\b(allocat(?:e|ed|ion|ions|ing)|pots?)\b", text)
+    names = [
+        name.casefold() for key in budget.savings.category_keys
+        if key != budget.savings.residual_category or explicit_allocation
+        for name in (key, key.replace("_", " "), budget.categories[key].name)
+    ]
+    return bool(re.search(r"\b(?:virtual|savings) pots?\b", text)) or any(
+        re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text) for name in names
     )
 
 
@@ -573,8 +654,17 @@ def _display_result(row: dict, record: dict, connection, accounts, by_account: d
     row["proposed_postings"] = _safe_text("; ".join(
         f"{'Dr' if line.debit else 'Cr'} {by_account[line.account_id].name} "
         f"AUD {line.debit or line.credit:.2f}"
+        + (f" [budget: {line.budget_category}]" if line.budget_category is not None else "")
         for line in entry.lines
     )) if entry is not None else ""
+    allocation = load_savings_allocations(connection).get(record["manual_id"])
+    if allocation is not None:
+        row["proposed_postings"] = _safe_text(
+            "Budget allocation only: " + (
+                "; ".join(f"{item.category_key}: AUD {item.amount:.2f}" for item in allocation.amounts)
+                or "reset to the residual pot"
+            )
+        )
     if outcome is not None and outcome.pricing is not None and outcome.investment is not None:
         calculation = outcome.pricing
         units = format(calculation.units, ".12g") if calculation.units_estimated else str(calculation.units)

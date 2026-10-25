@@ -27,7 +27,7 @@ import re
 import sqlite3
 import tempfile
 from typing import Callable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 # Aurum imports
 from aurum.ai.chatgpt import ChatGPTConnection, ChatGPTError, record_usage
@@ -42,6 +42,7 @@ from aurum.database.reviews import (
     fail_review_case, load_active_guidance, load_review_answers, load_review_cases, load_review_exports,
     reserve_review_case, review_revision, save_review_answers, save_review_exports, save_review_outcome,
 )
+from aurum.finance.budget import BudgetSettings, budget_revision
 from aurum.finance.accounts import AccountRegistry
 from aurum.finance.review import ReviewAnswer, ReviewCase, ReviewOutcome
 
@@ -76,6 +77,7 @@ class ReviewSession:
 
 def read_reviews(
     connection: sqlite3.Connection, accounts: AccountRegistry, folder: Path, *, retry_errors: bool = False,
+    budget: BudgetSettings | None = None,
 ) -> ReviewSession:
     """
     Read all monthly files before processing, save changed answers and group complete review cases.
@@ -188,6 +190,7 @@ def read_reviews(
             session.blocked.update(group)
             continue
         case = ReviewCase(
+            budget_revision=budget_revision(budget),
             revision=review_revision(connection, group, accounts),
             transactions=tuple(by_id[identifier] for identifier in sorted(group, key=str)),
             entries=tuple(entry for entry in entries if _entry_sources(entry) & group),
@@ -216,6 +219,11 @@ def read_reviews(
                     for row in case.transactions
                 )
             ):
+                if case.budget_revision != budget_revision(budget):
+                    # An explicit retry gets a new request identity when its category catalogue changed.
+                    case = ReviewCase.model_validate({
+                        **case.model_dump(), "id": uuid4(), "budget_revision": budget_revision(budget),
+                    })
                 session.cases.append(case)
                 queued_sources.update(row.transaction_id for row in case.transactions)
     return session
@@ -232,6 +240,7 @@ def process_reviews(
     skill: Skill,
     retry_errors: bool = False,
     progress: Callable[[str], None] | None = None,
+    budget: BudgetSettings | None = None,
 ) -> None:
     """
     Apply changed human answers before ordinary categorisation, retaining valid accounting on any failure.
@@ -264,7 +273,7 @@ def process_reviews(
             try:
                 reserved = reserve_review_case(
                     connection, case, accounts, model=model, skill_version=skill.version,
-                    retry_errors=retry_errors,
+                    retry_errors=retry_errors, budget=budget,
                 )
             except ValueError:
                 for transaction in case.transactions:
@@ -285,7 +294,7 @@ def process_reviews(
             counts["requests"] += 1
             outcomes, failures, usage = review_batch(
                 client, batch, accounts, skill=skill, guidance=load_active_guidance(connection),
-                questions=questions,
+                questions=questions, budget=budget,
             )
             valid_ids = {item.case_id for item in outcomes}
             if (
@@ -312,7 +321,7 @@ def process_reviews(
                 continue
             outcome = by_case[case.id]
             try:
-                save_review_outcome(connection, case, outcome, accounts)
+                save_review_outcome(connection, case, outcome, accounts, budget=budget)
             except (ValueError, sqlite3.Error) as error:
                 reason = f"Review storage validation failed ({type(error).__name__}); no change was saved."
                 fail_review_case(connection, case, reason)
@@ -641,6 +650,7 @@ def _postings_label(entry, accounts: dict, side: str) -> str:
         return ""
     return "; ".join(
         f"{accounts[line.account_id].name}: {getattr(line, side):.2f}"
+        + (f" [budget: {line.budget_category}]" if line.budget_category is not None else "")
         for line in entry.lines if getattr(line, side) > 0
     )
 
