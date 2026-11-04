@@ -700,10 +700,11 @@ def build_reports(
     """
     Calculate all four reports from one validated posted-journal snapshot.
 
-    Only entries through the accounting cutoff contribute. Quotes must identify the requested security,
-    cutoff and configured provider symbol. Unavailable quotes retain carrying cost and mark the balance
-    sheet as draft; supplied draft reasons mark both statements. The journal, configuration and cache are
-    read-only.
+    Only entries through the accounting cutoff contribute. Quotes must identify the security and configured
+    provider symbol, with their original request and close dates on or before the cutoff. The latest cached
+    valuation may be older than the cutoff; its actual close date is retained. Unavailable quotes retain
+    carrying cost and mark the balance sheet as draft; supplied draft reasons mark both statements.
+    The journal, configuration and cache are read-only.
 
     Raises:
         ValueError: Settings, journal identities, investment history or report reconciliation are invalid.
@@ -971,10 +972,10 @@ def _value_holdings(
                 raise ValueError(errors.get(holding.security_id, "No suitable AUD market quote is available"))
             quote = PriceQuote.model_validate(quote)
             if (
-                quote.security_id != security.id or quote.requested_date != cutoff
+                quote.security_id != security.id or quote.requested_date > cutoff or quote.price_date > cutoff
                 or quote.symbol != price_symbol(security)
             ):
-                raise ValueError("The supplied quote does not match the security and reporting cutoff")
+                raise ValueError("The supplied quote must match the security and be on or before the cutoff")
             with localcontext() as context:
                 context.prec = max(
                     50, len(holding.units.as_tuple().digits) + len(quote.price.as_tuple().digits)

@@ -25,7 +25,7 @@ from aurum.database.database import _check_schema
 from aurum.database.journal import load_journal_entries
 from aurum.database.manual import submit_manual_input
 from aurum.database.memory import remember_text
-from aurum.database.prices import load_quote
+from aurum.database.prices import load_valuation_quote
 from aurum.database.reviews import (
     discard_review, list_guidance_cases, load_guidance_assessments, submit_review, submit_reviews,
 )
@@ -99,7 +99,7 @@ class WorkspaceService:
             "transactions": [], "reviews": [], "manuals": [], "entries": [], "counts": {}, "imports": [],
             "investment_reviews": [], "investment_reviews_error": "",
             "owner_name": "", "financials": {}, "financial_transaction_counts": {},
-            "net_worth_unpriced_holdings": [],
+            "net_worth_unpriced_holdings": [], "net_worth_price_dates": [],
             "posted_entry_count": 0,
             "statement_folder": str(self.data / "bank_statements"),
             "report_paths": [str(self.data / "reports" / month / name) for name in report_filenames(month)],
@@ -136,7 +136,7 @@ class WorkspaceService:
                         if security.id in quotes:
                             continue
                         try:
-                            quote = load_quote(
+                            quote = load_valuation_quote(
                                 connection, security.id, period.cutoff, price_symbol(security),
                             )
                         except ValueError:
@@ -158,6 +158,11 @@ class WorkspaceService:
                 result["net_worth_unpriced_holdings"] = [
                     position.name for position in reports.investment_report.positions
                     if position.security_key is not None and position.market_value is None
+                ]
+                result["net_worth_price_dates"] = [
+                    {"name": position.name, "price_date": position.price_date.isoformat()}
+                    for position in reports.investment_report.positions
+                    if position.price_date is not None and position.market_value is not None
                 ]
                 result["posted_entry_count"] = sum(entry.date <= period.cutoff for entry in entries)
                 financial_counts = budget_transaction_counts(entries, accounts, budget, period)

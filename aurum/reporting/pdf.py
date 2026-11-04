@@ -83,7 +83,11 @@ def render_reports(
         font_config=fonts,
     )
     documents = (
-        _balance_sheet_html(reports.balance_sheet, settings, generated_on),
+        _balance_sheet_html(
+            reports.balance_sheet, settings, generated_on,
+            price_dates=tuple(row.price_date for row in reports.investment_report.positions
+                              if row.price_date is not None),
+        ),
         _income_statement_html(reports.income_statement, settings, generated_on),
         _budget_report_html(reports.budget_report, settings, generated_on),
         _investment_report_html(reports.investment_report, settings, generated_on),
@@ -283,7 +287,9 @@ def _pdf_engine(settings: ReportSettings) -> tuple:
     return HTML, CSS, FontConfiguration, LocalAssetFetcher(allowed_protocols={"file"}, fail_on_errors=True)
 
 
-def _balance_sheet_html(statement: BalanceSheet, settings: ReportSettings, generated_on: date) -> str:
+def _balance_sheet_html(
+    statement: BalanceSheet, settings: ReportSettings, generated_on: date, *, price_dates: Sequence[date] = (),
+) -> str:
     """
     Arrange assets beside liabilities and equity, with matched continuation pages when tables grow.
     """
@@ -310,6 +316,7 @@ def _balance_sheet_html(statement: BalanceSheet, settings: ReportSettings, gener
     return _document(
         "Balance Sheet", f"Statement of Financial Position as of {_date(statement.as_of, superscript=True)}",
         settings.display_name, cards, left, right, statement.draft_reasons, generated_on, "balance-sheet",
+        price_dates=price_dates,
     )
 
 
@@ -359,6 +366,7 @@ def _document(
     report_class: str,
     *,
     full_width: bool = False,
+    price_dates: Sequence[date] = (),
 ) -> str:
     """
     Add headers, draft notices and a running footer, using subtitle markup prepared by the report helpers.
@@ -390,7 +398,15 @@ def _document(
         pages.append(
             f'<section class="report-page">{header}{draft}{first_content}{body}</section>'
         )
-    footer = f'<footer>{escape(name)} | Generated {_date(generated_on)}</footer>'
+    pricing = ""
+    if price_dates:
+        first, last = min(price_dates), max(price_dates)
+        dates = f"{last.day} {last:%b %Y}"
+        if first != last:
+            pattern = "%b" if first.year == last.year else "%b %Y"
+            dates = f"{first.day} {first.strftime(pattern)} – {dates}"
+        pricing = f" | Market prices {dates}"
+    footer = f'<footer>{escape(name)}{pricing} | Generated {_date(generated_on)}</footer>'
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         f'<title>{escape(title)} - {escape(name)}</title></head><body class="{escape(report_class)}">'
@@ -807,6 +823,7 @@ def _investment_pages(
             lines = len(wrap(row.account_name, width=18)) if show_account else 0
             if row.security_key is None:
                 lines += max(0, len(wrap(row.symbol or row.account_name, width=18)) - 1)
+            lines = max(lines, int(row.price_date is not None))
             cost = max(1, (26 + lines * 10 + 31) // 32)
             capacity = first_capacity if len(bodies) == 1 else 25
             heading_needed = index == 0 or not bodies[-1]
@@ -871,6 +888,10 @@ def _investment_row(row: InvestmentRow, *, show_account: bool = False) -> str:
     Show security holdings and whole-account investments using only their supplied values.
     """
     detail = f'<span class="holding-detail">{escape(row.account_name)}</span>' if show_account else ""
+    price_date = (
+        f'<span class="holding-detail">{row.price_date.day} {row.price_date:%b %Y}</span>'
+        if row.price_date is not None else ""
+    )
     gain_style = ""
     if row.unrealised_gain is not None and row.unrealised_gain != 0:
         gain_style = " positive" if row.unrealised_gain > 0 else " negative"
@@ -878,7 +899,7 @@ def _investment_row(row: InvestmentRow, *, show_account: bool = False) -> str:
         f'<tr class="indent"><td>{escape(row.symbol or row.account_name)}{detail}</td>'
         f'<td class="numeric">{_quantity(row.units)}</td>'
         f'<td class="numeric">{_quantity(row.average_cost, money=True)}</td>'
-        f'<td class="numeric">{_quantity(row.price, money=True)}</td>'
+        f'<td class="numeric">{_quantity(row.price, money=True)}{price_date}</td>'
         f'<td class="numeric">{_money(row.cost_basis, missing="-")}</td>'
         f'<td class="numeric">{_money(row.value, missing="-")}</td>'
         f'<td class="numeric{gain_style}">{_signed_money(row.unrealised_gain)}</td>'

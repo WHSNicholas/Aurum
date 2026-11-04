@@ -18,7 +18,7 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import QToolTip, QWidget
 
 # Aurum imports
-from aurum.gui.theme import gui_colour
+from aurum.gui.theme import BUDGET_COLOURS, gui_colour
 
 
 # %% 1. Allocation Chart -------------------------------------------------------------------------------------
@@ -191,13 +191,10 @@ class BudgetAllocationChart(QWidget):
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
 def _shade(widget: QWidget, kind: str, index: int, count: int) -> QColor:
     """
-    Sample each report section's semantic hue while retaining a visible dark-to-light progression.
+    Sample muted blue, red or green while retaining a visible dark-to-light progression.
     """
-    colours = {
-        "income": "#285e94", "expense": "#8c3048", "savings": "#286246",
-    }
     role = "budget_expenses" if kind == "expense" else "budget_" + kind
-    base = QColor(gui_colour(widget, role, colours[kind]))
+    base = QColor(gui_colour(widget, role, BUDGET_COLOURS[kind]))
     first = base.darker(120)
     last = QColor(*(round(channel + (255 - channel) * 0.42) for channel in base.getRgb()[:3]))
     fraction = index / max(1, count - 1)

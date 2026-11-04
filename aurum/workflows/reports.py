@@ -6,8 +6,9 @@
 Aurum turns a consistent snapshot of posted accounting into four financial report PDFs.
 
 This workflow reads account definitions, journal events and saved review progress without changing them.
-It then retrieves any required investment closes, saving only the market-price cache, and passes the
-validated figures to the PDF renderer. Unfinished accounting and unavailable valuations remain visible
+It then retrieves any required investment closes, retaining the latest valid cached close when a newer
+request is unavailable. It saves only the market-price cache and passes validated figures to the PDF
+renderer. Unfinished accounting and unavailable valuations remain visible
 as draft explanations. Reporting never processes saved responses or sends requests to ChatGPT.
 """
 
@@ -28,12 +29,13 @@ from pydantic import BaseModel, ConfigDict
 from aurum.database.database import DEFAULT_DATABASE, _check_schema
 from aurum.database.journal import load_journal_entries
 from aurum.database.manual import load_manual_entries
+from aurum.database.prices import load_valuation_quote
 from aurum.database.reviews import load_review_answers, load_review_cases, load_review_baselines
 from aurum.database.savings import load_savings_allocations
 from aurum.database.transactions import load_transactions
 from aurum.finance.accounts import DEFAULT_ACCOUNTS, AccountRegistry, load_accounts
 from aurum.finance.budget import DEFAULT_BUDGET_SETTINGS, load_budget_settings, validate_budget_plan
-from aurum.finance.investments import PriceQuote, PriceUnavailable, get_quote, holdings_as_of
+from aurum.finance.investments import PriceQuote, PriceUnavailable, get_quote, holdings_as_of, price_symbol
 from aurum.finance.journal import JournalEntry
 from aurum.finance.reports import (
     DEFAULT_REPORT_SETTINGS, Reports, ReportSettings, build_reports, load_report_settings, resolve_period,
@@ -131,10 +133,19 @@ def generate_reports(
             for identifier in sorted(required_ids, key=str):
                 security = securities.by_id(identifier)
                 try:
-                    quotes[identifier] = get_quote(connection, security, period.cutoff, fetcher=fetcher)
+                    symbol = price_symbol(security)
+                    try:
+                        get_quote(connection, security, period.cutoff, fetcher=fetcher)
+                    except (PriceUnavailable, ValueError):
+                        # A failed current request must not discard a valid earlier market valuation.
+                        pass
+                    quote = load_valuation_quote(connection, identifier, period.cutoff, symbol)
+                    if quote is None:
+                        raise PriceUnavailable("No valid cached close is available")
+                    quotes[identifier] = quote
                 except PriceUnavailable:
                     valuation_errors[identifier] = (
-                        f"No completed AUD close on or within seven days before {period.cutoff.isoformat()}. "
+                        f"No valid AUD market close is available on or before {period.cutoff.isoformat()}. "
                         "Check the symbol or rerun reports"
                     )
     reports = build_reports(

@@ -8,6 +8,7 @@ Aurum caches the dated market closes used by investment instructions.
 Quotes use exact decimal text and are identified by security, provider symbol and requested date. Once
 accepted, a cached quote is reused rather than replaced by a later download. Manual results also retain
 their quote so an investment's recorded book cost can be explained independently of future valuations.
+Reporting may reuse the latest valid cached close through its cutoff without changing those original dates.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -51,6 +52,33 @@ def load_quote(
         (str(security_id), requested_date.isoformat(), symbol),
     ).fetchone()
     return PriceQuote.model_validate(dict(zip(PRICE_COLUMNS, row))) if row else None
+
+
+def load_valuation_quote(
+    connection: sqlite3.Connection, security_id: UUID, cutoff: date, symbol: str,
+) -> PriceQuote | None:
+    """
+    Read the latest valid cached close available through a valuation cutoff, preserving its provenance.
+
+    Both the original requested date and the actual close must precede or equal the cutoff. Rank by the
+    actual close first, so a later request returning an older close cannot displace a newer market value.
+    Invalid cache rows are skipped; this read never repairs records or fetches prices.
+    """
+    rows = connection.execute(
+        "SELECT " + ", ".join(PRICE_COLUMNS) + " FROM price_quotes "
+        "WHERE security_id = ? AND requested_date <= ? AND price_date <= ? "
+        "AND currency = 'AUD' AND provider = 'yahoo' AND symbol = ? "
+        "ORDER BY price_date DESC, requested_date DESC",
+        (str(security_id), cutoff.isoformat(), cutoff.isoformat(), symbol),
+    )
+    for row in rows:
+        try:
+            quote = PriceQuote.model_validate(dict(zip(PRICE_COLUMNS, row)))
+        except ValueError:
+            continue
+        if quote.requested_date <= cutoff and quote.price_date <= cutoff:
+            return quote
+    return None
 
 
 def save_quote(connection: sqlite3.Connection, quote: PriceQuote) -> PriceQuote:

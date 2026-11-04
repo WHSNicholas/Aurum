@@ -92,9 +92,12 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   directly below every title on one line, with no added gap and roughly 35px before the page content.
   Overview and Setup use the personal name, and Setup keeps it editable.
 - Overview shows the report owner's name, balance-sheet net worth through the cutoff and monthly budget income,
-  expenses and savings. Use the shared report calculation with posted entries and saved security quotes for
-  the exact cutoff and provider symbol. Refresh stays read-only and never fetches prices. Missing or invalid
-  quotes and ambiguous manual valuations retain recorded holding values, as in reports; mark the card
+  expenses and savings. Use the shared report calculation with posted entries and the latest valid saved
+  security close on or before the cutoff, matching the security and provider symbol. Both the quote's original
+  requested date and price date must be on or before the cutoff; choose the newest price date and skip invalid
+  records without altering them. Refresh stays read-only and never fetches prices. Show actual market-price
+  dates beneath Net Worth, with each holding's date in its tooltip. When no valid saved quote exists, or a
+  manual valuation is ambiguous, retain recorded holding values as in reports; mark the card
   Provisional and name affected holdings in its tooltip. Whole-account cost questions do not make their
   recorded values provisional. Preserve budget exclusions and signed refunds; incomplete budget targets
   must not block these actuals.
@@ -396,8 +399,12 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   recorded equity balances. Income statements include only income/expense accounts in the selected period.
 - Derive dated holdings from the journal. Replace only their cost component with market value, preserving
   other balances in the account. The same adjustment goes to Unrealised Capital Gains equity, outside income.
-  Use completed AUD closes on/before the cutoff within seven days; retain actual dates in the quote cache.
-  Missing prices retain recorded value in a labelled draft. Ambiguous existing valuations need review.
+  Explicit Generate first checks for a completed AUD close within seven days of the cutoff, then uses the
+  latest valid cached close on/before that cutoff if fetching fails or it is newer than the fetched close.
+  A valid older cached close remains usable beyond seven days; preserve its original request and price dates
+  rather than relabelling it as current. Show price dates in Overview, the balance-sheet footer and investment
+  price rows. The seven-day rule for original trade/reference pricing stays unchanged. Missing prices retain
+  recorded value in a labelled draft. Ambiguous existing valuations need review.
 - Keep ordered asset groups and equity account keys in private `config/reports.yaml`, separate from accounts.
   Require exact balance-sheet reconciliation and preserve losses, refunds and negative balances.
   Show every configured account in its relevant financial statement, including unused accounts at $0.00.
@@ -474,7 +481,8 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   overrides. Load older plans unchanged; the first explicit budget edit adopts monthly plans from that month
   and materializes existing future overrides before changing targets. Never convert merely on viewing a month.
   Show income above separate expense and savings segmented pills on one shared amount scale, with blue/red/green
-  category shades and exact hover amounts. Keep this chart beneath the Budget heading outside the amounts
+  category shades and exact hover amounts. Use a consistent muted blue/red/green GUI palette independent of
+  saved report-theme budget overrides. Keep this chart beneath the Budget heading outside the amounts
   scroll area. Sort each pill's segments by descending amount, darkest to lightest; keep thick rounded ends
   and visible positive allocations at a 10px minimum, without changing exact labels. Place expense/savings
   totals above their pills, using opposite edges when needed for readable labels. Omit the positive balance

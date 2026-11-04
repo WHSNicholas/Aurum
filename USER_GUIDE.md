@@ -63,7 +63,8 @@ Changing a display name does not change its identity. System equity names and ro
 The budget follows the shared reporting month. Enter monthly amounts directly, or use the copy icon to
 stage last month's budget. Copying does not save automatically.
 
-The chart shows income above expenses and savings. Blue represents income, red expenses and green savings.
+The chart shows income above expenses and savings. Muted blue represents income, red expenses and green
+savings, consistently across GUI themes.
 Segments run from largest allocation to smallest; hover for category amounts. The tables list every category
 without separate inner scroll areas. Use plus/bin icons to add or remove categories.
 
@@ -97,9 +98,11 @@ the following month: for example, 31 October 2026 belongs to November's reportin
 
 Overview reads posted accounting only:
 
-- **Net Worth** uses the balance sheet's calculation, including investment valuations from saved prices
-  for the same cutoff. Refresh never downloads prices. **Provisional** means some holdings retain their
-  recorded value; hover for details and Generate reports to check prices or required investment review.
+- **Net Worth** uses the balance sheet's calculation and the latest valid saved market prices on or before
+  the cutoff. Prices carry forward when a new day's quote is unavailable; their dates appear beneath the
+  amount, with per-holding dates in the tooltip. Refresh never downloads prices. **Provisional** means some
+  holdings retain their recorded value; hover for details and Generate reports to check prices or required
+  investment review.
 - **Income** and **Expenses** apply budget inclusions, exclusions and signed refunds. Their counts include
   each contributing journal event once per side, including manual events.
 - **Savings** is budget income less expenses, not a bank balance.
@@ -243,8 +246,10 @@ Saved PDFs are snapshots: regenerate after changing accounting, names or report 
 Report headings show the month and year without a month-to-date suffix. Current-month figures still stop
 at the reporting cutoff.
 
-The balance sheet and investment report can revalue supported security holdings using a completed AUD close
-on or before the cutoff within seven days. Missing prices retain recorded value with a draft warning.
+The balance sheet and investment report revalue supported security holdings using completed AUD closes.
+Generate checks for a fresh close and falls back to the latest valid saved close on or before the cutoff.
+Older saved prices remain usable, with their actual dates shown in the balance-sheet footer and beside
+investment prices. If no valid price exists, recorded value is retained with a draft warning.
 Overview uses the same calculation and saved prices. Refresh after generation to see updated valuations.
 An older saved PDF can still differ after later accounting changes; regenerate it to update its snapshot.
 

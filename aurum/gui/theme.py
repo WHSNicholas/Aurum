@@ -25,6 +25,9 @@ from aurum.gui.icons import (
     RefreshButton, Spinner, icon_path, icon_source_colour, recolour_icon, recolour_pixmap,
 )
 
+# Keep budget meanings recognisable across every workspace theme.
+BUDGET_COLOURS = {"income": "#527ca3", "expense": "#ae6468", "savings": "#5e8a70"}
+
 _ASSETS = {}
 _OBSERVER = None
 _COLOUR_ROLES = {
@@ -65,7 +68,7 @@ def resolve_gui_theme(settings: ReportSettings) -> dict[str, str]:
     Derive serialisable GUI roles from the same selected appearance used by the PDF renderer.
 
     This calculation is safe in a read-only workspace worker. Fixed themes ignore the shared mode switch,
-    while semantic budget and gain/loss colours retain their configured meanings.
+    while budget charts keep their blue/red/green meanings independently of report palette overrides.
     """
     theme, colours = settings.theme, settings.mode_colours
     if theme.fixed is not None:
@@ -115,8 +118,8 @@ def resolve_gui_theme(settings: ReportSettings) -> dict[str, str]:
         "danger_bg": _mix(surface, colours.negative, 0.15),
         "warning_bg": warning_bg, "warning_text": _readable(colours.draft_text, (warning_bg, page)),
         "warning_border": colours.draft_border,
-        "budget_income": colours.budget_income, "budget_expenses": colours.budget_expenses,
-        "budget_savings": colours.budget_savings,
+        "budget_income": BUDGET_COLOURS["income"], "budget_expenses": BUDGET_COLOURS["expense"],
+        "budget_savings": BUDGET_COLOURS["savings"],
     }
     return roles
 
