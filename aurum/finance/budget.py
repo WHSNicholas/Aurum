@@ -8,8 +8,10 @@ Aurum compares monthly budget targets with the journal's recorded income, expens
 Ordinary income and expense postings follow configured account groups. Optional journal labels handle
 exceptions without changing the accounting: a gift can increase Capital while appearing as budget income.
 Total savings is income less expenses, regardless of which bank holds the money. Explicit savings labels
-and manual pot allocations divide that total; the Savings row holds the remainder. Transfers and opening
-positions do not create new savings. Interest contributes through income, and refunds retain their sign.
+and manual pot allocations divide that total; the Savings row holds the remainder. Explicitly tagged internal
+savings transfers move existing savings between categories without changing total savings or monthly capacity.
+Transfers and opening positions do not create new savings. Interest contributes through income, and refunds
+retain their sign.
 
 Targets come from private YAML, with monthly overrides and no rollover. An omitted target stays blank,
 rather than implying a zero budget. These calculations never change journal entries or call AI.
@@ -17,7 +19,7 @@ rather than implying a zero budget. These calculations never change journal entr
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import date
 from decimal import Decimal
 from hashlib import sha256
@@ -26,6 +28,7 @@ from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Annotated, Literal, Self, TYPE_CHECKING
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 from ruamel.yaml import YAML
@@ -50,25 +53,15 @@ UNALLOCATED_SAVINGS = "unallocated:savings"
 # %% 1. Budget Models ----------------------------------------------------------------------------------------
 class BudgetTarget(BaseModel):
     """
-    Set either a fixed monthly amount or a percentage of actual budget income.
+    Set a fixed monthly dollar amount, or leave the target unfinished while configuring a plan.
 
-    Leaving both fields empty means no target has been set. Percentage targets are not prorated, and
-    nonpositive monthly income produces a zero percentage target.
+    A complete saved plan requires an amount for every category. Reading unfinished historical settings
+    remains possible so they can be corrected without interrupting ordinary journal work.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
     amount: Money | None = Field(default=None, ge=0)
-    percentage: Decimal | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
-
-    @model_validator(mode="after")
-    def _check_mode(self) -> Self:
-        """
-        Prevent a target from specifying both dollars and a percentage.
-        """
-        if self.amount is not None and self.percentage is not None:
-            raise ValueError("A budget target must use amount or percentage, not both")
-        return self
 
 
 class BudgetCategory(BudgetTarget):
@@ -103,16 +96,6 @@ class BudgetCategory(BudgetTarget):
             raise ValueError("Budget account keys must be nonblank and unique within a category")
         return value
 
-    @model_validator(mode="after")
-    def _check_income_target(self) -> Self:
-        """
-        Keep income targets fixed instead of deriving them from the income being measured.
-        """
-        if self.kind == "income" and self.percentage is not None:
-            raise ValueError("Income categories require fixed amount targets")
-        return self
-
-
 class SavingsSettings(BaseModel):
     """
     Name monthly savings pots and the category holding income not spent or allocated elsewhere.
@@ -140,18 +123,28 @@ class SavingsSettings(BaseModel):
 
 class BudgetSettings(BaseModel):
     """
-    Keep ordered budget categories, event exclusions and month-specific target overrides immutable.
+    Keep ordered budget categories, savings pots and month-specific target overrides immutable.
 
-    Monthly overrides replace a category's target completely. They do not change its name, accounting
-    meaning or account mapping; a null target explicitly clears the default for that month.
+    Legacy monthly overrides inherit category defaults. From monthly_plans_from onward, every month has
+    independent targets and absent amounts stay blank. Neither policy changes names or account mappings.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
     categories: Mapping[str, BudgetCategory] = Field(default_factory=dict)
-    excluded_accounts: tuple[str, ...] = ()
     monthly_overrides: Mapping[str, Mapping[str, BudgetTarget]] = Field(default_factory=dict)
+    monthly_plans_from: str | None = None
     savings: SavingsSettings | None = None
+
+    @field_validator("monthly_plans_from")
+    @classmethod
+    def _check_planning_start(cls, value: str | None) -> str | None:
+        """
+        Keep the optional transition to independent monthly targets at a valid reporting-month label.
+        """
+        if value is not None:
+            _validate_month(value)
+        return value
 
     @model_validator(mode="after")
     def _check_settings(self) -> Self:
@@ -163,10 +156,6 @@ class BudgetSettings(BaseModel):
                 raise ValueError(
                     "Category keys use lowercase letters/digits/underscores; exclude and default are reserved"
                 )
-        if any(not key.strip() for key in self.excluded_accounts):
-            raise ValueError("Excluded account keys must not be blank")
-        if len(set(self.excluded_accounts)) != len(self.excluded_accounts):
-            raise ValueError("Excluded account keys must not repeat")
         if self.savings is not None:
             for key in self.savings.category_keys:
                 if key not in self.categories or self.categories[key].kind != "savings":
@@ -179,8 +168,6 @@ class BudgetSettings(BaseModel):
             for key, target in targets.items():
                 if key not in self.categories:
                     raise ValueError(f"Unknown budget category in monthly override: {key!r}")
-                if self.categories[key].kind == "income" and target.percentage is not None:
-                    raise ValueError("Income overrides require fixed amount targets")
             overrides[month] = MappingProxyType(dict(targets))
         object.__setattr__(self, "categories", MappingProxyType(dict(self.categories)))
         object.__setattr__(self, "monthly_overrides", MappingProxyType(overrides))
@@ -305,6 +292,76 @@ def load_budget_settings(path: Path | str, accounts: AccountRegistry) -> BudgetS
     return settings
 
 
+def budget_targets(settings: BudgetSettings, month: str | None = None) -> dict[str, BudgetTarget]:
+    """
+    Resolve monthly targets without changing legacy plans or filling an independent month automatically.
+
+    A missing policy preserves default inheritance. Earlier months retain that same behavior after the
+    policy starts; later missing targets remain unset. None selects the stored legacy defaults themselves.
+    """
+    if month is not None:
+        _validate_month(month)
+    overrides = settings.monthly_overrides.get(month, {})
+    independent = month is not None and settings.monthly_plans_from is not None and (
+        month >= settings.monthly_plans_from
+    )
+    return {
+        key: overrides.get(key, BudgetTarget() if independent else category)
+        for key, category in settings.categories.items()
+    }
+
+
+def budget_plan_totals(settings: BudgetSettings, month: str | None = None) -> dict[str, Decimal | None]:
+    """
+    Sum fixed targets for one plan, retaining an unknown total when any target is unfinished.
+
+    Targets follow the saved monthly policy. Zero is intentional and differs from an empty amount.
+    """
+    targets = budget_targets(settings, month)
+    totals = {kind: 0 for kind in ("income", "expense", "savings")}
+    incomplete = set()
+    for key, category in settings.categories.items():
+        amount = targets[key].amount
+        if amount is None:
+            incomplete.add(category.kind)
+        else:
+            totals[category.kind] += _cents(amount)
+    return {kind: None if kind in incomplete else _money(amount) for kind, amount in totals.items()}
+
+
+def validate_budget_plan(settings: BudgetSettings, month: str | None = None) -> None:
+    """
+    Require complete, balanced dollar targets before saving a budget or generating reports.
+
+    This deliberately does not run when loading settings for journal work. Existing incomplete plans
+    remain editable, and account or report settings can still be saved while the budget is being repaired.
+    A supplied month validates that effective plan only. Without a month, saving checks all stored plans,
+    plus the default plan while legacy inheritance is the active policy. Unvisited future months need not
+    be entered, but reporting an independent month requires its complete targets.
+    """
+    months = (month,) if month is not None else (
+        (() if settings.monthly_plans_from is not None else (None,)) + tuple(settings.monthly_overrides)
+    )
+    for selected in months:
+        label = selected or "Default budget"
+        targets = budget_targets(settings, selected)
+        missing = [
+            category.name for key, category in settings.categories.items()
+            if targets[key].amount is None
+        ]
+        if missing:
+            raise ValueError(
+                f"{label}: enter a dollar target for " + ", ".join(missing) + ". Use 0 if needed."
+            )
+        totals = budget_plan_totals(settings, selected)
+        difference = _cents(totals["income"]) - _cents(totals["expense"]) - _cents(totals["savings"])
+        if difference:
+            raise ValueError(
+                f"{label}: planned income must equal expenses plus savings. "
+                f"Difference: ${_money(difference):.2f}. Adjust the targets before saving or reporting."
+            )
+
+
 def validate_budget_entry(
     entry: JournalEntry, accounts: AccountRegistry, settings: BudgetSettings,
 ) -> None:
@@ -312,8 +369,8 @@ def validate_budget_entry(
     Check explicit budget labels without altering the event's accounting.
 
     Labels belong to the posting that supplies the budget amount, not both bank observations. Savings
-    labels can record withdrawals, but opposing postings with the same label in one event are rejected:
-    that would count both sides of a transfer. Several same-direction postings can represent a true split.
+    labels can record withdrawals. Two distinct savings labels can move an allocation between categories;
+    opposing postings with the same label are rejected. Several same-direction postings can be a true split.
 
     Raises:
         ValueError: An account or label is unknown, a label is incompatible with its account, or both
@@ -338,7 +395,9 @@ def validate_budget_entry(
         if category.kind == "savings":
             savings_sides.setdefault(key, set()).add(line.debit > 0)
     if any(len(sides) > 1 for sides in savings_sides.values()):
-        raise ValueError("Tag only one side of a savings transfer, not its debit and credit together")
+        raise ValueError(
+            "Use different savings categories for the two sides of a transfer, or leave both untagged"
+        )
 
 
 def budget_catalogue(settings: BudgetSettings) -> tuple[dict, ...]:
@@ -346,7 +405,7 @@ def budget_catalogue(settings: BudgetSettings) -> tuple[dict, ...]:
     Provide compact permitted labels for manual-entry and human-review AI requests.
 
     Account keys limit labelled postings when supplied. Exclude suppresses one line; default explicitly
-    restores ordinary account mapping. Configured excluded_accounts suppress whole events.
+    restores ordinary account mapping. Only explicit posting labels exclude amounts from the budget.
     """
     categories = tuple(
         {"key": key, "name": category.name, "kind": category.kind, "accounts": category.accounts}
@@ -396,7 +455,7 @@ def budget_revision(settings: BudgetSettings | None) -> str | None:
     if settings is None:
         return None
     context = {
-        "categories": budget_catalogue(settings), "excluded_accounts": settings.excluded_accounts,
+        "categories": budget_catalogue(settings),
         "savings": settings.savings.model_dump(mode="json") if settings.savings else None,
     }
     payload = json.dumps(context, sort_keys=True, separators=(",", ":"))
@@ -411,14 +470,17 @@ def savings_baseline(
     Return a reporting month's income left after expenses and explicit journal savings allocations.
 
     Manual splits consume this remaining capacity. Income includes interest and labelled gifts; transfers
-    and opening positions do not create savings. This uses the same signed amounts as the budget report.
+    and opening positions do not create savings. Fully tagged internal savings transfers remain in report
+    actuals, but neither consume nor release capacity for new allocations from this month's surplus.
     """
     _validate_settings(budget, accounts)
     year, month = reporting_month(day)
     start, end = working_month_start(year, month), working_month_end(year, month)
+    entries = tuple(entries)
     amounts, _, _, _ = _budget_amounts(entries, accounts, budget, start, end)
     residual = budget.savings.residual_category if budget.savings else UNALLOCATED_SAVINGS
-    return _money(amounts[residual])
+    transfers = _savings_transfer_adjustment(entries, accounts, budget, start, end)
+    return _money(amounts[residual] + transfers)
 
 
 def build_budget_report(
@@ -439,6 +501,7 @@ def build_budget_report(
     balance-sheet accounting; the residual row keeps any unallocated amount or shortfall visible.
     """
     _validate_settings(settings, accounts)
+    entries = tuple(entries)
     amounts, unbudgeted, actual_income, total_expenses = _budget_amounts(
         entries, accounts, settings, period.start_date, period.cutoff,
     )
@@ -446,17 +509,18 @@ def build_budget_report(
     _allocate_savings(amounts, allocations, settings, period)
     residual = settings.savings.residual_category if settings.savings else UNALLOCATED_SAVINGS
     surplus = actual_income - total_expenses
-    if surplus - amounts[residual] > max(surplus, 0):
+    transfers = _savings_transfer_adjustment(
+        entries, accounts, settings, period.start_date, period.cutoff,
+    )
+    if surplus - amounts[residual] - transfers > max(surplus, 0):
         reasons.append(
             "Savings allocations exceed income left after expenses; review the month's allocations"
         )
     rows: dict[str, list[BudgetRow]] = {"income": [], "expense": [], "savings": []}
-    overrides = settings.monthly_overrides.get(period.month, {})
+    targets = budget_targets(settings, period.month)
     for key, category in settings.categories.items():
-        target = overrides.get(key, category)
+        target = targets[key]
         amount = target.amount
-        if target.percentage is not None:
-            amount = _percentage_target(actual_income, target.percentage)
         rows[category.kind].append(BudgetRow(
             key=key, name=category.name, actual=_money(amounts[key]), target=amount,
         ))
@@ -475,7 +539,37 @@ def build_budget_report(
     )
 
 
+def budget_transaction_counts(
+    entries: Iterable[JournalEntry], accounts: AccountRegistry, settings: BudgetSettings,
+    period: "ReportPeriod",
+) -> dict[str, int]:
+    """
+    Count distinct posted events contributing to the period's budget income and expenses.
+
+    The caller supplies posted entries only. Split postings count once per event and side; refunds still
+    count as activity, and an event containing both included income and expenses contributes to both counts.
+    Journal exclusions, explicit labels and unbudgeted accounts follow the report's actual-amount rules.
+    """
+    _validate_settings(settings, accounts)
+    identifiers = {"income": set(), "expense": set()}
+    for identifier, _, _, kind, _ in _budget_postings(
+        entries, accounts, settings, period.start_date, period.cutoff,
+    ):
+        if kind in identifiers:
+            identifiers[kind].add(identifier)
+    return {"income": len(identifiers["income"]), "expenses": len(identifiers["expense"])}
+
+
 # %% 4. Helpers ----------------------------------------------------------------------------------------------
+def _validate_month(value: str) -> None:
+    """
+    Reject malformed planning labels while allowing future months to be prepared in advance.
+    """
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}", value):
+        raise ValueError("Budget months must use YYYY-MM")
+    date.fromisoformat(value + "-01")
+
+
 def _budget_amounts(
     entries: Iterable[JournalEntry], accounts: AccountRegistry, settings: BudgetSettings,
     start: date, end: date,
@@ -486,41 +580,13 @@ def _budget_amounts(
     Reports and manual allocation capacity share these rules, including gifts, refunds and exclusions.
     Explicit savings labels divide the total; they never increase it by counting a transfer as new income.
     """
-    by_id = {account.id: account for account in accounts.accounts.values()}
-    mapped = {
-        account_key: key
-        for key, category in settings.categories.items()
-        if category.kind in {"income", "expense"}
-        for account_key in category.accounts
-        if accounts.accounts[account_key].account_type in {AccountType.INCOME, AccountType.EXPENSE}
-    }
     # Add integer cents so large valid amounts cannot lose pennies to Decimal's current precision.
     amounts = {key: 0 for key in settings.categories}
     unbudgeted: dict[str, tuple[str, str]] = {}
-    for entry in entries:
-        if not start <= entry.date <= end:
-            continue
-        validate_budget_entry(entry, accounts, settings)
-        if any(by_id[line.account_id].key in settings.excluded_accounts for line in entry.lines):
-            continue
-        for line in entry.lines:
-            account = by_id[line.account_id]
-            key = line.budget_category
-            if key == "exclude":
-                continue
-            if key == "default":
-                key = None
-            if key is None:
-                if account.account_type not in {AccountType.INCOME, AccountType.EXPENSE}:
-                    continue
-                key = mapped.get(account.key)
-                if key is None:
-                    key = "unbudgeted:" + account.key
-                    unbudgeted[key] = (account.name, account.account_type.value)
-            kind = settings.categories[key].kind if key in settings.categories else unbudgeted[key][1]
-            debit, credit = _cents(line.debit), _cents(line.credit)
-            signed = credit - debit if kind == "income" else debit - credit
-            amounts[key] = amounts.get(key, 0) + signed
+    for _, key, name, kind, signed in _budget_postings(entries, accounts, settings, start, end):
+        if key not in settings.categories:
+            unbudgeted[key] = (name, kind)
+        amounts[key] = amounts.get(key, 0) + signed
 
     actual_income = sum(
         amounts[key] for key, category in settings.categories.items() if category.kind == "income"
@@ -537,6 +603,92 @@ def _budget_amounts(
     if settings.savings is None:
         unbudgeted[residual] = ("Savings", "savings")
     return amounts, unbudgeted, actual_income, actual_expenses
+
+
+def _budget_postings(
+    entries: Iterable[JournalEntry], accounts: AccountRegistry, settings: BudgetSettings,
+    start: date, end: date,
+) -> Iterator[tuple[UUID, str, str, str, int]]:
+    """
+    Share included posting identities, categories and signed cents between budget totals and event counts.
+    """
+    by_id = {account.id: account for account in accounts.accounts.values()}
+    mapped = {
+        account_key: key
+        for key, category in settings.categories.items()
+        if category.kind in {"income", "expense"}
+        for account_key in category.accounts
+        if accounts.accounts[account_key].account_type in {AccountType.INCOME, AccountType.EXPENSE}
+    }
+    for entry in entries:
+        if not start <= entry.date <= end:
+            continue
+        validate_budget_entry(entry, accounts, settings)
+        for line in entry.lines:
+            account = by_id[line.account_id]
+            key = line.budget_category
+            if key == "exclude":
+                continue
+            if key == "default":
+                key = None
+            if key is None:
+                if account.account_type not in {AccountType.INCOME, AccountType.EXPENSE}:
+                    continue
+                key = mapped.get(account.key, "unbudgeted:" + account.key)
+            kind = settings.categories[key].kind if key in settings.categories else account.account_type.value
+            debit, credit = _cents(line.debit), _cents(line.credit)
+            signed = credit - debit if kind == "income" else debit - credit
+            yield entry.id, key, account.name, kind, signed
+
+
+def _savings_transfer_adjustment(
+    entries: Iterable[JournalEntry], accounts: AccountRegistry, settings: BudgetSettings,
+    start: date, end: date,
+) -> int:
+    """
+    Separate explicit moves of existing savings from allocations of this month's income surplus.
+
+    Only a complete, source-linked TRANSFER WITHIN pair on its own bank account qualifies. Both sides
+    require different savings labels. Keep these signed movements in report actuals, but neither consume
+    nor release current-month capacity for new manual allocations. Other entries retain normal checks.
+    """
+    by_id = {account.id: account for account in accounts.accounts.values()}
+    residual = settings.savings.residual_category if settings.savings else UNALLOCATED_SAVINGS
+    adjustment = 0
+    for entry in entries:
+        if not start <= entry.date <= end or len(entry.lines) != 2:
+            continue
+        first, second = entry.lines
+        if (
+            first.account_id != second.account_id
+            or first.transaction_id is None or second.transaction_id is None
+            or first.transaction_id == second.transaction_id
+            or first.debit != second.credit or first.credit != second.debit
+            or first.budget_category is None or second.budget_category is None
+            or first.budget_category == second.budget_category
+        ):
+            continue
+        account = by_id.get(first.account_id)
+        if account is None or account.account_type != AccountType.ASSET or account.bank_details is None:
+            continue
+        categories = [
+            settings.categories.get(first.budget_category), settings.categories.get(second.budget_category),
+        ]
+        if any(category is None or category.kind != "savings" for category in categories):
+            continue
+        first_route, second_route = [re.fullmatch(
+            r"TRANSFER\s+WITHIN\s+([0-9]{6})\s*-\s*([0-9]+)\s+#([0-9]+)\s*",
+            line.description, re.IGNORECASE,
+        ) for line in entry.lines]
+        if first_route is None or second_route is None or first_route.groups() != second_route.groups():
+            continue
+        if first_route.groups()[:2] != (account.bank_details.bsb, account.bank_details.account_number):
+            continue
+        adjustment += sum(
+            _cents(line.debit) - _cents(line.credit)
+            for line in entry.lines if line.budget_category != residual
+        )
+    return adjustment
 
 
 def _allocate_savings(
@@ -583,9 +735,6 @@ def _validate_settings(settings: BudgetSettings, accounts: AccountRegistry) -> N
     Reject unknown accounts, incompatible category mappings and ambiguous automatic groups.
     """
     defaults = set()
-    for key in settings.excluded_accounts:
-        if key not in accounts.accounts:
-            raise ValueError(f"Unknown excluded budget account: {key!r}")
     for key, category in settings.categories.items():
         for account_key in category.accounts:
             account = accounts.accounts.get(account_key)
@@ -607,16 +756,6 @@ def _target_total(rows: Iterable[BudgetRow]) -> Decimal | None:
     if any(target is None for target in targets):
         return None
     return _money(sum(_cents(value) for value in targets))
-
-
-def _percentage_target(income_cents: int, percentage: Decimal) -> Decimal:
-    """
-    Calculate a percentage target with exact integers, rounding half a cent upwards once at the end.
-    """
-    numerator, denominator = percentage.as_integer_ratio()
-    denominator *= 100
-    cents, remainder = divmod(max(income_cents, 0) * numerator, denominator)
-    return _money(cents + int(remainder * 2 >= denominator))
 
 
 def _cents(value: Decimal) -> int:

@@ -5,7 +5,7 @@
 """
 Aurum keeps monthly review answers and their accounting changes in its private SQLite database.
 
-Export snapshots connect each editable CSV answer to the accounting the user actually reviewed. Submitted
+Saved snapshots connect each response to the accounting the user actually reviewed. Submitted
 answers and reserved requests are retained independently of the journal, so an interrupted request or an
 uncertain correction never removes valid postings. Repeated unchanged answers do not spend more tokens.
 
@@ -32,7 +32,8 @@ from aurum.database.journal import (
 from aurum.database.transactions import from_sqlite_dollars, load_transactions
 from aurum.finance.accounts import AccountRegistry
 from aurum.finance.budget import BudgetSettings, budget_revision, validate_budget_labels
-from aurum.finance.journal import preserve_budget_categories
+from aurum.finance.journal import preserve_account_investments, preserve_budget_categories
+from aurum.database.memory import remember_text
 from aurum.finance.review import Guidance, GuidanceResult, ReviewAnswer, ReviewCase, ReviewOutcome
 
 
@@ -44,15 +45,66 @@ def review_revision(
     Fingerprint current source facts and complete affected events, including other sources on those events.
 
     Display names and request timestamps do not affect the revision. Accounting changes, source changes and
-    line descriptions do, so an answer cannot silently correct accounting that changed after export.
+    line descriptions do, so an answer cannot silently correct accounting that changed after the editor opened.
     """
     snapshot = _snapshot(connection, transaction_ids, accounts, include_journal=False)
     return _digest(snapshot["context"])
 
 
-def load_review_exports(connection: sqlite3.Connection) -> dict[UUID, dict]:
+def review_display_versions(
+    connection: sqlite3.Connection, accounts: AccountRegistry, transaction_ids,
+    *, sources: dict | None = None, entries: list | None = None, baselines: dict | None = None,
+) -> dict[UUID, dict[str, str]]:
     """
-    Read each transaction's latest exported CSV baseline, including the exact displayed answer.
+    Build desktop review revisions and answer tokens from one shared read of the saved accounting.
+
+    Optional inputs must come from the caller's same read transaction. Complete linked events and original
+    answer payloads retain the individual live checks' exact fingerprints. Saving still validates fresh
+    accounting and answers inside its own write transaction; these display versions never authorise a save.
+    """
+    wanted = {UUID(str(identifier)) for identifier in transaction_ids}
+    if not wanted:
+        return {}
+    if sources is None:
+        sources = {item.transaction_id: item for item in load_transactions(connection)}
+    if entries is None:
+        entries = load_journal_entries(connection, accounts)
+    if baselines is None:
+        baselines = load_review_baselines(connection)
+    by_source = {}
+    for entry in entries:
+        for line in entry.lines:
+            if line.transaction_id in wanted:
+                by_source.setdefault(line.transaction_id, []).append(entry)
+    answers = {}
+    for identifier, action_id, payload in connection.execute(
+        "SELECT transaction_id, id, payload FROM review_actions WHERE kind = 'answer' "
+        "ORDER BY created_at, rowid"
+    ):
+        identifier = UUID(identifier)
+        if identifier in wanted:
+            answers[identifier] = (action_id, payload)
+    result = {}
+    for identifier in wanted:
+        snapshot = _snapshot(
+            connection, [identifier], accounts, include_journal=False,
+            sources=sources, entries=by_source.get(identifier, []),
+        )
+        result[identifier] = {
+            "context_revision": _digest(snapshot["context"]),
+            "answer_token": _digest({
+                "answer": answers.get(identifier),
+                "cleared": baselines.get(identifier, {}).get("human_review_cleared", False),
+            }),
+        }
+    return result
+
+
+def load_review_baselines(connection: sqlite3.Connection) -> dict[UUID, dict]:
+    """
+    Read saved response state, retaining historical baselines used for clearing and stale-answer checks.
+
+    The existing storage kind remains unchanged so saved answers keep their identity without a migration.
     """
     return {
         UUID(identifier): json.loads(payload)
@@ -62,29 +114,9 @@ def load_review_exports(connection: sqlite3.Connection) -> dict[UUID, dict]:
     }
 
 
-def save_review_exports(connection: sqlite3.Connection, exports: dict[UUID, dict]) -> None:
-    """
-    Save export baselines together after the corresponding CSV files have been written successfully.
-    """
-    _require_idle(connection)
-    with connection:
-        connection.execute("BEGIN IMMEDIATE")
-        for identifier, payload in exports.items():
-            identifier = UUID(str(identifier))
-            connection.execute(
-                """
-                INSERT INTO review_actions (
-                    id, kind, transaction_id, status, payload, created_at, updated_at
-                ) VALUES (?, 'export', ?, 'exported', ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
-                """,
-                (f"export:{identifier}", str(identifier), _json(payload), _now(), _now()),
-            )
-
-
 def load_review_answers(connection: sqlite3.Connection) -> dict[UUID, ReviewAnswer]:
     """
-    Read the latest submitted free-text answer for each source, retaining its exported revision.
+    Read the latest submitted free-text answer for each source, retaining the revision the user reviewed.
     """
     answers = {}
     for (payload,) in connection.execute(
@@ -95,37 +127,70 @@ def load_review_answers(connection: sqlite3.Connection) -> dict[UUID, ReviewAnsw
     return answers
 
 
-def save_review_answers(connection: sqlite3.Connection, answers: list[ReviewAnswer]) -> None:
+def review_answer_token(connection: sqlite3.Connection, transaction_id: UUID) -> str:
     """
-    Append changed submissions without losing earlier answers or duplicating an unchanged submission.
+    Identify the saved answer and its cleared state so two editors cannot overwrite each other.
     """
-    _require_idle(connection)
-    answers = [ReviewAnswer.model_validate(answer.model_dump()) for answer in answers]
-    if len({answer.transaction_id for answer in answers}) != len(answers):
-        raise ValueError("A submission may contain only one answer per transaction")
-    with connection:
-        connection.execute("BEGIN IMMEDIATE")
-        saved = load_review_answers(connection)
-        for answer in answers:
-            if saved.get(answer.transaction_id) == answer:
-                continue
-            connection.execute(
-                """
-                INSERT INTO review_actions (
-                    id, kind, transaction_id, revision, status, payload, created_at, updated_at
-                ) VALUES (?, 'answer', ?, ?, 'submitted', ?, ?, ?)
-                """,
-                (
-                    str(uuid4()), str(answer.transaction_id), answer.revision,
-                    answer.model_dump_json(), _now(), _now(),
-                ),
-            )
+    row = connection.execute(
+        "SELECT id, payload FROM review_actions WHERE kind = 'answer' AND transaction_id = ? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (str(transaction_id),),
+    ).fetchone()
+    cleared = load_review_baselines(connection).get(transaction_id, {}).get("human_review_cleared", False)
+    return _digest({"answer": row, "cleared": cleared})
+
+
+def submit_review(
+    connection: sqlite3.Connection, accounts: AccountRegistry, *,
+    transaction_id: UUID | str, text: str, revision: str, answer_token: str,
+) -> None:
+    """
+    Save an authoritative GUI answer only while both its accounting and saved text remain current.
+
+    Saving does not call AI or change the journal. Saved response state retains its exact accounting
+    revision and cleared status so another open editor cannot silently overwrite newer work.
+    """
+    _edit_review(
+        connection, accounts, UUID(str(transaction_id)), revision, answer_token, text=text,
+    )
+
+
+def submit_reviews(
+    connection: sqlite3.Connection, accounts: AccountRegistry, *, answers: list[dict],
+) -> None:
+    """
+    Save a complete set of edited bank answers atomically, retaining every original stale-answer check.
+
+    Read common accounting evidence once. A stale answer rejects the entire batch, so no local draft is
+    silently consumed while another remains unsaved.
+    """
+    edits = []
+    for payload in answers:
+        if set(payload) != {"transaction_id", "revision", "answer_token", "text"}:
+            raise ValueError("Each review answer needs its source, revision, answer token and text")
+        answer = ReviewAnswer(
+            transaction_id=payload["transaction_id"], revision=payload["revision"],
+            human_review=payload["text"],
+        )
+        edits.append((answer.transaction_id, answer.revision, payload["answer_token"], answer.human_review))
+    if not edits or len({item[0] for item in edits}) != len(edits):
+        raise ValueError("Save at least one answer, with only one answer per transaction")
+    _edit_reviews(connection, accounts, edits)
+
+
+def discard_review(
+    connection: sqlite3.Connection, accounts: AccountRegistry, *,
+    transaction_id: UUID | str, revision: str, answer_token: str,
+) -> None:
+    """
+    Clear an unprocessed answer without deleting its history or undoing any posted accounting.
+    """
+    _edit_review(connection, accounts, UUID(str(transaction_id)), revision, answer_token, text=None)
 
 
 # %% 2. Review Requests --------------------------------------------------------------------------------------
 def load_review_cases(connection: sqlite3.Connection) -> list[dict]:
     """
-    Read saved requests and outcomes so the command can resume explicit retries and display review questions.
+    Read saved requests and outcomes so Process can retry work and Review can display saved questions.
     """
     return [
         {
@@ -158,7 +223,7 @@ def reserve_review_case(
     _require_idle(connection)
     case = ReviewCase.model_validate(case.model_dump())
     if any(line.investment is not None for entry in case.entries for line in entry.lines):
-        raise ValueError("Edit investment corrections in their original manual CSV row.")
+        raise ValueError("Edit investment corrections in their original Manual entry.")
     if not model.strip() or not skill_version.strip():
         raise ValueError("A review request needs a model and skill version")
     if case.budget_revision != budget_revision(budget):
@@ -256,6 +321,7 @@ def save_review_outcome(
         raise ValueError("Budget categories changed after this review was prepared")
     if outcome.status == "apply":
         entries = preserve_budget_categories(outcome.entries, case.entries)
+        entries = preserve_account_investments(entries, case.entries)
         validate_budget_labels(entries, accounts, budget, case.entries)
         outcome = ReviewOutcome.model_validate({**outcome.model_dump(), "entries": entries})
     if outcome.case_id != case.id:
@@ -269,6 +335,11 @@ def save_review_outcome(
         if outcome.status == "apply":
             _check_replacements(connection, case, outcome, accounts)
             _replace_entries(connection, case, outcome, accounts)
+            if any(remember_text(answer.human_review) for answer in case.answers):
+                outcome = outcome.model_copy(update={
+                    "guidance": (), "guidance_errors": (),
+                    "guidance_reason": "Explicit memory is retained in the saved human response.",
+                })
             disposition = _activate_guidance(connection, case, outcome.guidance, accounts)
             if outcome.guidance or outcome.guidance_reason is not None or outcome.guidance_errors:
                 result = GuidanceResult(
@@ -408,6 +479,7 @@ def save_guidance_result(
 
     Invalid optional candidates are recorded independently. A partial result can activate valid guidance
     while remaining failed for explicit retry; duplicates on a retry do not create another instruction.
+    Explicitly tagged answers retain their editable memory without creating a separate inferred copy.
     """
     _require_idle(connection)
     case = ReviewCase.model_validate(case.model_dump())
@@ -425,6 +497,8 @@ def save_guidance_result(
             raise ValueError("A guidance result must match its reserved request")
         if _accepted_guidance_case(connection, case.id, accounts) != case:
             raise ValueError("The accepted review evidence changed before guidance was saved")
+        if any(remember_text(answer.human_review) for answer in case.answers):
+            result = GuidanceResult(reason="Explicit memory is retained in the saved human response.")
         disposition = _activate_guidance(
             connection, case, result.guidance, accounts, retire_evidence=False,
         )
@@ -451,9 +525,89 @@ def fail_guidance_case(connection: sqlite3.Connection, case_id: UUID, message: s
 
 
 # %% 4. Helpers ----------------------------------------------------------------------------------------------
+def _edit_review(
+    connection: sqlite3.Connection, accounts: AccountRegistry, identifier: UUID,
+    revision: str, token: str, *, text: str | None,
+) -> None:
+    """
+    Save a single answer or clearing marker through the same atomic validation as a batch.
+    """
+    _edit_reviews(connection, accounts, [(identifier, revision, token, text)])
+
+
+def _edit_reviews(connection: sqlite3.Connection, accounts: AccountRegistry, edits: list[tuple]) -> None:
+    """
+    Compare all original revisions and persist answers together using one shared accounting snapshot.
+    """
+    _require_idle(connection)
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        sources = {row.transaction_id: row for row in load_transactions(connection)}
+        entries = load_journal_entries(connection, accounts)
+        baselines = load_review_baselines(connection)
+        answers = load_review_answers(connection)
+        cases = load_review_cases(connection)
+        for identifier, revision, token, text in edits:
+            _write_review_edit(
+                connection, accounts, identifier, revision, token, text=text,
+                sources=sources, entries=entries, baselines=baselines, answers=answers, cases=cases,
+            )
+
+
+def _write_review_edit(
+    connection: sqlite3.Connection, accounts: AccountRegistry, identifier: UUID,
+    revision: str, token: str, *, text: str | None, sources: dict, entries: list,
+    baselines: dict, answers: dict, cases: list,
+) -> None:
+    """
+    Validate and write one edit inside the caller's complete batch transaction.
+    """
+    answer = ReviewAnswer(
+        transaction_id=identifier, revision=revision, human_review=text,
+    ) if text is not None else None
+    snapshot = _snapshot(connection, [identifier], accounts, include_journal=False,
+                         sources=sources, entries=entries)
+    if _digest(snapshot["context"]) != revision:
+        raise ValueError("The accounting changed. Reload this review before saving your answer.")
+    if review_answer_token(connection, identifier) != token:
+        raise ValueError("A newer answer was saved. Reload this review before changing it.")
+    baseline = dict(baselines.get(identifier, {}))
+    previous = answers.get(identifier)
+    if (
+        answer is not None and previous is not None and text == previous.human_review
+        and not baseline.get("human_review_cleared", False)
+    ):
+        return
+    latest = next((
+        item for item in reversed(cases)
+        if any(row.transaction_id == identifier for row in item["case"].transactions)
+    ), None)
+    if latest and latest["status"] == "requesting":
+        raise ValueError("Retry the interrupted review before changing or discarding its answer.")
+    if answer is not None and previous != answer:
+        connection.execute(
+            """
+            INSERT INTO review_actions (
+                id, kind, transaction_id, revision, status, payload, created_at, updated_at
+            ) VALUES (?, 'answer', ?, ?, 'submitted', ?, ?, ?)
+            """,
+            (str(uuid4()), str(identifier), revision, answer.model_dump_json(), _now(), _now()),
+        )
+    baseline["human_review_cleared"] = text is None
+    connection.execute(
+        """
+        INSERT INTO review_actions (
+            id, kind, transaction_id, status, payload, created_at, updated_at
+        ) VALUES (?, 'export', ?, 'exported', ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
+        """,
+        (f"export:{identifier}", str(identifier), _json(baseline), _now(), _now()),
+    )
+
+
 def _snapshot(
     connection: sqlite3.Connection, transaction_ids, accounts: AccountRegistry,
-    *, include_journal: bool = True,
+    *, include_journal: bool = True, sources: dict | None = None, entries: list | None = None,
 ) -> dict:
     """
     Collect complete affected events and source facts, adding exact journal rows only for audit snapshots.
@@ -463,11 +617,12 @@ def _snapshot(
     wanted = {UUID(str(identifier)) for identifier in transaction_ids}
     if not wanted:
         raise ValueError("A review must include at least one source transaction")
-    sources = {item.transaction_id: item for item in load_transactions(connection)}
+    if sources is None:
+        sources = {item.transaction_id: item for item in load_transactions(connection)}
     if not wanted <= sources.keys():
         raise ValueError("A review references an unknown source transaction")
     entries = [
-        entry for entry in load_journal_entries(connection, accounts)
+        entry for entry in (load_journal_entries(connection, accounts) if entries is None else entries)
         if wanted & {line.transaction_id for line in entry.lines if line.transaction_id is not None}
     ]
     for entry in entries:
@@ -502,13 +657,13 @@ def _check_case(
 
     protected = manual_claims(connection).keys() | manual_owner_ids(connection).keys()
     if {item.transaction_id for item in case.transactions} & protected:
-        raise ValueError("These sources belong to a manual instruction; edit its original manual CSV row")
+        raise ValueError("These sources belong to a manual instruction; edit its original Manual entry")
     context = _context(case.transactions, case.entries)
     if snapshot["context"] != context or _digest(context) != case.revision:
-        raise ValueError("This review is stale or omits part of an event; export the current context")
+        raise ValueError("This review is stale or omits part of an event; reload it before saving your Response")
     for answer in case.answers:
         if answer.revision != review_revision(connection, [answer.transaction_id], accounts):
-            raise ValueError("An answer belongs to an older exported accounting context")
+            raise ValueError("An answer belongs to older accounting; reload the review before saving your Response")
     return snapshot
 
 
@@ -522,7 +677,7 @@ def _check_replacements(
         line.investment is not None
         for entry in (*case.entries, *outcome.entries) for line in entry.lines
     ):
-        raise ValueError("Edit investment corrections in their original manual CSV row.")
+        raise ValueError("Edit investment corrections in their original Manual entry.")
     expected = {item.transaction_id for item in case.transactions}
     linked = [
         line.transaction_id for entry in outcome.entries for line in entry.lines
@@ -787,8 +942,10 @@ def _context(transactions, entries) -> dict:
         for line, values in zip(entry.lines, fields["lines"]):
             values["debit"] = format(line.debit, ".2f")
             values["credit"] = format(line.credit, ".2f")
+            if line.account_investment is not None and line.account_investment.cost_basis is not None:
+                values["account_investment"]["cost_basis"] = format(line.account_investment.cost_basis, ".2f")
             if line.investment is None:
-                # Older exported revisions did not contain an investment field.
+                # Older saved revisions did not contain an investment field.
                 values.pop("investment", None)
             else:
                 for name in ("units", "unit_price", "fees"):

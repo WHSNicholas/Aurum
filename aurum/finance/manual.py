@@ -8,7 +8,7 @@ Aurum carries written manual-entry instructions through the same validated journ
 A submission keeps the user's accounting date, explanation and optional statement references together.
 Its case adds relevant bank evidence and existing events without changing those facts. An outcome either
 supplies one complete balanced entry, a budget-only monthly savings split, or explains what still prevents it.
-Savings splits have no journal lines and cannot claim bank sources. Database reservations, CSV
+Savings splits have no journal lines and cannot claim bank sources. Database reservations, desktop
 editing and AI calls remain separate from these immutable models.
 """
 
@@ -31,7 +31,7 @@ from aurum.finance.savings import SavingsAllocation, SavingsContext
 # %% 1. Manual Instructions ----------------------------------------------------------------------------------
 class ManualInput(BaseModel):
     """
-    Keep one editable instruction and its stable identity independent of the CSV interface.
+    Keep one saved instruction and its stable identity independent of the desktop editor.
 
     Source references are optional; they identify imported evidence rather than extra journal lines.
     Context revision identifies the generated accounting state shown beside the user's instruction.
@@ -77,13 +77,14 @@ class ManualInput(BaseModel):
 
 class ManualCase(BaseModel):
     """
-    Supply a manual instruction with candidate sources and the existing events it could replace.
+    Supply a manual instruction with required sources and separate monthly evidence for interpretation.
 
     Required sources include explicit references and sources already owned by this manual entry. Other
-    candidates are available for selection, but choosing a source from an existing event requires preserving
+    monthly evidence is read-only until selected. Choosing a source from an existing event requires preserving
     that event's complete source group. The catalogue version identifies the configuration used for an
     interpretation, so changed instruments can release an earlier investment question once.
     The separate budget revision prevents a saved proposal from silently adopting different report labels.
+    The optional memory revision rejects stale interpretations after explicitly remembered notes change.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
@@ -93,6 +94,14 @@ class ManualCase(BaseModel):
     transactions: tuple[Transaction, ...] = ()
     required_sources: tuple[UUID, ...] = ()
     entries: tuple[JournalEntry, ...] = ()
+    evidence_transactions: tuple[Transaction, ...] = Field(default=(), exclude_if=lambda value: not value)
+    evidence_entries: tuple[JournalEntry, ...] = Field(default=(), exclude_if=lambda value: not value)
+    evidence_revision: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None,
+    )
+    memory_revision: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None,
+    )
     question: str | None = None
     catalogue_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     savings_context: SavingsContext | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -106,7 +115,8 @@ class ManualCase(BaseModel):
         Require complete, distinct evidence and keep all required references inside the case.
         """
         if self.savings_context is not None and (
-            self.transactions or self.required_sources or self.entries
+            self.transactions or self.required_sources or self.entries or self.evidence_transactions
+            or self.evidence_entries
         ):
             raise ValueError("Virtual savings cannot claim bank sources or change journal entries")
         source_ids = {row.transaction_id for row in self.transactions}
@@ -125,7 +135,29 @@ class ManualCase(BaseModel):
         ]
         if len(linked) != len(set(linked)) or not set(linked) <= source_ids:
             raise ValueError("Current manual events need complete, distinct candidate sources.")
+        available_ids = [row.transaction_id for row in self.available_transactions]
+        if len(set(available_ids)) != len(available_ids):
+            raise ValueError("Read-only evidence must not repeat claimed transactions.")
+        if len({entry.id for entry in self.available_entries}) != len(self.available_entries):
+            raise ValueError("Read-only evidence must not repeat claimed events.")
+        for entry in self.evidence_entries:
+            if not {line.transaction_id for line in entry.lines if line.transaction_id} <= set(available_ids):
+                raise ValueError("Monthly evidence must include complete existing source groups.")
         return self
+
+    @property
+    def available_transactions(self) -> tuple[Transaction, ...]:
+        """
+        Offer shared monthly facts without treating them as claims on bank activity.
+        """
+        return self.transactions + self.evidence_transactions
+
+    @property
+    def available_entries(self) -> tuple[JournalEntry, ...]:
+        """
+        Include existing accounting available to an explicitly selected correction.
+        """
+        return self.entries + self.evidence_entries
 
 
 # %% 2. Manual Results ---------------------------------------------------------------------------------------
@@ -133,7 +165,8 @@ class ManualOutcome(BaseModel):
     """
     Return a complete event, a focused question or an explanation of an unsupported operation.
 
-    Model and skill metadata record the instructions used to interpret this submission. A pricing result
+    AI outcomes retain model and skill metadata; explicit human postings record their origin without a model.
+    A pricing result
     retains a validated investment instruction while Python retrieves its quote; it cannot be posted yet.
     Completed investments retain both that instruction and their calculation outside the journal table.
     An optional investment budget label follows the saved interpretation onto the receiving holding line.
@@ -153,8 +186,9 @@ class ManualOutcome(BaseModel):
     )
     reason: str = Field(min_length=1)
     question: str | None = Field(default=None, min_length=1)
-    model: str = Field(min_length=1)
-    skill_version: str = Field(min_length=1)
+    origin: Literal["ai", "human"] = "ai"
+    model: str | None = Field(default=None, min_length=1)
+    skill_version: str | None = Field(default=None, min_length=1)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_validator("reason", "question", "model", "skill_version")
@@ -174,6 +208,10 @@ class ManualOutcome(BaseModel):
         """
         if self.updated_at.tzinfo is None or self.updated_at.utcoffset() is None:
             raise ValueError("Manual result timestamps must include a timezone.")
+        if self.origin == "ai" and (self.model is None or self.skill_version is None):
+            raise ValueError("AI outcomes must retain their model and skill version.")
+        if self.origin == "human" and (self.model is not None or self.skill_version is not None):
+            raise ValueError("Direct human edits do not make an AI request.")
         if self.status == "apply":
             if self.event_kind == "savings":
                 if self.savings is None or self.entry is not None or self.question is not None:
@@ -197,7 +235,7 @@ class ManualOutcome(BaseModel):
             self.investment is None or self.event_kind != "investment" or self.question is not None
         ):
             raise ValueError("A pricing result needs an investment instruction and no question.")
-        if self.status == "apply" and self.event_kind == "investment" and (
+        if self.origin == "ai" and self.status == "apply" and self.event_kind == "investment" and (
             self.investment is None or self.pricing is None
         ):
             raise ValueError("A posted investment needs its instruction and calculation.")

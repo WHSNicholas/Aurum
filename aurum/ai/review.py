@@ -9,9 +9,8 @@ This module asks for complete posting plans using the supplied accounts and sour
 preserves every original bank fact, checks exact source coverage and balanced amounts, and owns event UUIDs.
 The same response can suggest narrowly scoped guidance for future transactions; unusable optional guidance
 never discards a valid accounting plan. Guidance can also be assessed from already accepted reviews without
-proposing accounting changes. Each assessment records useful
-preferences, an explicit reason for learning none, or safe validation errors. Database saving and the monthly
-CSV workflow remain outside this module.
+proposing accounting changes. Each assessment records useful preferences, an explicit reason for learning
+none, or safe validation errors. Database saving and desktop workflow coordination remain outside this module.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -28,10 +27,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 # Aurum imports
 from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
-from aurum.ai.skills import Skill, guidance_context, load_categorisation_skill
+from aurum.ai.skills import Skill, explicit_memory_context, guidance_context, load_categorisation_skill
 from aurum.finance.accounts import AccountRegistry, AccountType
 from aurum.finance.budget import BudgetSettings, budget_catalogue, validate_budget_labels
-from aurum.finance.journal import JournalEntry, JournalLine, preserve_budget_categories
+from aurum.finance.journal import (
+    AccountInvestmentDetails, JournalEntry, JournalLine,
+    preserve_account_investments, preserve_budget_categories,
+)
+from aurum.finance.reports import ReportSettings
 from aurum.finance.review import Guidance, GuidanceResult, ReviewCase, ReviewOutcome
 from aurum.finance.transaction import Transaction
 
@@ -62,6 +65,7 @@ class _Posting(BaseModel):
 
     account_key: str
     budget_category: str | None = None
+    account_investment: AccountInvestmentDetails | None = None
     source_ref: str | None
     debit: str = Field(pattern=r"^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$")
     credit: str = Field(pattern=r"^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$")
@@ -123,7 +127,9 @@ def review_batch(
     guidance: list[Guidance] | None = None,
     skill: Skill | None = None,
     questions: dict[UUID, str | None] | None = None,
+    explicit_memory: list[dict] | None = None,
     budget: BudgetSettings | None = None,
+    report_settings: ReportSettings | None = None,
 ) -> tuple[list[ReviewOutcome], dict[UUID, str], dict]:
     """
     Request complete accounting plans for answered review cases without writing any database records.
@@ -154,7 +160,8 @@ def review_batch(
         raise ValueError("Select a model before resolving reviews")
     skill = skill or load_categorisation_skill()
     references, sources, guidance_refs, payload = _request_context(
-        cases, accounts, guidance, questions=questions, budget=budget,
+        cases, accounts, guidance, questions=questions, budget=budget, report_settings=report_settings,
+        explicit_memory=explicit_memory,
     )
     response, usage = client.request(
         instructions=skill.instructions, payload=payload,
@@ -193,6 +200,7 @@ def review_batch(
 def learn_guidance_batch(
     client: ChatGPTConnection, cases: list[ReviewCase], accounts: AccountRegistry,
     *, guidance: list[Guidance] | None = None, skill: Skill | None = None,
+    explicit_memory: list[dict] | None = None,
 ) -> tuple[dict[UUID, GuidanceResult], dict[UUID, str], dict]:
     """
     Assess reusable preferences from accepted reviews without asking for replacement accounting.
@@ -217,7 +225,9 @@ def learn_guidance_batch(
         return {}, {}, {}
     if not client.model:
         raise ValueError("Select a model before learning guidance")
-    references, _, guidance_refs, payload = _request_context(cases, accounts, guidance)
+    references, _, guidance_refs, payload = _request_context(
+        cases, accounts, guidance, explicit_memory=explicit_memory,
+    )
     for case in references.values():
         linked = {line.transaction_id for entry in case.entries for line in entry.lines
                   if line.transaction_id is not None}
@@ -256,6 +266,8 @@ def learn_guidance_batch(
 def _request_context(
     cases: list[ReviewCase], accounts: AccountRegistry, guidance: list[Guidance] | None,
     *, questions: dict[UUID, str | None] | None = None, budget: BudgetSettings | None = None,
+    report_settings: ReportSettings | None = None,
+    explicit_memory: list[dict] | None = None,
 ) -> tuple[dict, dict, dict, dict]:
     """
     Validate distinct review groups and prepare the same redacted evidence for accounting and guidance.
@@ -280,6 +292,14 @@ def _request_context(
     )
     learned, guidance_refs = guidance_context(guidance, accounts, context)
     payload = _review_payload(references, source_refs, accounts, learned, questions=questions, budget=budget)
+    payload["explicit_memory"] = explicit_memory_context(explicit_memory, accounts)
+    payload["unrealised_gains_account"] = (
+        report_settings.unrealised_gains_account if report_settings else None
+    )
+    for account in payload["accounts"]:
+        account["whole_account_investment"] = bool(
+            report_settings and account["key"] in report_settings.account_investments
+        )
     return references, sources, guidance_refs, payload
 
 
@@ -328,6 +348,8 @@ def _review_payload(
                             "debit": format(line.debit, ".2f"), "credit": format(line.credit, ".2f"),
                             "description": redact_bank_details(line.description, accounts),
                             "budget_category": line.budget_category,
+                            "account_investment": line.account_investment.model_dump(mode="json")
+                            if line.account_investment is not None else None,
                         }
                         for line in entry.lines
                     ],
@@ -505,6 +527,7 @@ def _build_entries(
                 lines.append(JournalLine(
                     account_id=account.id, debit=debit, credit=credit, description=text,
                     effective_date=effective_date, budget_category=posting.budget_category,
+                    account_investment=posting.account_investment,
                 ))
                 continue
             source = sources.get(posting.source_ref)
@@ -521,7 +544,7 @@ def _build_entries(
                 account_id=source.account_id, transaction_id=source.transaction_id,
                 debit=debit, credit=credit,
                 description=source.description, effective_date=source.effective_date,
-                budget_category=posting.budget_category,
+                budget_category=posting.budget_category, account_investment=posting.account_investment,
             ))
         source_ids = {line.transaction_id for line in lines if line.transaction_id is not None}
         if not source_ids:
@@ -539,6 +562,7 @@ def _build_entries(
     if seen != expected:
         raise ValueError("A resolved review must preserve every supplied source transaction")
     entries = preserve_budget_categories(tuple(entries), case.entries)
+    entries = preserve_account_investments(entries, case.entries)
     validate_budget_labels(entries, accounts, budget, case.entries)
     return entries
 
@@ -599,8 +623,14 @@ def _response_schema(
     """
     schema = _ReviewBatch.model_json_schema()
     definitions = schema["$defs"]
+    if "AccountInvestmentDetails" in definitions:
+        details = definitions["AccountInvestmentDetails"]
+        details["required"] = list(details["properties"])
+        for field in details["properties"].values():
+            field.pop("default", None)
     definitions["_Review"]["properties"]["case_ref"]["enum"] = list(cases)
     posting = definitions["_Posting"]["properties"]
+    posting["account_investment"].pop("default", None)
     posting["account_key"]["enum"] = list(accounts.accounts)
     labels = (
         [item["key"] for item in budget_catalogue(budget)] if budget is not None else

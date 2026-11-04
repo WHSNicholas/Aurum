@@ -8,7 +8,7 @@ Aurum turns a consistent snapshot of posted accounting into four financial repor
 This workflow reads account definitions, journal events and saved review progress without changing them.
 It then retrieves any required investment closes, saving only the market-price cache, and passes the
 validated figures to the PDF renderer. Unfinished accounting and unavailable valuations remain visible
-as draft explanations. Reporting never processes CSV answers or sends requests to ChatGPT.
+as draft explanations. Reporting never processes saved responses or sends requests to ChatGPT.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -28,15 +28,15 @@ from pydantic import BaseModel, ConfigDict
 from aurum.database.database import DEFAULT_DATABASE, _check_schema
 from aurum.database.journal import load_journal_entries
 from aurum.database.manual import load_manual_entries
-from aurum.database.reviews import load_review_answers, load_review_cases, load_review_exports
+from aurum.database.reviews import load_review_answers, load_review_cases, load_review_baselines
 from aurum.database.savings import load_savings_allocations
 from aurum.database.transactions import load_transactions
-from aurum.finance.accounts import DEFAULT_ACCOUNTS, load_accounts
-from aurum.finance.budget import DEFAULT_BUDGET_SETTINGS, load_budget_settings
+from aurum.finance.accounts import DEFAULT_ACCOUNTS, AccountRegistry, load_accounts
+from aurum.finance.budget import DEFAULT_BUDGET_SETTINGS, load_budget_settings, validate_budget_plan
 from aurum.finance.investments import PriceQuote, PriceUnavailable, get_quote, holdings_as_of
 from aurum.finance.journal import JournalEntry
 from aurum.finance.reports import (
-    DEFAULT_REPORT_SETTINGS, Reports, build_reports, load_report_settings, resolve_period,
+    DEFAULT_REPORT_SETTINGS, Reports, ReportSettings, build_reports, load_report_settings, resolve_period,
 )
 from aurum.finance.securities import DEFAULT_SECURITIES, Security, load_securities
 from aurum.reporting.pdf import render_reports
@@ -44,7 +44,7 @@ from aurum.reporting.pdf import render_reports
 # Default paths
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPORTS = PROJECT_ROOT / "data" / "reports"
-REPORT_FILENAMES = ("balance_sheet.pdf", "income_statement.pdf", "budget.pdf", "investments.pdf")
+REPORT_TITLES = ("Balance Sheet", "Income Statement", "Budget Report", "Investment Report")
 
 
 # %% 1. Report Generation ------------------------------------------------------------------------------------
@@ -66,7 +66,8 @@ def generate_reports(
     settings_path: Path | str = DEFAULT_REPORT_SETTINGS,
     budget_path: Path | str = DEFAULT_BUDGET_SETTINGS,
     database_path: Path | str = DEFAULT_DATABASE,
-    output_dir: Path | str = DEFAULT_REPORTS,
+    output_dir: Path | str | None = None,
+    workspace: Path | str = PROJECT_ROOT,
     month: str | None = None,
     today: date | None = None,
     fetcher: Callable[[Security, date], PriceQuote] | None = None,
@@ -75,7 +76,8 @@ def generate_reports(
     """
     Generate balance sheet, income, budget and investment PDFs from posted journal events.
 
-    Defaults resolve from the project root; supplied relative paths use the current working directory.
+    Configuration supplies the output folder relative to workspace; an explicit output_dir uses the current
+    working directory. Other defaults resolve from the project root, as before.
     month selects a working-day reporting month, or defaults to the latest posted event's month.
     fetcher and today allow repeatable synthetic checks without live prices or a changing clock.
 
@@ -92,6 +94,7 @@ def generate_reports(
     accounts = load_accounts(accounts_path, initialise_ids=False)
     settings = load_report_settings(settings_path, accounts)
     budget_settings = load_budget_settings(budget_path, accounts)
+    destination = resolve_output_directory(settings, Path(workspace), output_dir)
     database = Path(database_path).resolve()
 
     # A read transaction gives all four reports the same accounting snapshot.
@@ -108,7 +111,8 @@ def generate_reports(
         entries = load_journal_entries(connection, accounts)
         savings_allocations = tuple(load_savings_allocations(connection).values())
         period = resolve_period(entries, month=month, today=today)
-        draft_reasons = _unfinished_accounting(connection, entries, period.cutoff)
+        validate_budget_plan(budget_settings, period.month)
+        draft_reasons = _unfinished_accounting(connection, entries, period.cutoff, accounts)
 
     # Release the snapshot lock before any cache write; no accounting connection is reopened for writing.
     positions = holdings_as_of(entries, period.cutoff)
@@ -140,20 +144,94 @@ def generate_reports(
     )
     emit(f"Rendering {period.month} balance sheet, income, budget and investment reports...")
     documents = render_reports(reports, settings)
-    paths = _save_pdfs(Path(output_dir).resolve() / period.month, documents)
+    paths = _save_pdfs(destination / period.month, documents)
+    emit(f"Saved all four PDFs to {paths[0].parent}")
     return ReportResult(reports=reports, paths=paths)
+
+
+def report_filenames(month: str) -> tuple[str, str, str, str]:
+    """
+    Name the four monthly PDFs in the same order used by rendering, preview and completion checks.
+    """
+    date.fromisoformat(month + "-01")
+    return tuple(f"{month} {title}.pdf" for title in REPORT_TITLES)
+
+
+def resolve_output_directory(
+    settings: ReportSettings, workspace: Path, output_dir: Path | str | None = None,
+) -> Path:
+    """
+    Resolve one shared PDF destination for generation and preview, without creating directories.
+
+    Relative configured paths belong to the selected workspace. Explicit command-line overrides belong
+    to the current working directory. The reporting month is appended by the caller, exactly once.
+    """
+    if output_dir is not None:
+        return Path(output_dir).expanduser().resolve()
+    path = Path(settings.output_directory).expanduser()
+    return (path if path.is_absolute() else Path(workspace) / path).resolve()
+
+
+def investment_review_items(
+    connection: sqlite3.Connection, accounts: AccountRegistry, settings: ReportSettings, cutoff: date,
+) -> list[dict]:
+    """
+    List posted whole-account investment movements whose missing treatment leaves report cost unknown.
+
+    Include earlier reporting months through the cutoff so every affected event can open in the journal
+    editor. Reading this list does not infer classifications or change accounting.
+    """
+    investment_accounts = {
+        accounts.accounts[key].id: accounts.accounts[key] for key in settings.account_investments
+    }
+    by_account = {account.id: account for account in accounts.accounts.values()}
+    items = []
+    for entry in load_journal_entries(connection, accounts):
+        if entry.date > cutoff:
+            continue
+        journal_entry = None
+        for number, line in enumerate(entry.lines, 1):
+            account = investment_accounts.get(line.account_id)
+            if account is None:
+                continue
+            details = line.account_investment
+            if details is not None and details.kind != "unclassified":
+                continue
+            if journal_entry is None:
+                journal_entry = {
+                    "journal_entry_id": str(entry.id), "date": entry.date.isoformat(), "status": "posted",
+                    "description": next((item.description for item in entry.lines if item.description), ""),
+                    "source_transactions": [
+                        str(item.transaction_id) for item in entry.lines if item.transaction_id is not None
+                    ],
+                    "postings": [
+                        {
+                            **item.model_dump(mode="json", exclude_none=True),
+                            "account": by_account[item.account_id].name,
+                            "debit": format(item.debit, ".2f"), "credit": format(item.credit, ".2f"),
+                        }
+                        for item in entry.lines
+                    ],
+                }
+            items.append({
+                "journal_entry_id": str(entry.id), "line_number": number, "date": entry.date.isoformat(),
+                "account": account.name, "description": line.description,
+                "amount": format(line.debit - line.credit, ".2f"),
+                "journal_entry": journal_entry,
+            })
+    return sorted(items, key=lambda item: (item["date"], item["journal_entry_id"], item["line_number"]))
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
 def _unfinished_accounting(
-    connection: sqlite3.Connection, entries: list[JournalEntry], cutoff: date,
+    connection: sqlite3.Connection, entries: list[JournalEntry], cutoff: date, accounts: AccountRegistry,
 ) -> tuple[str, ...]:
     """
     Identify current unfinished work through the cutoff, including sources without any journal row.
 
     Saved corrections may leave valid older postings in place; those events still need a draft notice.
     Later periods, superseded requests and guidance-only failures do not invalidate this snapshot.
-    Unsaved CSV edits are outside the database and must be submitted with the journal command first.
+    Unsaved editor drafts are outside this snapshot; save and process them before generating reports.
     """
     transactions = load_transactions(connection)
     posted = {
@@ -193,19 +271,48 @@ def _unfinished_accounting(
         for row in record["case"].transactions
     }
     outstanding = set()
-    exports = load_review_exports(connection)
+    baselines = load_review_baselines(connection)
     source_dates = {row.transaction_id: row.date for row in transactions}
     for identifier, record in latest.items():
         if record["status"] in {"applied", "superseded"}:
             continue
-        if exports.get(identifier, {}).get("human_review_cleared") and record["status"] != "requesting":
+        if baselines.get(identifier, {}).get("human_review_cleared") and record["status"] != "requesting":
             continue
         dates = [row.date for row in record["case"].transactions]
         dates.extend(entry.date for entry in record["case"].entries)
         if min(dates) <= cutoff:
             outstanding.add(identifier)
     saved_answers = load_review_answers(connection)
-    for identifier, export in exports.items():
+    consumed = {
+        (answer.transaction_id, answer.revision, answer.human_review)
+        for record in load_review_cases(connection) for answer in record["case"].answers
+    }
+    fresh = {
+        identifier for identifier, answer in saved_answers.items()
+        if not baselines.get(identifier, {}).get("human_review_cleared", False)
+        and (identifier, answer.revision, answer.human_review) not in consumed
+    }
+    if fresh:
+        # Saved answers can exist before any AI reservation. Include their complete linked
+        # events so a pending correction never makes an apparently final report from older accounting.
+        from aurum.workflows.review import _source_groups
+
+        active = {
+            identifier: answer for identifier, answer in saved_answers.items()
+            if not baselines.get(identifier, {}).get("human_review_cleared", False)
+        }
+        for group in _source_groups(transactions, entries, active, accounts):
+            if not group & fresh:
+                continue
+            affected_date = min(
+                min(source_dates.get(identifier, date.max), posting_dates.get(identifier, date.max))
+                for identifier in group
+            )
+            if affected_date <= cutoff:
+                outstanding.update(group)
+    for identifier, export in baselines.items():
+        if export.get("human_review_cleared", False):
+            continue
         if export.get("review_status") not in {"stale", "manual_required"}:
             continue
         if not export.get("human_review", "").strip():
@@ -235,7 +342,7 @@ def _save_pdfs(folder: Path, documents: tuple[bytes, bytes, bytes, bytes]) -> tu
     if len(documents) != 4 or any(not content.startswith(b"%PDF-") for content in documents):
         raise ValueError("The renderer did not return four valid PDF documents")
     folder.mkdir(parents=True, exist_ok=True)
-    paths = tuple(folder / name for name in REPORT_FILENAMES)
+    paths = tuple(folder / name for name in report_filenames(folder.name))
     with tempfile.TemporaryDirectory(prefix=".reports-", dir=folder) as temporary:
         staged = []
         for target, content in zip(paths, documents):

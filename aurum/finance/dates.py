@@ -5,7 +5,7 @@
 """
 Aurum accepts day-first and ISO dates wherever the user enters a structured accounting date.
 
-Manual CSV dates and account closing dates share this parser. Valid input becomes a Python date, so database
+Manual accounting dates and account closing dates share this parser. Valid input becomes a Python date, so database
 values and generated dates keep the same YYYY-MM-DD representation regardless of the input format.
 
 Accounting reports use working months that finish on the last Monday-to-Friday day. Any weekend after that

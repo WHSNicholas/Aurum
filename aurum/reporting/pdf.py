@@ -189,6 +189,13 @@ def _expense_colour(palette: Sequence[str], index: int, count: int) -> str:
     colours. Both page modes run from the darkest shade to the lightest.
     """
     position = index * (len(palette) - 1) / max(1, count - 1)
+    return _palette_colour(palette, position)
+
+
+def _palette_colour(palette: Sequence[str], position: float) -> str:
+    """
+    Blend neighbouring palette shades at a fractional index within the configured scale.
+    """
     lower = int(position)
     upper = min(lower + 1, len(palette) - 1)
     fraction = position - lower
@@ -302,7 +309,7 @@ def _balance_sheet_html(statement: BalanceSheet, settings: ReportSettings, gener
     ), first_capacity, 25)
     return _document(
         "Balance Sheet", f"Statement of Financial Position as of {_date(statement.as_of, superscript=True)}",
-        settings.name, cards, left, right, statement.draft_reasons, generated_on, "balance-sheet",
+        settings.display_name, cards, left, right, statement.draft_reasons, generated_on, "balance-sheet",
     )
 
 
@@ -335,7 +342,8 @@ def _income_statement_html(statement: IncomeStatement, settings: ReportSettings,
     )
     return _document(
         "Income Statement", f"Statement of Financial Performance for {escape(statement.period_label)}",
-        settings.name, cards + chart, left, right, statement.draft_reasons, generated_on, "income-statement",
+        settings.display_name, cards + chart, left, right, statement.draft_reasons, generated_on,
+        "income-statement",
     )
 
 
@@ -650,7 +658,8 @@ def _budget_report_html(report: BudgetReport, settings: ReportSettings, generate
     ), first_capacity)
     right = _budget_pages((("Expenses", report.expenses, report.total_expenses),), first_capacity)
     return _document(
-        "Budget Report", f"Summary of Budget Allocation for {escape(report.period_label)}", settings.name,
+        "Budget Report", f"Summary of Budget Allocation for {escape(report.period_label)}",
+        settings.display_name,
         cards, left, right, report.draft_reasons, generated_on, "budget-report",
     )
 
@@ -758,7 +767,7 @@ def _investment_report_html(report: InvestmentReport, settings: ReportSettings, 
             _count(len({row.account_key for row in report.positions}), "account"),
         ),
         (
-            "unrealised_gain", "Unrealised P&L", report.total_gain,
+            "unrealised_gain", "Investment P&L", report.total_gain,
             f"Return: {_percentage(report.return_percentage)}",
         ),
     ), signed_last=True, missing="-")
@@ -778,7 +787,7 @@ def _investment_report_html(report: InvestmentReport, settings: ReportSettings, 
     pages = _investment_pages(report, groups, capacity)
     return _document(
         "Investment Report", f"Summary of Investment Portfolio as of {_date(report.as_of, superscript=True)}",
-        settings.name, cards + chart, pages, [], report.draft_reasons, generated_on,
+        settings.display_name, cards + chart, pages, [], report.draft_reasons, generated_on,
         "investment-report", full_width=True,
     )
 
@@ -898,7 +907,9 @@ def _allocation_chart(
     for index, (name, cost) in enumerate(allocations):
         fraction = float(cost / total)
         length = fraction * circumference
-        colour = palette[index % len(palette)]
+        # Space slices across medium-to-light shades, avoiding the darkest and palest ends.
+        position = (.25 + .4 * index / max(1, len(allocations) - 1)) * (len(palette) - 1)
+        colour = _palette_colour(palette, position)
         angle = (offset + length / 2) / circumference * 2 * pi - pi / 2
         centre_x, centre_y = 210 + 2 * cos(angle), 140 + 2 * sin(angle)
         dash = (

@@ -16,6 +16,7 @@ before using it. Disconnect Aurum in ChatGPT Settings to revoke its permission t
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
 from base64 import urlsafe_b64encode
+from collections.abc import Callable
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -250,7 +251,10 @@ class ChatGPTConnection:
 
 
 @contextmanager
-def connect(*, force_sign_in: bool = False) -> Iterator[ChatGPTConnection]:
+def connect(
+    *, force_sign_in: bool = False, state_directory: Path | None = None,
+    progress: Callable[[str], None] | None = None, cancelled: Callable[[], bool] | None = None,
+) -> Iterator[ChatGPTConnection]:
     """
     Open a private ChatGPT connection, signing in or refreshing access when necessary.
 
@@ -261,11 +265,15 @@ def connect(*, force_sign_in: bool = False) -> Iterator[ChatGPTConnection]:
         ChatGPTError: Another setup is running, saved state is invalid, or authorization fails.
         OSError: Private state cannot be read or saved.
     """
-    if STATE_DIRECTORY.is_symlink():
+    directory = state_directory if state_directory is not None else STATE_DIRECTORY
+    state_file = directory / "chatgpt.json"
+    if cancelled and cancelled():
+        raise ChatGPTError("Sign-in cancelled; no request was sent.")
+    if directory.is_symlink():
         raise ChatGPTError("The private AI directory must not be a symbolic link.")
-    STATE_DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
-    STATE_DIRECTORY.chmod(0o700)
-    lock_path = STATE_DIRECTORY / "chatgpt.lock"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.chmod(0o700)
+    lock_path = directory / "chatgpt.lock"
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "a+") as lock:
         os.fchmod(lock.fileno(), 0o600)
@@ -274,19 +282,36 @@ def connect(*, force_sign_in: bool = False) -> Iterator[ChatGPTConnection]:
         except BlockingIOError:
             message = "Another Aurum ChatGPT command is running. Close it before retrying."
             raise ChatGPTError(message) from None
-        state = _load_state(STATE_FILE)
+        state = _load_state(state_file)
         if not state.get("ext_agent_host_id"):
             state["ext_agent_host_id"] = f"urn:uuid:{uuid4()}"
-            _save_state(STATE_FILE, state)
+            _save_state(state_file, state)
         if force_sign_in or not state.get("access_token"):
-            _sign_in(state, STATE_FILE)
+            _sign_in(state, state_file, progress=progress, cancelled=cancelled)
         elif state.get("expires_at", 0) <= time.time() + 60:
             if state.get("refresh_token"):
-                _refresh(state, STATE_FILE)
+                _refresh(state, state_file)
             else:
-                _sign_in(state, STATE_FILE)
+                _sign_in(state, state_file, progress=progress, cancelled=cancelled)
         _require_permission(state)
-        yield ChatGPTConnection(state, STATE_FILE)
+        yield ChatGPTConnection(state, state_file)
+
+
+def connection_status(state_directory: Path | None = None) -> dict:
+    """
+    Read the saved model and sign-in presence without refreshing tokens, opening a browser or writing files.
+
+    This describes locally saved credentials, not a live authorization check. Tokens and account identifiers
+    are never returned to the interface.
+    """
+    directory = state_directory if state_directory is not None else STATE_DIRECTORY
+    if directory.is_symlink():
+        raise ChatGPTError("The private AI directory must not be a symbolic link.")
+    state = _load_state(directory / "chatgpt.json", read_only=True)
+    return {
+        "signed_in": bool(state.get("access_token")), "model": state.get("model"),
+        "expired": bool(state.get("access_token")) and state.get("expires_at", 0) <= time.time() + 60,
+    }
 
 
 def record_usage(counts: dict[str, int], usage: dict) -> None:
@@ -300,7 +325,10 @@ def record_usage(counts: dict[str, int], usage: dict) -> None:
 
 
 # %% 2. Sign-In Helpers --------------------------------------------------------------------------------------
-def _sign_in(state: dict, path: Path) -> None:
+def _sign_in(
+    state: dict, path: Path, *, progress: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     """
     Authorize in the browser and save credentials only after validating the returned identity.
     """
@@ -363,7 +391,7 @@ def _sign_in(state: dict, path: Path) -> None:
             parameters["id_token_hint"] = state["id_token"]
         if client_id != "dynamic_agent_client" and "chatgpt.tokens.use.direct" not in state.get("scopes", []):
             parameters["prompt"] = "consent"
-        print("Continue with ChatGPT in your browser to authorise Aurum (five-minute timeout).")
+        (progress or print)("Continue with ChatGPT in your browser to authorise Aurum (five-minute timeout).")
         try:
             opened = webbrowser.open(f"{AUTH_URL}/api/accounts/authorize?{urlencode(parameters)}")
         except webbrowser.Error:
@@ -372,6 +400,8 @@ def _sign_in(state: dict, path: Path) -> None:
             raise ChatGPTError("Could not open your browser. Check your default browser and run again.")
         deadline = time.monotonic() + 300
         while not callback and time.monotonic() < deadline:
+            if cancelled and cancelled():
+                raise ChatGPTError("Browser sign-in cancelled; no request was sent.")
             server.handle_request()
     if not callback:
         raise ChatGPTError("Browser sign-in timed out. Run the command again when ready.")
@@ -524,7 +554,7 @@ def _token_usage(value: object) -> dict:
     return result
 
 
-def _load_state(path: Path) -> dict:
+def _load_state(path: Path, *, read_only: bool = False) -> dict:
     """
     Read private connection state, rejecting malformed records without displaying their contents.
     """
@@ -533,7 +563,8 @@ def _load_state(path: Path) -> dict:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor) as handle:
-            os.fchmod(handle.fileno(), 0o600)
+            if not read_only:
+                os.fchmod(handle.fileno(), 0o600)
             state = json.load(handle)
         if not isinstance(state, dict):
             raise ValueError

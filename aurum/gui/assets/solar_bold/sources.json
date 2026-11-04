@@ -1,0 +1,216 @@
+{
+  "commit": "44017167688b49109d88ae6a98979b23d8950db0",
+  "icons": [
+    {
+      "role": "home",
+      "name": "Home 2",
+      "path": "icons/SVG/Bold/Essentional, UI/Home 2.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Essentional%2C%20UI/Home%202.svg",
+      "original_sha256": "e21be63c45d304342d5771b5362dd32758e10f3a01465e1703b0f31301d027db"
+    },
+    {
+      "role": "settings",
+      "name": "Settings",
+      "path": "icons/SVG/Bold/Settings, Fine Tuning/Settings.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Settings%2C%20Fine%20Tuning/Settings.svg",
+      "original_sha256": "b3354cad266cd63571c258b92c090680beba4a70a405522e1228b2b9be4ee64f"
+    },
+    {
+      "role": "chat",
+      "name": "Chat Round Dots",
+      "path": "icons/SVG/Bold/Messages, Conversation/Chat Round Dots.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Messages%2C%20Conversation/Chat%20Round%20Dots.svg",
+      "adaptation": "Combined original paths with even-odd fill so the three white dots become transparent cutouts.",
+      "original_sha256": "bb5d3aafb8b0aa3867d7b8d4b4a29cf73f631499f29dc1b0b1e4188598e0e05f"
+    },
+    {
+      "role": "document",
+      "name": "Document Text",
+      "path": "icons/SVG/Bold/Notes/Document Text.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Notes/Document%20Text.svg",
+      "original_sha256": "9d3e86b13daf78c21818e992fdb86603445e15aa93aff982db0013d818de1423"
+    },
+    {
+      "role": "checklist",
+      "name": "Clipboard Check",
+      "path": "icons/SVG/Bold/Notes/Clipboard Check.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Notes/Clipboard%20Check.svg",
+      "original_sha256": "21927e08a1f0871612c971ce51df919ac4215a71cd517987d8e07574f0750602"
+    },
+    {
+      "role": "pen",
+      "name": "Pen New Square",
+      "path": "icons/SVG/Bold/Messages, Conversation/Pen New Square.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Messages%2C%20Conversation/Pen%20New%20Square.svg",
+      "original_sha256": "8898a51505fad1459ed715813b2fe3627dc65bbc3fd65bd4d306c79dab3cd97c"
+    },
+    {
+      "role": "ledger",
+      "name": "Notebook Minimalistic",
+      "path": "icons/SVG/Bold/School/Notebook Minimalistic.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/School/Notebook%20Minimalistic.svg",
+      "original_sha256": "73ed36b61b93001104a4a40759c558e43645dcfe49089ed5a62f97f38e5db78b"
+    },
+    {
+      "role": "chart",
+      "name": "Chart Square",
+      "path": "icons/SVG/Bold/Business, Statistic/Chart Square.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Business%2C%20Statistic/Chart%20Square.svg",
+      "original_sha256": "550b62e8e68c9c4b4348aadfdda01a337859b71307d3c946ebc9e29e43305f55"
+    },
+    {
+      "role": "wallet",
+      "name": "Wallet Money",
+      "path": "icons/SVG/Bold/Money/Wallet Money.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Money/Wallet%20Money.svg",
+      "original_sha256": "208693d0e54522e8300ca9741273614c0c33d35f851e5ee09b8821d7098b95ba"
+    },
+    {
+      "role": "cash",
+      "name": "Banknote",
+      "path": "icons/SVG/Bold/Money/Banknote.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Money/Banknote.svg",
+      "original_sha256": "6fc03169b5b3cbbdad7c2e770c5ed743d7e7597ff0fdbbca1cbb4a4c1482076e"
+    },
+    {
+      "role": "arrow_down_left",
+      "name": "Arrow Left Down",
+      "path": "icons/SVG/Bold/Arrows/Arrow Left Down.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows/Arrow%20Left%20Down.svg",
+      "original_sha256": "f679538867c84d6a4d137b30a6dcfad9bfb76bbdf0756041d52938b12fbeaf30"
+    },
+    {
+      "role": "arrow_up_right",
+      "name": "Arrow Right Up",
+      "path": "icons/SVG/Bold/Arrows/Arrow Right Up.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows/Arrow%20Right%20Up.svg",
+      "original_sha256": "7712eb7a62ec0861194a54d65e6ad2e0053df0fa7925078e0e2a5f60e8c9f32e"
+    },
+    {
+      "role": "vault",
+      "name": "Safe Square",
+      "path": "icons/SVG/Bold/Money/Safe Square.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Money/Safe%20Square.svg",
+      "original_sha256": "646c47e7024480c79c61baf34302a6a6d8c7730758b9cfe2e82c215b53eec674"
+    },
+    {
+      "role": "import",
+      "name": "Download Minimalistic",
+      "path": "icons/SVG/Bold/Arrows Action/Download Minimalistic.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows%20Action/Download%20Minimalistic.svg",
+      "original_sha256": "cfb1a24468ac27a7ae235fae16ebfefba677967070e4f467897741b2a462734f"
+    },
+    {
+      "role": "process",
+      "name": "Play",
+      "path": "icons/SVG/Bold/Video, Audio, Sound/Play.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Video%2C%20Audio%2C%20Sound/Play.svg",
+      "original_sha256": "04eefc7f770cec637ba0b0914cb4d16fdb1cbee9ff8c5ca6b410c9600f37cc4a"
+    },
+    {
+      "role": "refresh",
+      "name": "Refresh",
+      "path": "icons/SVG/Bold/Arrows/Refresh.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows/Refresh.svg",
+      "original_sha256": "2b9202e476fbd8fb250b0c490cbc8a8e446bacd3e7e8344168203564673d7311"
+    },
+    {
+      "role": "folder",
+      "name": "Folder Open",
+      "path": "icons/SVG/Bold/Folders/Folder Open.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Folders/Folder%20Open.svg",
+      "original_sha256": "0c2785e6840bbb60b90a366534412c70e5a2b2c36ca67eacaf8d93680c2578f5"
+    },
+    {
+      "role": "person",
+      "name": "User Rounded",
+      "path": "icons/SVG/Bold/Users/User Rounded.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Users/User%20Rounded.svg",
+      "original_sha256": "d2365371b455b8f9992bbf05d9d2c1081630a96d0ad454dcf6ae1d0fc5b3202d"
+    },
+    {
+      "role": "check",
+      "name": "Check Circle",
+      "path": "icons/SVG/Bold/Essentional, UI/Check Circle.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Essentional%2C%20UI/Check%20Circle.svg",
+      "original_sha256": "62ae9fa959d5b0b37b2594e1f6ef0a87a67a8fde6e0c07b8800b7423f03003ac"
+    },
+    {
+      "role": "error",
+      "name": "Danger Triangle",
+      "path": "icons/SVG/Bold/Essentional, UI/Danger Triangle.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Essentional%2C%20UI/Danger%20Triangle.svg",
+      "original_sha256": "e8aab67bb77f2a5059804e48e11d2c7f48cd928402942c99e69dab9a6de950e9"
+    },
+    {
+      "role": "clock",
+      "name": "History",
+      "path": "icons/SVG/Bold/Time/History.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Time/History.svg",
+      "original_sha256": "55e9117097e912b27170a5033450aac3faf19de7104459dd6597b738613d4777"
+    },
+    {
+      "role": "details",
+      "name": "Info Circle",
+      "path": "icons/SVG/Bold/Essentional, UI/Info Circle.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Essentional%2C%20UI/Info%20Circle.svg",
+      "original_sha256": "95ee90217326977b41e2d3c6d416276d0b45364665066b6f2358057eb3a4905d"
+    },
+    {
+      "role": "add",
+      "name": "Add Circle",
+      "path": "icons/SVG/Bold/Essentional, UI/Add Circle.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Essentional%2C%20UI/Add%20Circle.svg",
+      "original_sha256": "98b67f4a7f69284b182bd9aea5326411c3588f93cdee4344ad2ab5c70b4d10c8"
+    },
+    {
+      "role": "remove",
+      "name": "Trash Bin Minimalistic",
+      "path": "icons/SVG/Bold/Essentional, UI/Trash Bin Minimalistic.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Essentional%2C%20UI/Trash%20Bin%20Minimalistic.svg",
+      "original_sha256": "162b1328964f8923a551c48c936387e307066678ea9f6ef4b80af4adbd0e16b4"
+    },
+    {
+      "role": "save",
+      "name": "Diskette",
+      "path": "icons/SVG/Bold/Electronic, Devices/Diskette.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Electronic%2C%20Devices/Diskette.svg",
+      "original_sha256": "52acb81da34dc191a1dbbb35aa2b41e8e03abc5456fc63f4922739d72d31ad22"
+    },
+    {
+      "role": "login",
+      "name": "Login 2",
+      "path": "icons/SVG/Bold/Arrows Action/Login 2.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows%20Action/Login%202.svg",
+      "original_sha256": "33bb896b5a67f415c127da43fc23a6a43e8db35620199559e3348da71a13bda8"
+    },
+    {
+      "role": "copy",
+      "name": "Copy",
+      "path": "icons/SVG/Bold/Essentional, UI/Copy.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Essentional%2C%20UI/Copy.svg",
+      "original_sha256": "9be99dfd639134b2373eb167c33946647b950bb7bbf6f70a904a69cd1b0b50fc"
+    },
+    {
+      "role": "search",
+      "name": "Magnifer",
+      "path": "icons/SVG/Bold/Search/Magnifer.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Search/Magnifer.svg",
+      "original_sha256": "ead36f1c3e30bd666d3b4b1672e8387dc7456c696c73804270e2dfdfe28ba830"
+    },
+    {
+      "role": "close",
+      "name": "Close Circle",
+      "path": "icons/SVG/Bold/Essentional, UI/Close Circle.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Essentional%2C%20UI/Close%20Circle.svg",
+      "original_sha256": "fd6889846308beb7b18e13a46dfa90a26b6e8ee03f4639fa4a6bc3b361eb35a6"
+    },
+    {
+      "role": "fit",
+      "name": "Full Screen",
+      "path": "icons/SVG/Bold/Video, Audio, Sound/Full Screen.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Video%2C%20Audio%2C%20Sound/Full%20Screen.svg",
+      "original_sha256": "93f0795d1c6be88508297f8ddcf72fa27f5dcb9abf6a67a37c39b0caee75d9d8"
+    }
+  ]
+}

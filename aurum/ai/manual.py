@@ -7,8 +7,8 @@ Aurum interprets written manual instructions using the configured accounts and r
 
 The model proposes an accounting treatment or asks for missing facts. Python reconstructs bank lines from
 their unchanged transactions, calculates one requested split remainder and validates the complete event.
-This module returns results without saving them, so the same interpreter can serve monthly CSV files and a
-future GUI. Investment proposals preserve supplied facts while Python calculates units and carrying cost.
+This module returns validated results for the desktop workflow to save. Investment proposals preserve supplied
+facts while Python calculates units and carrying cost.
 The workflow saves these proposals before retrieving any missing market price.
 Virtual savings cases return only human-supplied pot amounts; their separate storage never changes accounting.
 """
@@ -26,12 +26,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 # Aurum imports
 from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
-from aurum.ai.skills import Skill, guidance_context, load_manual_skill
+from aurum.ai.skills import Skill, explicit_memory_context, guidance_context, load_manual_skill
 from aurum.finance.accounts import AccountRegistry, AccountType
 from aurum.finance.budget import BudgetSettings, budget_catalogue, validate_budget_labels
-from aurum.finance.journal import InvestmentDetails, JournalEntry, JournalLine, preserve_budget_categories
+from aurum.finance.journal import (
+    AccountInvestmentDetails, InvestmentDetails, JournalEntry, JournalLine,
+    preserve_account_investments, preserve_budget_categories,
+)
 from aurum.finance.investments import InvestmentInstruction, PriceQuote, calculate_investment
 from aurum.finance.manual import ManualCase, ManualOutcome
+from aurum.finance.reports import ReportSettings
 from aurum.finance.review import Guidance
 from aurum.finance.transaction import Transaction
 from aurum.finance.securities import SecurityRegistry
@@ -70,6 +74,7 @@ class _Posting(BaseModel):
 
     account_key: str
     budget_category: str | None = None
+    account_investment: AccountInvestmentDetails | None = None
     source_ref: str | None
     side: Literal["debit", "credit"] | None
     amount: str | None = Field(pattern=r"^(remaining|[1-9][0-9]*(\.[0-9]{1,2})?|0\.[0-9]{1,2})$")
@@ -190,16 +195,18 @@ class _Batch(BaseModel):
 def manual_batch(
     client: ChatGPTConnection, cases: list[ManualCase], accounts: AccountRegistry, *,
     skill: Skill | None = None, guidance: list[Guidance] | None = None,
+    explicit_memory: list[dict] | None = None,
     securities: SecurityRegistry | None = None, budget: BudgetSettings | None = None,
+    report_settings: ReportSettings | None = None,
 ) -> tuple[dict[UUID, ManualOutcome], dict[UUID, str], dict]:
     """
-    Interpret independent manual cases and validate each result without changing accounting or CSV files.
+    Interpret independent manual cases and validate each result without changing saved accounting.
 
     Args:
         client: Authenticated connection with a selected model.
         cases: At most twenty submissions with complete candidate evidence.
         accounts: Registry of existing accounts available for posting.
-        skill: Manual-entry instructions loaded once by the command, or None to load the project skill here.
+        skill: Manual-entry instructions loaded once by the workflow, or None to load the project skill here.
         guidance: Accepted preferences supplied as context, never as automatic posting rules.
         securities: Existing instruments available for opening holdings and purchases.
         budget: Optional permitted reporting labels; accounting accounts and amounts remain unchanged.
@@ -217,7 +224,9 @@ def manual_batch(
     model = client.model
     if not model:
         raise ValueError("Select a model before interpreting manual entries.")
-    references, sources, payload = _request_context(cases, accounts, guidance, securities, budget)
+    references, sources, payload = _request_context(
+        cases, accounts, guidance, securities, budget, report_settings, explicit_memory,
+    )
     skill = skill or load_manual_skill()
     response, usage = client.request(
         instructions=skill.instructions, payload=payload,
@@ -285,6 +294,26 @@ def manual_batch(
             )
         except (TypeError, ValueError) as error:
             failures[case.submission.id] = _validation_message(error)
+    # Shared evidence is not ownership. Two completed proposals may not consume the same source.
+    selections = {}
+    for identifier, outcome in outcomes.items():
+        selected = (
+            {line.transaction_id for line in outcome.entry.lines if line.transaction_id}
+            if outcome.entry is not None else set()
+        )
+        if outcome.investment is not None and outcome.investment.transaction_id is not None:
+            selected.add(outcome.investment.transaction_id)
+        selections[identifier] = selected
+    competing = {identifier for identifier, selected in selections.items() if any(
+        selected & other for key, other in selections.items() if key != identifier
+    )}
+    for identifier in competing:
+        outcomes[identifier] = ManualOutcome(
+            manual_id=identifier, status="needs_review",
+            reason="Two instructions selected the same bank evidence.",
+            question="These instructions use the same bank movement. Keep one correction or clarify them.",
+            model=model, skill_version=skill.version,
+        )
     return outcomes, failures, usage
 
 
@@ -309,7 +338,7 @@ def complete_investment(
         raise ValueError("The selected investment, security or counterpart is no longer configured")
     if asset.account_type != AccountType.ASSET or asset.bank_details is not None:
         raise ValueError("Select a non-bank asset account for the investment holding")
-    sources = {row.transaction_id: row for row in case.transactions}
+    sources = {row.transaction_id: row for row in case.available_transactions}
     source = sources.get(instruction.transaction_id) if instruction.transaction_id is not None else None
     if instruction.transaction_id is not None and (
         source is None or source.account_id != counterpart.id or source.amount >= 0
@@ -363,6 +392,8 @@ def complete_investment(
 def _request_context(
     cases: list[ManualCase], accounts: AccountRegistry, guidance: list[Guidance] | None,
     securities: SecurityRegistry | None = None, budget: BudgetSettings | None = None,
+    report_settings: ReportSettings | None = None,
+    explicit_memory: list[dict] | None = None,
 ) -> tuple[dict, dict, dict]:
     """
     Validate independent cases and send a compact account catalogue with short, redacted evidence references.
@@ -377,12 +408,14 @@ def _request_context(
     if len(set(all_sources)) != len(all_sources) or len(set(all_entries)) != len(all_entries):
         raise ValueError("Manual cases in a batch cannot share sources or current events.")
     references = {f"m{index}": case for index, case in enumerate(cases, 1)}
-    sources = {
-        f"t{index}": row for index, row in enumerate(
-            (row for case in cases for row in case.transactions), 1,
-        )
+    unique_sources = {
+        row.transaction_id: row for case in cases for row in case.available_transactions
     }
+    sources = {f"t{index}": row for index, row in enumerate(unique_sources.values(), 1)}
     source_refs = {row.transaction_id: reference for reference, row in sources.items()}
+    unique_entries = {entry.id: entry for case in cases for entry in case.available_entries}
+    entry_refs = {identifier: f"e{index}" for index, identifier in enumerate(unique_entries, 1)}
+    shared_entries = {}
     by_id = {account.id: account for account in accounts.accounts.values()}
     learned, _ = guidance_context(
         guidance, accounts, " ".join(case.submission.instruction + " " + case.submission.human_response
@@ -398,22 +431,25 @@ def _request_context(
     for reference, case in references.items():
         if securities is not None and any(
             line.investment is not None and line.investment.security_id not in known_securities
-            for entry in case.entries for line in entry.lines
+            for entry in case.available_entries for line in entry.lines
         ):
             raise ValueError("Current investment postings need their original configured securities.")
         if any(
             row.account_id not in by_id or by_id[row.account_id].account_type != AccountType.ASSET
             or by_id[row.account_id].bank_details is None
-            for row in case.transactions
+            for row in case.available_transactions
         ):
             raise ValueError("Manual sources need configured asset bank accounts.")
-        if any(line.account_id not in by_id for entry in case.entries for line in entry.lines):
+        if any(line.account_id not in by_id for entry in case.available_entries for line in entry.lines):
             raise ValueError("Current manual postings need configured accounts.")
         identifiers = {
-            str(row.transaction_id): "source " + source_refs[row.transaction_id] for row in case.transactions
+            str(row.transaction_id): "source " + source_refs[row.transaction_id]
+            for row in case.available_transactions
         }
         identifiers.update({str(account.id): account.key for account in by_id.values()})
-        identifiers.update({str(entry.id): f"event e{index}" for index, entry in enumerate(case.entries, 1)})
+        identifiers.update({
+            str(entry.id): "event " + entry_refs[entry.id] for entry in case.available_entries
+        })
         items.append({
             "case_ref": reference, "date": case.submission.date.isoformat(),
             "instruction": _safe_text(case.submission.instruction, accounts, identifiers),
@@ -422,18 +458,10 @@ def _request_context(
             "savings_context": case.savings_context.model_dump(mode="json", exclude={"revision"})
             if case.savings_context is not None else None,
             "required_source_refs": [source_refs[identifier] for identifier in case.required_sources],
-            "sources": [
-                {
-                    "source_ref": source_refs[row.transaction_id], "account_key": by_id[row.account_id].key,
-                    "date": row.date.isoformat(), "amount": format(row.amount, ".2f"),
-                    "effective_date": row.effective_date.isoformat() if row.effective_date else None,
-                    "description": _safe_text(row.description, accounts, identifiers),
-                }
-                for row in case.transactions
-            ],
+            "available_source_refs": [source_refs[row.transaction_id] for row in case.available_transactions],
             "current_entries": [
                 {
-                    "entry_ref": f"e{index}", "date": entry.date.isoformat(),
+                    "entry_ref": entry_refs[entry.id], "date": entry.date.isoformat(),
                     "has_investment_details": any(line.investment is not None for line in entry.lines),
                     "lines": [
                         {
@@ -442,6 +470,8 @@ def _request_context(
                             "debit": format(line.debit, ".2f"), "credit": format(line.credit, ".2f"),
                             "description": _safe_text(line.description, accounts, identifiers),
                             "budget_category": line.budget_category,
+                            "account_investment": line.account_investment.model_dump(mode="json")
+                            if line.account_investment is not None else None,
                             "investment": line.investment.model_dump(mode="json", exclude={"security_id"})
                             | {"security_key": securities.by_id(line.investment.security_id).key}
                             if line.investment is not None and securities is not None else None,
@@ -449,11 +479,27 @@ def _request_context(
                         for line in entry.lines
                     ],
                 }
-                for index, entry in enumerate(case.entries, 1)
+                for index, entry in enumerate(case.available_entries, 1)
             ],
         })
+        current = items[-1].pop("current_entries")
+        items[-1]["current_entry_refs"] = [item["entry_ref"] for item in current]
+        for item in current:
+            shared_entries[item["entry_ref"]] = item
     return references, sources, {
         "mode": "manual", "currency": "AUD", "cases": items, "guidance": learned,
+        "explicit_memory": explicit_memory_context(explicit_memory, accounts),
+        "unrealised_gains_account": report_settings.unrealised_gains_account if report_settings else None,
+        "current_entries": list(shared_entries.values()),
+        "sources": [
+            {
+                "source_ref": reference, "account_key": by_id[row.account_id].key,
+                "date": row.date.isoformat(), "amount": format(row.amount, ".2f"),
+                "effective_date": row.effective_date.isoformat() if row.effective_date else None,
+                "description": _safe_text(row.description, accounts, {}),
+            }
+            for reference, row in sources.items()
+        ],
         "budget_categories": [
             {**item, "name": _safe_text(item["name"], accounts, {})}
             for item in budget_catalogue(budget)
@@ -477,6 +523,9 @@ def _request_context(
             {
                 "key": key, "name": _safe_text(account.name, accounts, {}),
                 "type": account.account_type.value, "is_bank": account.bank_details is not None,
+                "whole_account_investment": bool(
+                    report_settings and key in report_settings.account_investments
+                ),
                 "purpose": _safe_text(account.notes or "", accounts, {}),
             }
             for key, account in accounts.accounts.items()
@@ -544,7 +593,7 @@ def _replaces_investment(case: ManualCase, proposal: _Proposal, sources: dict) -
     selected = {
         sources[line.source_ref].transaction_id for line in proposal.lines if line.source_ref in sources
     }
-    for entry in case.entries:
+    for entry in case.available_entries:
         source_ids = {line.transaction_id for line in entry.lines if line.transaction_id is not None}
         affected = not source_ids or bool(source_ids & selected)
         if affected and any(line.investment is not None for line in entry.lines):
@@ -564,7 +613,7 @@ def _build_entry(
     """
     if proposal.status != "apply":
         return None
-    candidate_ids = {row.transaction_id for row in case.transactions}
+    candidate_ids = {row.transaction_id for row in case.available_transactions}
     selected = set()
     fixed = []
     remaining = None
@@ -587,12 +636,11 @@ def _build_entry(
                 other.transaction_id != source.transaction_id
                 and (other.account_id, other.date, other.effective_date, other.amount, other.description)
                 == (source.account_id, source.date, source.effective_date, source.amount, source.description)
-                for other in case.transactions
+                for other in case.available_transactions
             ):
                 raise _SourceClarification(
-                    "Multiple bank rows have the same account, dates, amount and description. Copy the "
-                    "intended transaction ID from the bank-review CSV into source_transactions, "
-                    "then run again."
+                    "Two bank rows have identical account, dates, amount and description. Identify which "
+                    "statement movement this instruction refers to, or select its row in the app."
                 )
             selected.add(source.transaction_id)
             fixed.append(JournalLine(
@@ -600,7 +648,7 @@ def _build_entry(
                 debit=source.amount if source.amount > 0 else Decimal("0"),
                 credit=source.amount.copy_negate() if source.amount < 0 else Decimal("0"),
                 description=source.description, effective_date=source.effective_date,
-                budget_category=posting.budget_category,
+                budget_category=posting.budget_category, account_investment=posting.account_investment,
             ))
             continue
         if account.bank_details is not None:
@@ -620,7 +668,10 @@ def _build_entry(
         if posting.amount == "remaining":
             if remaining is not None:
                 raise ValueError("A manual event can contain only one remaining amount.")
-            remaining = (index, account.id, posting.side, text, effective_date, posting.budget_category)
+            remaining = (
+                index, account.id, posting.side, text, effective_date,
+                posting.budget_category, posting.account_investment,
+            )
             fixed.append(None)
             continue
         if posting.amount is None:
@@ -628,18 +679,18 @@ def _build_entry(
         amount = Decimal(posting.amount)
         fixed.append(JournalLine(
             account_id=account.id, description=text, effective_date=effective_date,
-            budget_category=posting.budget_category,
+            budget_category=posting.budget_category, account_investment=posting.account_investment,
             debit=amount if posting.side == "debit" else Decimal("0"),
             credit=amount if posting.side == "credit" else Decimal("0"),
         ))
     if not set(case.required_sources) <= selected:
         raise ValueError("A manual event must preserve every required source.")
-    for entry in case.entries:
+    for entry in case.available_entries:
         prior_sources = {line.transaction_id for line in entry.lines if line.transaction_id is not None}
         if selected & prior_sources and not prior_sources <= selected:
             raise ValueError("A manual correction must preserve the complete existing source group.")
     if remaining is not None:
-        index, account_id, side, text, effective_date, category = remaining
+        index, account_id, side, text, effective_date, category, account_investment = remaining
         # Integer cents avoid precision loss when summing Decimal values near its context limit.
         balance = sum(_cents(line.debit) - _cents(line.credit) for line in fixed if line is not None)
         cents = -balance if side == "debit" else balance
@@ -648,11 +699,12 @@ def _build_entry(
         amount = Decimal(f"{cents // 100}.{cents % 100:02d}")
         fixed[index] = JournalLine(
             account_id=account_id, description=text, effective_date=effective_date, budget_category=category,
+            account_investment=account_investment,
             debit=amount if side == "debit" else Decimal("0"),
             credit=amount if side == "credit" else Decimal("0"),
         )
     previous = [
-        entry for entry in case.entries
+        entry for entry in case.available_entries
         if {line.transaction_id for line in entry.lines if line.transaction_id is not None} == selected
     ]
     original = previous[0] if len(previous) == 1 else None
@@ -661,10 +713,11 @@ def _build_entry(
         lines=tuple(fixed),
     )
     affected = tuple(
-        old for old in case.entries if old.id == entry.id
+        old for old in case.available_entries if old.id == entry.id
         or selected & {line.transaction_id for line in old.lines if line.transaction_id is not None}
     )
     entry = preserve_budget_categories((entry,), affected)[0]
+    entry = preserve_account_investments((entry,), affected)[0]
     validate_budget_labels((entry,), accounts, budget, affected)
     return entry
 
@@ -708,6 +761,10 @@ def _response_schema(
     """
     schema = _Batch.model_json_schema()
     definitions = schema["$defs"]
+    details = definitions["AccountInvestmentDetails"]
+    details["required"] = list(details["properties"])
+    for field in details["properties"].values():
+        field.pop("default", None)
     result = definitions["_Proposal"]
     result["properties"]["case_ref"]["enum"] = list(references)
     result["required"] = list(result["properties"])
@@ -735,10 +792,11 @@ def _response_schema(
         else:
             investment["source_ref"] = {"type": "null"}
     posting = definitions["_Posting"]["properties"]
+    posting["account_investment"].pop("default", None)
     posting["account_key"]["enum"] = list(accounts.accounts)
     labels = (
         [item["key"] for item in budget_catalogue(budget)] if budget is not None else
-        sorted({line.budget_category for case in references.values() for entry in case.entries
+        sorted({line.budget_category for case in references.values() for entry in case.available_entries
                 for line in entry.lines if line.budget_category is not None})
     )
     category = (

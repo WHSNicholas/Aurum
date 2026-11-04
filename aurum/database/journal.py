@@ -31,12 +31,14 @@ from uuid import UUID
 from aurum.database.transactions import from_sqlite_dollars, to_sqlite_dollars
 from aurum.finance.accounts import AccountRegistry, AccountType
 from aurum.finance.budget import BudgetSettings, validate_budget_labels
-from aurum.finance.journal import InvestmentDetails, JournalEntry, JournalLine
+from aurum.finance.journal import AccountInvestmentDetails, InvestmentDetails, JournalEntry, JournalLine
 from aurum.finance.securities import SecurityRegistry
 
 
 # %% 1. Journal Storage --------------------------------------------------------------------------------------
-def prepare_journal(connection: sqlite3.Connection, accounts: AccountRegistry) -> None:
+def prepare_journal(
+    connection: sqlite3.Connection, accounts: AccountRegistry, *, transaction_ids: set[UUID] | None = None,
+) -> None:
     """
     Add pending rows for unrepresented statement lines and refresh readable account names and types.
 
@@ -51,7 +53,7 @@ def prepare_journal(connection: sqlite3.Connection, accounts: AccountRegistry) -
         raise ValueError("Finish the pending database write before preparing the journal")
     with connection:
         connection.execute("BEGIN IMMEDIATE")
-        _prepare_journal(connection, accounts)
+        _prepare_journal(connection, accounts, transaction_ids=transaction_ids)
 
 
 def save_journal_entry(
@@ -107,11 +109,17 @@ def load_journal_entries(
     ).fetchone() is not None
     label = "b.budget_category" if labelled else "NULL"
     join = "LEFT JOIN journal_budget b ON b.journal_row_id = j.id" if labelled else ""
+    classified = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'journal_account_investments'"
+    ).fetchone() is not None
+    treatment = "i.kind, i.cost_basis" if classified else "NULL, NULL"
+    if classified:
+        join += " LEFT JOIN journal_account_investments i ON i.journal_row_id = j.id"
     return _entries_from_rows(connection, connection.execute(
         f"""
         SELECT j.journal_entry_id, j.line_number, j.date,
                j.account_id, j.debit, j.credit, j.transaction_id, j.description, j.effective_date,
-               j.security_id, j.units, j.unit_price, j.fees, {label}
+               j.security_id, j.units, j.unit_price, j.fees, {label}, {treatment}
         FROM journal j {join} WHERE j.status = 'posted'
         ORDER BY j.date, j.journal_entry_id, j.line_number
         """
@@ -130,7 +138,9 @@ def posted_transaction_ids(connection: sqlite3.Connection) -> set[UUID]:
     }
 
 
-def _prepare_journal(connection: sqlite3.Connection, accounts: AccountRegistry) -> None:
+def _prepare_journal(
+    connection: sqlite3.Connection, accounts: AccountRegistry, *, transaction_ids: set[UUID] | None = None,
+) -> None:
     """
     Add source drafts and refresh display fields within the caller's existing transaction.
     """
@@ -139,7 +149,11 @@ def _prepare_journal(connection: sqlite3.Connection, accounts: AccountRegistry) 
     if not actual_ids <= by_id.keys():
         raise ValueError("Every actual journal account must remain in the account registry")
     for (identifier,) in connection.execute("SELECT transaction_id FROM transactions").fetchall():
+        if transaction_ids is not None and UUID(identifier) not in transaction_ids:
+            continue
         _ensure_source_row(connection, UUID(identifier), accounts)
+    if transaction_ids is not None:
+        return
     for identifier, account in by_id.items():
         connection.execute(
             "UPDATE journal SET account_name = ?, account_type = ? WHERE account_id = ?",
@@ -216,6 +230,7 @@ def _write_entry(
                 values,
             )
             _save_budget_label(connection, cursor.lastrowid, line.budget_category)
+            _save_account_investment(connection, cursor.lastrowid, line.account_investment)
             continue
         _ensure_source_row(connection, line.transaction_id, accounts)
         identifier = str(line.transaction_id)
@@ -239,6 +254,7 @@ def _write_entry(
             "SELECT id FROM journal WHERE transaction_id = ?", (identifier,),
         ).fetchone()[0]
         _save_budget_label(connection, row_id, line.budget_category)
+        _save_account_investment(connection, row_id, line.account_investment)
 
 
 def _entries_from_rows(
@@ -266,6 +282,9 @@ def _entries_from_rows(
                 investment=InvestmentDetails(
                     security_id=row[9], units=row[10], unit_price=row[11], fees=row[12],
                 ) if any(value is not None for value in row[9:13]) else None,
+                account_investment=AccountInvestmentDetails(
+                    kind=row[14], cost_basis=from_sqlite_dollars(row[15]) if row[15] is not None else None,
+                ) if row[14] is not None else None,
             )
             for row in postings
         )
@@ -326,6 +345,10 @@ def _check_journal_sources(
             account.account_type != AccountType.ASSET or account.bank_details is not None
         ):
             raise ValueError("Investment units require a non-bank asset account")
+        if line.account_investment is not None and (
+            account.account_type != AccountType.ASSET or account.bank_details is not None
+        ):
+            raise ValueError("Whole-account investment treatment requires a non-bank asset account")
         if line.transaction_id is None:
             continue
 
@@ -368,4 +391,32 @@ def _save_budget_label(connection: sqlite3.Connection, row_id: int, category: st
         connection.execute(
             "INSERT INTO journal_budget (journal_row_id, budget_category) VALUES (?, ?)",
             (row_id, category),
+        )
+
+
+def _save_account_investment(
+    connection: sqlite3.Connection, row_id: int, details: AccountInvestmentDetails | None,
+) -> None:
+    """
+    Save optional contribution treatment in the posting transaction, creating its missing table if needed.
+
+    Read-only access never creates a table. This additive table leaves existing journal columns and values
+    unchanged and rolls back together with a failed posting or correction.
+    """
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'journal_account_investments'"
+    ).fetchone()
+    if not exists:
+        if details is None:
+            return
+        from aurum.database.database import ACCOUNT_INVESTMENT_SCHEMA
+        connection.execute(ACCOUNT_INVESTMENT_SCHEMA)
+    connection.execute("DELETE FROM journal_account_investments WHERE journal_row_id = ?", (row_id,))
+    if details is not None:
+        connection.execute(
+            "INSERT INTO journal_account_investments (journal_row_id, kind, cost_basis) VALUES (?, ?, ?)",
+            (
+                row_id, details.kind,
+                to_sqlite_dollars(details.cost_basis) if details.cost_basis is not None else None,
+            ),
         )

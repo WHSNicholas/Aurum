@@ -340,9 +340,9 @@ def fetch_yahoo_quote(security: Security, requested_date: date) -> PriceQuote:
         raise
     except Exception:
         raise PriceUnavailable(
-            "The market close could not be retrieved; supply an AUD unit price in human_response "
-            "or retry with --retry-errors"
+            "The market close could not be retrieved; enter an AUD unit price in the Manual response "
+            "or use Process to retry"
         ) from None
     raise PriceUnavailable(
-        "No completed AUD close is available within seven days; supply an AUD unit price in human_response"
+        "No completed AUD close is available within seven days; enter an AUD unit price in the Manual response"
     )
