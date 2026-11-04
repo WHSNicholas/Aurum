@@ -291,16 +291,8 @@ class OverviewPage(QWidget):
         except (TypeError, ValueError):
             cutoff = "the reporting cutoff"
         unpriced = snapshot.get("net_worth_unpriced_holdings", [])
-        caption = f"As at {cutoff}" + (" · Provisional" if unpriced else "")
+        caption = f"As of {cutoff}" + (" · Provisional" if unpriced else "")
         prices = snapshot.get("net_worth_price_dates", [])
-        dates = sorted({datetime.fromisoformat(item["price_date"]) for item in prices})
-        if dates:
-            first, last = dates[0], dates[-1]
-            price_dates = last.strftime("%d %b %Y").lstrip("0")
-            if first != last:
-                pattern = "%d %b" if first.year == last.year else "%d %b %Y"
-                price_dates = first.strftime(pattern).lstrip("0") + " – " + price_dates
-            caption += f"\nPrices {price_dates}"
         self.captions["net_worth"].setText(caption)
         valuation = (
             "Uses the balance sheet's calculation and the latest valid saved market prices "
@@ -309,7 +301,7 @@ class OverviewPage(QWidget):
         for item in prices:
             price_date = datetime.fromisoformat(item["price_date"]).strftime("%d %b %Y").lstrip("0")
             valuation += f"\n{item['name']}: {price_date}"
-        if dates:
+        if prices:
             valuation += "\nGenerate reports to check for newer closing prices."
         if unpriced:
             valuation += (

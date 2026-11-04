@@ -95,9 +95,10 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   expenses and savings. Use the shared report calculation with posted entries and the latest valid saved
   security close on or before the cutoff, matching the security and provider symbol. Both the quote's original
   requested date and price date must be on or before the cutoff; choose the newest price date and skip invalid
-  records without altering them. Refresh stays read-only and never fetches prices. Show actual market-price
-  dates beneath Net Worth, with each holding's date in its tooltip. When no valid saved quote exists, or a
-  manual valuation is ambiguous, retain recorded holding values as in reports; mark the card
+  records without altering them. Refresh stays read-only and never fetches prices. Net Worth's caption uses
+  one As of cutoff-date line (today for the current month); keep market-price dates only in its tooltip.
+  When no valid saved quote exists, or a manual valuation is ambiguous, retain recorded holding values as
+  in reports; mark the card
   Provisional and name affected holdings in its tooltip. Whole-account cost questions do not make their
   recorded values provisional. Preserve budget exclusions and signed refunds; incomplete budget targets
   must not block these actuals.
