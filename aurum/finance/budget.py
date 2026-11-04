@@ -527,7 +527,7 @@ def build_budget_report(
     for key, (name, kind) in unbudgeted.items():
         rows[kind].append(BudgetRow(key=key, name=name, actual=_money(amounts[key])))
     income, expenses, savings = (tuple(rows[kind]) for kind in ("income", "expense", "savings"))
-    label = period.end_date.strftime("%B %Y") + (" (month-to-date)" if period.is_partial else "")
+    label = period.end_date.strftime("%B %Y")
     return BudgetReport(
         start_date=period.start_date, end_date=period.cutoff, period_label=label,
         income=income, expenses=expenses, savings=savings,

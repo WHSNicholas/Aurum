@@ -27,7 +27,7 @@ def main(workspace: Path | None = None) -> int:
     """
     try:
         from PySide6.QtCore import QDir
-        from PySide6.QtGui import QFont, QFontDatabase
+        from PySide6.QtGui import QFont, QFontDatabase, QIcon
         from PySide6.QtWidgets import QApplication
     except ImportError:
         print("Install Aurum's dependencies: python -m pip install -r requirements.txt", file=sys.stderr)
@@ -44,6 +44,7 @@ def main(workspace: Path | None = None) -> int:
     app.setApplicationName("Aurum")
     app.setApplicationDisplayName("Aurum")
     app.setOrganizationName("Aurum")
+    app.setWindowIcon(QIcon(str(PROJECT_ROOT / "aurum" / "gui" / "assets" / "app" / "aurum.png")))
     for filename in ("Geist.ttf", "GeistMono.ttf", "Cormorant.ttf"):
         QFontDatabase.addApplicationFont(str(PROJECT_ROOT / "aurum" / "reporting" / "assets" / filename))
     app.setFont(QFont("Geist", 12))

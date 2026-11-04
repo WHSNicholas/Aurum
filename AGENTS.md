@@ -84,6 +84,8 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
 - The PySide6 desktop launches with `python aurum/scripts/app.py`. Keep widgets in `gui/`, reusable operations
   in `workflows/`. GUI actions call shared functions directly. The macOS Applications launcher opens this same
   entry point using the project's .venv; choose workspaces through the GUI rather than command-line options.
+  Use the abstract app artwork in `gui/assets/app/`: the PNG supplies Qt's application icon and the ICNS
+  supplies the macOS launcher's bundle icon. Keep the original master and generation prompt alongside them.
   Open the existing workspace read-only; creation, saves, imports and processing require explicit UI actions.
   Main page titles and the Aurum wordmark use the PDF title's Cormorant font, semibold with small caps.
   Keep larger initial capitals and smaller capitals for lowercase letters. Place a 13px normal-weight muted subtitle
@@ -386,6 +388,7 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   and save all four PDFs in its reporting-month subfolder.
 - Reporting months end on the last Monday-Friday day, without public-holiday adjustment; the next day starts
   the next month. Reporting years follow the same December boundary. Use journal dates, not effective dates.
+  Report period headings show Month Year without a month-to-date suffix; partial-month cutoffs remain unchanged.
 - Read one validated journal snapshot. Only posted events affect figures; outstanding accounting produces a
   labelled draft. Reports do not process responses, call AI, close accounts or change journal postings.
 - Present current reporting-year profit and current-year direct Retained Earnings movements in Retained

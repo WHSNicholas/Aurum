@@ -759,7 +759,7 @@ def build_reports(
     income_total = sum(_cents(row.amount) for row in income)
     expense_total = sum(_cents(row.amount) for row in expenses)
     month_name = date(int(period.month[:4]), int(period.month[5:]), 1).strftime("%B %Y")
-    label = month_name + (" (month-to-date)" if period.is_partial else "")
+    label = month_name
     return Reports(
         balance_sheet=BalanceSheet(
             as_of=period.cutoff, assets=assets, liabilities=liabilities, equity=equity,

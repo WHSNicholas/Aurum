@@ -6,8 +6,11 @@ there are no manual/review CSV inputs or separate processing commands.
 
 ## Open Aurum
 
-Open **Aurum.app** from your personal Applications folder. You can keep it in the Dock.
+Double-click the **Aurum.app** shortcut in the Aurum project folder, or open **Aurum.app** from your personal
+Applications folder. The project shortcut points to that installed launcher. You can keep it in the Dock.
 The launcher uses this project's Python environment, so keep the Aurum project and its `.venv` in place.
+The abstract teal-and-gold icon identifies both the launcher and the running app. Restart Aurum after an
+icon update to refresh its Dock icon.
 
 For development, run `aurum/scripts/app.py` in PyCharm, or use the one startup command from the project root:
 
@@ -237,6 +240,8 @@ Reports are stored under the configured output folder's monthly subfolder, by de
 Generating renders all four before replacing saved outputs. Reports use posted accounting and do not process
 responses or call AI. Outstanding accounting or unavailable required prices produces a labelled draft.
 Saved PDFs are snapshots: regenerate after changing accounting, names or report settings.
+Report headings show the month and year without a month-to-date suffix. Current-month figures still stop
+at the reporting cutoff.
 
 The balance sheet and investment report can revalue supported security holdings using a completed AUD close
 on or before the cutoff within seven days. Missing prices retain recorded value with a draft warning.
