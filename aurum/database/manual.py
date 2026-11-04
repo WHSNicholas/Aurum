@@ -7,9 +7,10 @@ Aurum keeps manual instructions and their revisions beside the journal they crea
 
 A durable request is saved before contacting AI. Accepted results replace whole events and save their audit
 history in one database transaction; questions and failures leave existing accounting untouched. Stable manual
-identities connect later CSV corrections to their original events, including events without bank sources.
+identities connect later corrections to their original events, including events without bank sources.
 
-Candidate statement rows are protected while an instruction needs attention. Bank reviews cannot replace
+Required statement rows are protected while an instruction needs attention. Shared monthly evidence remains
+available until an outcome selects its actual sources. Bank reviews cannot replace
 manual-owned events, and manual corrections retire review guidance whose accounting evidence they supersede.
 Virtual savings splits reuse this review history but save only in savings_allocations, without postings.
 """
@@ -23,6 +24,7 @@ from uuid import UUID, uuid4
 
 # Aurum imports
 from aurum.database.database import MANUAL_COLUMNS
+from aurum.database.memory import memory_revision
 from aurum.database.journal import (
     _check_investment_securities, _check_journal_sources, _ensure_source_row, _write_entry,
     load_journal_entries,
@@ -31,7 +33,7 @@ from aurum.database.reviews import _context, _digest, _json, _now, _require_idle
 from aurum.database.transactions import load_transactions
 from aurum.finance.accounts import AccountRegistry, AccountType
 from aurum.finance.budget import BudgetSettings, budget_revision, validate_budget_labels
-from aurum.finance.journal import preserve_budget_categories
+from aurum.finance.journal import preserve_account_investments, preserve_budget_categories
 from aurum.finance.investments import calculate_investment
 from aurum.finance.securities import SecurityRegistry
 from aurum.database.prices import load_quote
@@ -76,9 +78,9 @@ def submit_manual_input(
     *, retry_errors: bool = False,
 ) -> dict:
     """
-    Append a changed instruction only when its CSV revision still describes the current accounting.
+    Append a changed instruction only when its displayed revision still describes the current accounting.
 
-    Unchanged text remains unchanged even when its exported context was refreshed. Changing an interrupted
+    Unchanged text remains unchanged even when its displayed context was refreshed. Changing an interrupted
     request requires explicit retry_errors; its reserved history is retained as superseded.
     """
     _require_idle(connection)
@@ -95,7 +97,7 @@ def submit_manual_input(
                 raise ValueError("Retry the interrupted manual request before replacing its instruction")
             if not _matches_context_revision(connection, saved, submission.context_revision, accounts):
                 raise ValueError(
-                    "This manual CSV is stale; refresh its accounting before changing the instruction"
+                    "This manual entry is stale; reload it before changing the instruction"
                 )
             if saved["status"] == "requesting":
                 connection.execute(
@@ -130,7 +132,7 @@ def manual_context_revision(
     connection: sqlite3.Connection, manual_id: UUID, accounts: AccountRegistry,
 ) -> str:
     """
-    Identify the latest instruction and the complete accounting currently shown in its CSV row.
+    Identify the latest instruction and the complete accounting currently shown in its editor.
     """
     saved = _latest(connection, manual_id)
     if saved is None:
@@ -192,37 +194,6 @@ def manual_claims(connection: sqlite3.Connection) -> dict[UUID, UUID]:
     return claims
 
 
-def release_manual_claims(
-    connection: sqlite3.Connection, manual_id: UUID, accounts: AccountRegistry | None = None,
-    *, context_revision: str | None = None,
-) -> None:
-    """
-    Withdraw a cleared instruction's unresolved candidates without undoing postings or erasing history.
-
-    An in-flight request cannot be withdrawn silently. Restoring a withdrawn instruction creates a new
-    revision, while current posted event ownership stays with the original manual identity.
-    """
-    _require_idle(connection)
-    with connection:
-        connection.execute("BEGIN IMMEDIATE")
-        saved = _latest(connection, manual_id)
-        if saved is None or saved["status"] in {"applied", "withdrawn"}:
-            return
-        if context_revision is not None:
-            if accounts is None:
-                raise ValueError("Checking a cleared manual instruction requires its account registry")
-            if not _matches_context_revision(connection, saved, context_revision, accounts):
-                raise ValueError(
-                    "This cleared manual instruction is stale; refresh its CSV before withdrawing it"
-                )
-        if saved["status"] == "requesting":
-            raise ValueError("Retry the interrupted manual request before withdrawing its instruction")
-        connection.execute(
-            "UPDATE manual_entries SET status = 'withdrawn', updated_at = ? WHERE id = ?",
-            (_now(), str(saved["input_revision"])),
-        )
-
-
 # %% 2. Manual Requests --------------------------------------------------------------------------------------
 def defer_manual_case(
     connection: sqlite3.Connection, case: ManualCase, accounts: AccountRegistry, question: str,
@@ -253,7 +224,7 @@ def manual_needs_processing(
     catalogue_revision: str | None = None, budget_version: str | None = None,
 ) -> bool:
     """
-    Reuse one eligibility rule for CSV preparation and atomic request reservation.
+    Reuse one eligibility rule for desktop preparation and atomic request reservation.
 
     Investment questions are reconsidered once after the account/security catalogue changes. The saved case
     carries its catalogue version, including questions without a priced proposal; no schema change is needed.
@@ -371,6 +342,8 @@ def save_investment_proposal(
             (
                 _json({
                     "case_revision": case.revision, "catalogue_revision": catalogue_revision,
+                    "evidence_revision": case.evidence_revision,
+                    "memory_revision": case.memory_revision,
                     "outcome": outcome.model_dump(mode="json"),
                 }),
                 _now(), str(saved["input_revision"]),
@@ -420,16 +393,19 @@ def save_manual_outcome(
                 raise ValueError("A virtual-pot instruction cannot create journal postings")
             if entry is None:
                 raise ValueError("An applied manual outcome needs a complete entry")
-            _check_claims(connection, case)
+            selected_case = _selected_case(connection, case, entry, accounts)
+            _check_claims(connection, selected_case)
+            before = _audit_snapshot(connection, selected_case)
             replaced = _check_replacement(connection, case, outcome, saved, accounts, securities)
             entry = preserve_budget_categories((entry,), tuple(replaced))[0]
+            entry = preserve_account_investments((entry,), tuple(replaced))[0]
             validate_budget_labels((entry,), accounts, budget, tuple(replaced))
             outcome = ManualOutcome.model_validate({**outcome.model_dump(), "entry": entry})
             _replace_entry(connection, replaced, outcome, accounts)
             source_ids = {line.transaction_id for line in entry.lines if line.transaction_id is not None}
             _retire_reviews(connection, source_ids, case.submission.id)
             event_id = entry.id
-            after = _audit_snapshot(connection, case, event_id=event_id)
+            after = _audit_snapshot(connection, selected_case, event_id=event_id)
             status = "applied"
         else:
             after = before
@@ -450,7 +426,7 @@ def save_manual_outcome(
 # %% 3. Helpers ----------------------------------------------------------------------------------------------
 def _with_savings(connection: sqlite3.Connection, manual_id: UUID, snapshot: dict) -> dict:
     """
-    Add only this instruction's current split, preserving older unallocated CSV revision hashes.
+    Add only this instruction's current split, preserving older unallocated revision hashes.
     """
     allocation = load_savings_allocations(connection).get(manual_id)
     if allocation is not None:
@@ -469,14 +445,14 @@ def _matches_context_revision(
     connection: sqlite3.Connection, saved: dict, revision: str, accounts: AccountRegistry,
 ) -> bool:
     """
-    Require the CSV revision to match the current accounting shown for this manual instruction.
+    Require the displayed revision to match the current accounting shown for this manual instruction.
     """
     return revision == manual_context_revision(connection, saved["manual_id"], accounts)
 
 
 def _input_values(submission: ManualInput) -> dict:
     """
-    Compare editable instruction values without treating generated CSV context as a new answer.
+    Compare editable instruction values without treating generated accounting context as a new answer.
     """
     return submission.model_dump(mode="json", exclude={"context_revision"})
 
@@ -508,14 +484,16 @@ def _check_case(
     connection: sqlite3.Connection, case: ManualCase, accounts: AccountRegistry,
 ) -> dict:
     """
-    Require the exact current instruction, complete evidence and its unchanged accounting revision.
+    Require the current instruction, complete evidence and unchanged accounting and explicit memory.
     """
     saved = _latest(connection, case.submission.id)
+    if case.memory_revision is not None and case.memory_revision != memory_revision(connection):
+        raise ValueError("Remembered instructions changed; refresh this manual request before processing")
     if saved is None or _input_values(saved["submission"]) != _input_values(case.submission):
         raise ValueError("The manual case does not match the latest saved instruction")
     revision = manual_case_revision(connection, case.submission, case.transactions, case.entries, accounts)
     if revision != case.revision:
-        raise ValueError("Manual accounting changed after preparation; refresh its CSV before correcting it")
+        raise ValueError("Manual accounting changed after preparation; reload the entry before correcting it")
     if saved["journal_entry_id"] and saved["journal_entry_id"] not in {entry.id for entry in case.entries}:
         raise ValueError("A manual correction must include its current complete event")
     return saved
@@ -538,7 +516,7 @@ def _check_claims(connection: sqlite3.Connection, case: ManualCase) -> None:
     sources = {item.transaction_id for item in case.transactions}
     owners = manual_owner_ids(connection)
     if any(owners.get(identifier, case.submission.id) != case.submission.id for identifier in sources):
-        raise ValueError("An affected transaction belongs to another manual entry; edit its original CSV row")
+        raise ValueError("An affected transaction belongs to another manual entry; edit that entry in Manual")
     for record in load_manual_entries(connection):
         if record["manual_id"] == case.submission.id:
             continue
@@ -573,11 +551,11 @@ def _check_replacement(
     if any(line.investment is not None for line in entry.lines) or outcome.event_kind == "investment":
         _check_investment_result(connection, case, outcome, saved, accounts, securities)
     selected = {line.transaction_id for line in entry.lines if line.transaction_id is not None}
-    candidates = {item.transaction_id for item in case.transactions}
+    candidates = {item.transaction_id for item in case.available_transactions}
     if not set(case.required_sources) <= selected <= candidates:
         raise ValueError("A manual entry must retain required sources and select only supplied evidence")
     replaced = [
-        old for old in case.entries
+        old for old in case.available_entries
         if old.id == saved["journal_entry_id"]
         or selected & {line.transaction_id for line in old.lines if line.transaction_id is not None}
     ]
@@ -588,7 +566,7 @@ def _check_replacement(
             raise ValueError("A correction must preserve every source belonging to each replaced event")
     if len(replaced) == 1 and entry.id != replaced[0].id:
         raise ValueError("A one-to-one correction must preserve its existing event UUID")
-    if len(replaced) != 1 and entry.id in {old.id for old in case.entries}:
+    if len(replaced) != 1 and entry.id in {old.id for old in case.available_entries}:
         raise ValueError("A merged event must receive a new UUID")
     by_id = {account.id: account for account in accounts.accounts.values()}
     for line in entry.lines:
@@ -626,6 +604,8 @@ def _check_investment_result(
     proposal = ManualOutcome.model_validate(cached["outcome"])
     if (
         proposal.investment != instruction or cached["case_revision"] != case.revision
+        or cached.get("evidence_revision") != case.evidence_revision
+        or cached.get("memory_revision") != case.memory_revision
         or proposal.investment_budget_category != outcome.investment_budget_category
     ):
         raise ValueError("Investment facts changed after the interpreted proposal was saved")
@@ -639,7 +619,8 @@ def _check_investment_result(
     if instruction.operation == "opening" and counterpart.bank_details is not None:
         raise ValueError("An opening holding cannot manufacture an unlinked bank payment")
     source = next(
-        (row for row in case.transactions if row.transaction_id == instruction.transaction_id), None,
+        (row for row in case.available_transactions if row.transaction_id == instruction.transaction_id),
+        None,
     )
     if instruction.transaction_id is not None and (
         source is None or source.account_id != counterpart.id or source.amount >= 0
@@ -695,6 +676,24 @@ def _replace_entry(connection: sqlite3.Connection, replaced, outcome: ManualOutc
     _write_entry(connection, entry, accounts)
 
 
+def _selected_case(connection, case: ManualCase, entry, accounts: AccountRegistry) -> ManualCase:
+    """
+    Validate selected monthly facts without making unrelated results stale when another event is posted.
+    """
+    sources = {line.transaction_id for line in entry.lines if line.transaction_id is not None}
+    entries = tuple(old for old in case.available_entries if old in case.entries or sources & {
+        line.transaction_id for line in old.lines if line.transaction_id is not None
+    })
+    transactions = tuple(row for row in case.available_transactions if row.transaction_id in sources)
+    # This compares full source groups and original postings with their current database snapshot.
+    revision = manual_case_revision(connection, case.submission, transactions, entries, accounts)
+    return ManualCase(
+        submission=case.submission, revision=revision, transactions=transactions, entries=entries,
+        required_sources=case.required_sources, catalogue_revision=case.catalogue_revision,
+        budget_revision=case.budget_revision, memory_revision=case.memory_revision,
+    )
+
+
 def _retire_reviews(connection: sqlite3.Connection, source_ids: set[UUID], manual_id: UUID) -> None:
     """
     Retire displaced review evidence using its existing audit IDs, preserving every foreign-key reference.
@@ -716,7 +715,7 @@ def _retire_reviews(connection: sqlite3.Connection, source_ids: set[UUID], manua
             WHERE id = ? AND status != 'superseded'
             """,
             (
-                f"Accounting replaced by manual entry {manual_id}; edit its original manual CSV",
+                f"Accounting replaced by manual entry {manual_id}; edit its original Manual entry",
                 _now(), identifier,
             ),
         )
@@ -735,9 +734,17 @@ def _audit_snapshot(
     cursor = connection.execute("SELECT * FROM journal ORDER BY id")
     columns = [item[0] for item in cursor.description]
     rows = [dict(zip(columns, values)) for values in cursor]
+    affected = [row for row in rows if row["transaction_id"] in sources or row["journal_entry_id"] in entries]
+    row_ids = {row["id"] for row in affected}
+    details = []
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'journal_account_investments'"
+    ).fetchone():
+        details = [dict(zip(("journal_row_id", "kind", "cost_basis"), row)) for row in connection.execute(
+            "SELECT journal_row_id, kind, cost_basis FROM journal_account_investments ORDER BY journal_row_id"
+        ) if row[0] in row_ids]
     return _with_savings(connection, case.submission.id, {
         "submission": case.submission.model_dump(mode="json"),
-        "journal": [
-            row for row in rows if row["transaction_id"] in sources or row["journal_entry_id"] in entries
-        ],
+        "journal": affected,
+        **({"account_investments": details} if details else {}),
     })

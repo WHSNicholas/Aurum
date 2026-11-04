@@ -24,7 +24,7 @@ Holdings are reconstructed from these movements; sales and disposal-cost calcula
 # Imports
 from datetime import date
 from decimal import Decimal
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -69,6 +69,30 @@ class InvestmentDetails(BaseModel):
         return value
 
 
+class AccountInvestmentDetails(BaseModel):
+    """
+    Distinguish contributed money from earnings in an investment tracked as one account.
+
+    Contributions use the net debit posted to the account. Earnings change its value without changing cost.
+    An opening position needs an explicit historical cost, which may differ from its recorded value.
+    Unclassified deliberately leaves cost unknown rather than silently treating a movement as earnings.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
+
+    kind: Literal["contribution", "earnings", "opening", "unclassified"]
+    cost_basis: Decimal | None = Field(default=None, ge=0, decimal_places=2, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _check_cost(self) -> Self:
+        """
+        Require an explicit opening cost and derive other costs from their posting treatment.
+        """
+        if (self.kind == "opening") != (self.cost_basis is not None):
+            raise ValueError("Only an opening position requires an explicit investment cost basis")
+        return self
+
+
 class JournalLine(BaseModel):
     """
     Record one debit or credit against an account.
@@ -81,6 +105,7 @@ class JournalLine(BaseModel):
         credit: Positive AUD amount on the credit side, or zero for a debit line.
         transaction_id: Supporting imported transaction UUID, or None for a line without a statement source.
         investment: Optional security movement on an asset line without a bank statement link.
+        account_investment: Optional contribution or earnings treatment for a whole-account investment.
         budget_category: Optional reporting category key; exclude omits this line from the budget.
 
     Exactly one side must be positive. The account type determines how a debit or credit changes its balance;
@@ -103,6 +128,9 @@ class JournalLine(BaseModel):
     credit: Decimal = Field(default=Decimal("0"), ge=0, decimal_places=2, allow_inf_nan=False)
     transaction_id: UUID | None = None
     investment: InvestmentDetails | None = None
+    account_investment: AccountInvestmentDetails | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     budget_category: str | None = Field(
         default=None, min_length=1, exclude_if=lambda value: value is None,
     )
@@ -140,6 +168,11 @@ class JournalLine(BaseModel):
                 raise ValueError("investment units belong on the investment line, not the bank source line")
             if (self.investment.units > 0) != (self.debit > 0):
                 raise ValueError("positive investment units require a debit; negative units require a credit")
+        if self.account_investment is not None:
+            if self.transaction_id is not None or self.investment is not None:
+                raise ValueError("Whole-account investment treatment belongs on an unlinked asset line")
+            if self.account_investment.kind in {"contribution", "opening"} and self.debit <= 0:
+                raise ValueError("Contributions and opening investment positions require an asset debit")
         return self
 
 
@@ -249,3 +282,59 @@ def preserve_budget_categories(
             lines.append(JournalLine.model_validate({**line.model_dump(), "budget_category": category}))
         results.append(JournalEntry(id=entry.id, date=entry.date, lines=tuple(lines)))
     return tuple(results)
+
+
+def preserve_account_investments(
+    entries: tuple[JournalEntry, ...], previous: tuple[JournalEntry, ...],
+) -> tuple[JournalEntry, ...]:
+    """
+    Retain whole-account treatment through AI corrections without matching by row position.
+
+    Explicit replacement treatment wins. Otherwise match event lineage, account and side, preferring the
+    exact amount. A split or account change requires an explicit choice instead of losing historical cost.
+    Direct human editors can deliberately supply unclassified treatment when the cost is unknown.
+    """
+    inherited = {}
+    for old_entry in previous:
+        sources = {line.transaction_id for line in old_entry.lines if line.transaction_id is not None}
+        related = [
+            (index, entry) for index, entry in enumerate(entries)
+            if entry.id == old_entry.id or sources & {
+                line.transaction_id for line in entry.lines if line.transaction_id is not None
+            }
+        ]
+        for old in old_entry.lines:
+            if old.account_investment is None:
+                continue
+            candidates = [
+                (index, number, line) for index, entry in related for number, line in enumerate(entry.lines)
+                if line.account_id == old.account_id and (line.debit > 0) == (old.debit > 0)
+                and line.transaction_id is None and line.investment is None
+            ]
+            exact = [
+                item for item in candidates if (item[2].debit, item[2].credit) == (old.debit, old.credit)
+            ]
+            if len(exact) == 1:
+                candidates = exact
+            if candidates and all(line.account_investment is not None for _, _, line in candidates):
+                continue
+            if len(candidates) != 1:
+                raise ValueError(
+                    "Choose investment treatment explicitly when splitting or moving its posting"
+                )
+            index, number, line = candidates[0]
+            if line.account_investment is None:
+                key = (index, number)
+                if key in inherited and old.account_investment.kind == "opening":
+                    raise ValueError("Merged opening positions require an explicit combined historical cost")
+                if key in inherited and inherited[key] != old.account_investment:
+                    raise ValueError("Merged investment postings need an explicit contribution treatment")
+                inherited[key] = old.account_investment
+    return tuple(
+        JournalEntry(id=entry.id, date=entry.date, lines=tuple(
+            JournalLine.model_validate({
+                **line.model_dump(),
+                "account_investment": inherited.get((index, number), line.account_investment),
+            }) for number, line in enumerate(entry.lines)
+        )) for index, entry in enumerate(entries)
+    )

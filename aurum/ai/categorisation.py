@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Aurum imports
 from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
-from aurum.ai.skills import Skill, guidance_context, load_categorisation_skill
+from aurum.ai.skills import Skill, explicit_memory_context, guidance_context, load_categorisation_skill
 from aurum.finance.accounts import Account, AccountRegistry, AccountType
 from aurum.finance.transaction import Transaction
 from aurum.finance.review import Guidance
@@ -132,6 +132,7 @@ def classify_batch(
     *,
     skill: Skill | None = None,
     guidance: list[Guidance] | None = None,
+    explicit_memory: list[dict] | None = None,
 ) -> tuple[list[Decision], dict]:
     """
     Send one batch and accept it only when every decision agrees with the supplied rows and account types.
@@ -182,6 +183,7 @@ def classify_batch(
         "mode": "categorise",
         "currency": "AUD",
         "guidance": learned,
+        "explicit_memory": explicit_memory_context(explicit_memory, accounts),
         "accounts": [
             {
                 "key": key, "name": redact_bank_details(account.name, accounts),

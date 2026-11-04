@@ -3,24 +3,21 @@
 #                                                  Workflows - Review                                                  #
 # -------------------------------------------------------------------------------------------------------------------- #
 """
-Aurum's monthly review files let you explain or correct any imported transaction in plain language.
+Aurum processes plain-language corrections saved through the desktop Review page.
 
 Each statement row appears once, including both observations of a transfer and transactions already posted.
-Only human_review is read as an instruction. The database remains the source of accounting facts, saved
-answers and outcomes. Related source rows are reviewed together so a correction replaces complete events.
+Only the saved human response is read as an instruction. SQLite keeps the accounting facts, saved answers
+and outcomes. Related source rows are reviewed together so a correction replaces complete events.
 
-Answers carry the accounting revision shown in their CSV. Changed or stale accounting cannot be silently
-overwritten, and unchanged answers are never sent again. CSV writes preserve edits made while a run is in
-progress. Private learned guidance is also exported as readable Markdown beside the review directory.
+Answers carry the accounting revision shown when the response was written. Changed or stale accounting cannot
+be silently overwritten, and unchanged answers are never sent again. Private learned guidance is also exported
+as readable Markdown in the workspace AI directory.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
-import csv
 from collections import Counter
 from dataclasses import dataclass, field
-from hashlib import sha256
-import io
 import os
 from pathlib import Path
 import re
@@ -36,118 +33,48 @@ from aurum.ai.skills import Skill
 from aurum.database.categorisation import load_decisions
 from aurum.database.journal import load_journal_entries
 from aurum.database.transactions import load_transactions
+from aurum.database.memory import load_explicit_memory, remember_text
 from aurum.database.reviews import (
     fail_guidance_case, list_guidance_cases, load_guidance_assessments, reserve_guidance_case,
     save_guidance_result,
-    fail_review_case, load_active_guidance, load_review_answers, load_review_cases, load_review_exports,
-    reserve_review_case, review_revision, save_review_answers, save_review_exports, save_review_outcome,
+    fail_review_case, load_active_guidance, load_review_answers, load_review_cases, load_review_baselines,
+    reserve_review_case, review_revision, save_review_outcome,
 )
 from aurum.finance.budget import BudgetSettings, budget_revision
-from aurum.finance.accounts import AccountRegistry
-from aurum.finance.review import ReviewAnswer, ReviewCase, ReviewOutcome
+from aurum.finance.reports import ReportSettings
+from aurum.finance.accounts import AccountRegistry, AccountType
+from aurum.finance.review import GuidanceResult, ReviewAnswer, ReviewCase
 
-COLUMNS = (
-    "date", "effective_date", "account", "amount", "description",
-    "debit_accounts", "credit_accounts", "status", "question", "human_review", "review_status",
-    "review_result", "transaction_id", "journal_entry_id", "context_revision",
-)
-
-
-# %% 1. Monthly Reviews --------------------------------------------------------------------------------------
-class ReviewFileError(ValueError):
-    """
-    Report a review file that cannot be safely interpreted or overwritten.
-    """
-
-
+# %% 1. Saved Reviews ----------------------------------------------------------------------------------------
 @dataclass
 class ReviewSession:
     """
-    Keep one run's input snapshots, pending cases and local messages until CSV export finishes.
+    Keep pending cases, protected sources and local questions for one desktop processing run.
     """
 
-    folder: Path
-    hashes: dict[Path, str] = field(default_factory=dict)
     cases: list[ReviewCase] = field(default_factory=list)
     blocked: set[UUID] = field(default_factory=set)
     cleared: set[UUID] = field(default_factory=set)
     messages: dict[UUID, str] = field(default_factory=dict)
-    conflicts: int = 0
 
 
-def read_reviews(
-    connection: sqlite3.Connection, accounts: AccountRegistry, folder: Path, *, retry_errors: bool = False,
+def prepare_reviews(
+    connection: sqlite3.Connection, accounts: AccountRegistry, *,
+    retry_errors: bool = False,
     budget: BudgetSettings | None = None,
 ) -> ReviewSession:
     """
-    Read all monthly files before processing, save changed answers and group complete review cases.
-
-    Only nonblank changes to human_review submit work. Identity and revision columns must still match the
-    exported row. Stale answers are retained for the user to revise after seeing current accounting.
-
-    Raises:
-        ReviewFileError: A CSV is malformed, has duplicate identities, or contains unrecognised source rows.
+    Build complete review cases from saved answers and their current accounting context.
     """
-    session = ReviewSession(folder=Path(folder))
-    baselines = load_review_exports(connection)
+    session = ReviewSession()
+    session.cleared = {
+        identifier for identifier, baseline in load_review_baselines(connection).items()
+        if baseline.get("human_review_cleared", False)
+    }
     answers = load_review_answers(connection)
     transactions = load_transactions(connection)
     by_id = {row.transaction_id: row for row in transactions}
     entries = load_journal_entries(connection, accounts)
-    changed = []
-    seen = set()
-    # Remember a deliberate clearing even if its CSV must later be rebuilt from saved history.
-    session.cleared = {
-        identifier for identifier, baseline in baselines.items()
-        if baseline.get("human_review_cleared", False)
-    }
-    for path in sorted(session.folder.glob("????-??.csv")):
-        content = path.read_bytes()
-        session.hashes[path] = sha256(content).hexdigest()
-        try:
-            reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig"), newline=""), strict=True)
-            if reader.fieldnames is None or len(set(reader.fieldnames)) != len(reader.fieldnames):
-                raise ReviewFileError(f"{path.name}: the header is missing or has duplicate columns.")
-            if not {"transaction_id", "context_revision", "human_review"} <= set(reader.fieldnames):
-                raise ReviewFileError(f"{path.name}: keep the identity, revision and human_review columns.")
-            for row in reader:
-                if None in row or any(value is None for value in row.values()):
-                    raise ReviewFileError(f"{path.name}: a row has the wrong number of columns.")
-                try:
-                    identifier = UUID(row["transaction_id"])
-                except ValueError as error:
-                    raise ReviewFileError(f"{path.name}: a transaction identity is invalid.") from error
-                baseline = baselines.get(identifier)
-                if identifier not in by_id or baseline is None or identifier in seen:
-                    raise ReviewFileError(f"{path.name}: a row is unknown or appears more than once.")
-                if path.stem != baseline["month"]:
-                    raise ReviewFileError(f"{path.name}: keep each row in its exported month.")
-                seen.add(identifier)
-                text = row["human_review"]
-                if text == baseline.get("displayed_human_review", ""):
-                    text = baseline.get("human_review", "")
-                if not text.strip():
-                    session.cleared.add(identifier)
-                    continue
-                session.cleared.discard(identifier)
-                if text == baseline.get("human_review", ""):
-                    continue
-                revision = row["context_revision"]
-                if revision != baseline["context_revision"]:
-                    raise ReviewFileError(
-                        f"{path.name}: an identity or revision was edited or is stale; refresh that row."
-                    )
-                answer = ReviewAnswer(
-                    transaction_id=identifier, revision=revision, human_review=text,
-                )
-                changed.append(answer)
-                answers[identifier] = answer
-        except (UnicodeError, csv.Error) as error:
-            raise ReviewFileError(
-                f"{path.name}: save a valid UTF-8 CSV without changing its columns."
-            ) from error
-    save_review_answers(connection, changed)
-
     records = load_review_cases(connection)
     latest = _latest_records(records)
     # Saved cases consume their exact answers, including questions and failures; retries must be explicit.
@@ -163,7 +90,7 @@ def read_reviews(
     active_answers = {
         identifier: answer for identifier, answer in answers.items() if identifier not in session.cleared
     }
-    groups = _source_groups(transactions, entries, active_answers)
+    groups = _source_groups(transactions, entries, active_answers, accounts)
     for group in groups:
         group_answers = [
             answer for identifier, answer in active_answers.items()
@@ -185,7 +112,7 @@ def read_reviews(
             for identifier in group:
                 session.messages[identifier] = (
                     "Accounting changed after this answer was written. Check the refreshed row, then edit "
-                    "human_review to submit it again."
+                    "your Response to submit it again."
                 )
             session.blocked.update(group)
             continue
@@ -241,6 +168,8 @@ def process_reviews(
     retry_errors: bool = False,
     progress: Callable[[str], None] | None = None,
     budget: BudgetSettings | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    report_settings: ReportSettings | None = None,
 ) -> None:
     """
     Apply changed human answers before ordinary categorisation, retaining valid accounting on any failure.
@@ -250,7 +179,7 @@ def process_reviews(
     for explicit retries. A connection or provider failure stops further review batches in this run.
     """
     report = progress or (lambda message: None)
-    baselines = load_review_exports(connection)
+    baselines = load_review_baselines(connection)
     records = load_review_cases(connection)
     decisions = load_decisions(connection)
     questions = {
@@ -260,12 +189,14 @@ def process_reviews(
         for case in session.cases for answer in case.answers
     }
     for start in range(0, len(session.cases), MAX_REVIEW_BATCH_SIZE):
+        if cancelled and cancelled():
+            return
         batch = []
         for case in session.cases[start:start + MAX_REVIEW_BATCH_SIZE]:
             if any(line.investment is not None for entry in case.entries for line in entry.lines):
                 for transaction in case.transactions:
                     session.messages[transaction.transaction_id] = (
-                        "Edit this investment in its original manual CSV row. "
+                        "Edit this investment in its original Manual entry. "
                         "The current postings and units have been preserved."
                     )
                 counts["review_failed"] += 1
@@ -279,7 +210,7 @@ def process_reviews(
                 for transaction in case.transactions:
                     session.messages[transaction.transaction_id] = (
                         "This answer conflicts with changed accounting or an interrupted review. "
-                        "Check the refreshed row; use --retry-errors to replace an interrupted request."
+                        "Refresh the workspace, then use Process to retry an interrupted request."
                     )
                 counts["review_failed"] += 1
                 continue
@@ -294,7 +225,8 @@ def process_reviews(
             counts["requests"] += 1
             outcomes, failures, usage = review_batch(
                 client, batch, accounts, skill=skill, guidance=load_active_guidance(connection),
-                questions=questions, budget=budget,
+                explicit_memory=load_explicit_memory(connection),
+                questions=questions, budget=budget, report_settings=report_settings,
             )
             valid_ids = {item.case_id for item in outcomes}
             if (
@@ -346,6 +278,7 @@ def process_guidance(
     skill: Skill,
     retry_errors: bool = False,
     progress: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """
     Learn from accepted answers without submitting reviews again or changing their journal postings.
@@ -357,12 +290,32 @@ def process_guidance(
     cases = list_guidance_cases(connection, accounts, retry_errors=retry_errors)
     counts["guidance_assessed"] = 0
     for start in range(0, len(cases), MAX_REVIEW_BATCH_SIZE):
+        if cancelled and cancelled():
+            return
         batch = [
             case for case in cases[start:start + MAX_REVIEW_BATCH_SIZE]
             if reserve_guidance_case(
                 connection, case, model=model, skill_version=skill.version, retry_errors=retry_errors,
             )
         ]
+        if not batch:
+            continue
+        inferred = []
+        for case in batch:
+            if not any(remember_text(answer.human_review) for answer in case.answers):
+                inferred.append(case)
+                continue
+            try:
+                save_guidance_result(
+                    connection, case,
+                    GuidanceResult(reason="Explicit memory is retained in the saved human response."),
+                    accounts, model=model, skill_version=skill.version,
+                )
+            except (ValueError, sqlite3.Error):
+                fail_guidance_case(connection, case.id, "Explicit memory assessment could not finish.")
+            else:
+                counts["guidance_assessed"] += 1
+        batch = inferred
         if not batch:
             continue
         usage = {}
@@ -372,6 +325,7 @@ def process_guidance(
             counts["requests"] += 1
             results, failures, usage = learn_guidance_batch(
                 client, batch, accounts, guidance=load_active_guidance(connection), skill=skill,
+                explicit_memory=load_explicit_memory(connection),
             )
             if results.keys() & failures.keys() or results.keys() | failures.keys() != {c.id for c in batch}:
                 raise ValueError("The guidance response does not cover its reserved cases.")
@@ -402,119 +356,20 @@ def process_guidance(
             counts["guidance_assessed"] += 1
 
 
-def export_reviews(
-    connection: sqlite3.Connection, accounts: AccountRegistry, session: ReviewSession,
-) -> None:
-    """
-    Refresh monthly CSVs from SQLite while preserving answers and concurrent user edits.
-
-    Missing files are rebuilt from saved answers, preserving deliberately cleared cells without deleting
-    their history. Concurrently edited files are left untouched. Only successfully written files advance
-    their stored export baseline.
-    """
-    from aurum.database.manual import manual_owner_ids
-
-    owners = manual_owner_ids(connection)
-    transactions = load_transactions(connection)
-    entries = load_journal_entries(connection, accounts)
-    entry_by_source = {identifier: entry for entry in entries for identifier in _entry_sources(entry)}
-    decisions = load_decisions(connection)
-    answers = load_review_answers(connection)
-    latest = _latest_records(load_review_cases(connection))
-    previous = load_review_exports(connection)
-    by_account = {account.id: account for account in accounts.accounts.values()}
-    months: dict[str, list[dict]] = {}
-    baselines = {}
-    for transaction in transactions:
-        identifier = transaction.transaction_id
-        entry = entry_by_source.get(identifier)
-        answer = answers.get(identifier)
-        record = latest.get(identifier)
-        decision = decisions.get(identifier)
-        outcome: ReviewOutcome | None = record["outcome"] if record else None
-        text = answer.human_review if answer and identifier not in session.cleared else ""
-        review_status = record["status"] if record else ""
-        result = record["error"] or "" if record else ""
-        if outcome is not None:
-            result = outcome.question or outcome.reason
-        if identifier in session.messages:
-            review_status, result = "stale", session.messages[identifier]
-        elif previous.get(identifier, {}).get("review_status") == "stale" and not record:
-            review_status = "stale"
-            result = previous[identifier].get("review_result", "")
-        if text and entry is not None and any(line.investment is not None for line in entry.lines):
-            review_status = "manual_required"
-            result = (
-                "Edit this investment in its original manual CSV row. "
-                "The current postings and units have been preserved."
-            )
-        if identifier in owners:
-            review_status = "manual_required" if text else "manual_entry"
-            result = f"Edit the original manual CSV entry: {owners[identifier]}."
-        question = outcome.question if outcome is not None else decision.question if decision else ""
-        revision = review_revision(connection, [identifier], accounts)
-        month = transaction.date.strftime("%Y-%m")
-        row = {
-            "date": transaction.date.isoformat(),
-            "effective_date": transaction.effective_date.isoformat() if transaction.effective_date else "",
-            "account": by_account[transaction.account_id].name,
-            "amount": format(transaction.amount, ".2f"),
-            "description": transaction.description,
-            "debit_accounts": _postings_label(entry, by_account, "debit"),
-            "credit_accounts": _postings_label(entry, by_account, "credit"),
-            "status": "posted" if entry else decision.status if decision else "pending",
-            "question": question or "",
-            "human_review": text,
-            "review_status": review_status,
-            "review_result": result,
-            "transaction_id": str(identifier),
-            "journal_entry_id": str(entry.id) if entry else "",
-            "context_revision": revision,
-        }
-        safe = {key: value if key == "amount" else _safe_text(value) for key, value in row.items()}
-        months.setdefault(month, []).append(safe)
-        baselines[identifier] = {
-            "context_revision": revision, "human_review": text,
-            "human_review_cleared": identifier in session.cleared,
-            "displayed_human_review": safe["human_review"], "month": month,
-            "review_status": review_status, "review_result": result, "question": question or None,
-        }
-
-    session.folder.mkdir(parents=True, exist_ok=True)
-    for month, rows in months.items():
-        path = session.folder / f"{month}.csv"
-        expected = session.hashes.get(path)
-        current = sha256(path.read_bytes()).hexdigest() if path.exists() else None
-        if current != expected:
-            session.conflicts += 1
-            print(f"{path.name} changed during processing; its edits were preserved. Run the command again.")
-            continue
-        stream = io.StringIO(newline="")
-        writer = csv.DictWriter(stream, fieldnames=COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)
-        if not _atomic_write(
-            path, stream.getvalue().encode("utf-8-sig"), expected_hash=expected, check_current=True,
-        ):
-            session.conflicts += 1
-            print(f"{path.name} changed during processing; its edits were preserved. Run the command again.")
-            continue
-        save_review_exports(connection, {
-            UUID(row["transaction_id"]): baselines[UUID(row["transaction_id"])] for row in rows
-        })
-    export_guidance(connection, session.folder.parent / "ai" / "categorisation_guidelines.md")
-
-
 def export_guidance(connection: sqlite3.Connection, path: Path) -> None:
     """
     Show active guidance and each learning outcome; SQLite remains the authoritative private history.
     """
     lines = [
         "# Categorisation guidance", "",
-        "Generated from reviewed answers in SQLite. "
-        "Edit human_review in a transaction CSV to change guidance.",
+        "Generated from saved human inputs and accepted reviews in SQLite. "
+        "Edit the original response or instruction to change an explicit memory note.",
         "",
     ]
+    lines.extend(("## Explicit memories", ""))
+    for item in load_explicit_memory(connection):
+        lines.extend((f"### {item['source_kind']} {item['source_id']}", "", item["text"], ""))
+    lines.extend(("## Learned guidance", ""))
     for item in load_active_guidance(connection):
         lines.extend((f"## {item.scope}", "", item.instruction, ""))
     lines.extend(("## Learning outcomes", ""))
@@ -545,10 +400,10 @@ def export_guidance(connection: sqlite3.Connection, path: Path) -> None:
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
 def _answer_question(identifier: UUID, baseline: dict, records: list[dict], decisions: dict) -> str | None:
     """
-    Recover the trusted exported question, with saved database context for exports made before it was stored.
+    Recover the saved question accompanying a response, retaining older database baselines.
 
-    The editable CSV question is never used as evidence. Failed requests have no new question, so look back
-    to the latest completed review outcome before falling back to the original categorisation decision.
+    Failed requests have no new question, so look back to the latest completed review outcome before
+    falling back to the original categorisation decision.
     """
     if "question" in baseline:
         return baseline["question"]
@@ -570,7 +425,9 @@ def _review_error(error: Exception) -> str:
     return f"Review preparation failed ({type(error).__name__}); no accounting change was saved."
 
 
-def _source_groups(transactions: list, entries: list, answers: dict[UUID, ReviewAnswer]) -> list[set[UUID]]:
+def _source_groups(
+    transactions: list, entries: list, answers: dict[UUID, ReviewAnswer], accounts: AccountRegistry,
+) -> list[set[UUID]]:
     """
     Connect complete current events, unique plausible transfer pairs and explicit UUID references in answers.
 
@@ -584,7 +441,21 @@ def _source_groups(transactions: list, entries: list, answers: dict[UUID, Review
         for identifier in identifiers:
             neighbours[identifier].update(identifiers)
     references = {}
+    bank_owners = {}
+    for account in accounts.accounts.values():
+        if account.account_type == AccountType.ASSET and account.bank_details is not None:
+            details = account.bank_details
+            bank_owners.setdefault((details.bsb, details.account_number), set()).add(account.id)
+    within_mentions, within_routes = set(), set()
     for row in transactions:
+        if re.search(r"\bTRANSFER\s+WITHIN\b", row.description, re.IGNORECASE):
+            within_mentions.add(row.transaction_id)
+            route = re.fullmatch(
+                r"TRANSFER\s+WITHIN\s+([0-9]{6})\s*-\s*([0-9]+)\s+#[0-9]+\s*",
+                row.description, re.IGNORECASE,
+            )
+            if route is not None and bank_owners.get((route[1], route[2])) == {row.account_id}:
+                within_routes.add(row.transaction_id)
         reference = row.transfer_reference
         if reference is not None:
             references.setdefault(reference, []).append(row)
@@ -592,14 +463,24 @@ def _source_groups(transactions: list, entries: list, answers: dict[UUID, Review
     for rows in references.values():
         for first in rows:
             for second in rows:
-                if (
-                    first.account_id != second.account_id and first.amount != 0
-                    and first.amount == -second.amount and abs((first.date - second.date).days) <= 3
+                if first.transaction_id == second.transaction_id or first.amount == 0:
+                    continue
+                if first.amount != -second.amount or abs((first.date - second.date).days) > 3:
+                    continue
+                if first.account_id == second.account_id and (
+                    first.date != second.date
+                    or not {first.transaction_id, second.transaction_id} & within_mentions
                 ):
-                    candidates[first.transaction_id].add(second.transaction_id)
+                    continue
+                candidates[first.transaction_id].add(second.transaction_id)
     for identifier, matches in candidates.items():
         if len(matches) == 1:
             other = next(iter(matches))
+            if (
+                by_id[identifier].account_id == by_id[other].account_id
+                and not {identifier, other} <= within_routes
+            ):
+                continue
             if len(candidates[other]) == 1:
                 neighbours[identifier].add(other)
                 neighbours[other].add(identifier)
@@ -642,34 +523,9 @@ def _latest_records(records: list[dict]) -> dict[UUID, dict]:
     }
 
 
-def _postings_label(entry, accounts: dict, side: str) -> str:
+def _atomic_write(path: Path, content: bytes) -> None:
     """
-    Display each debit or credit account and amount without pretending a split has only one category.
-    """
-    if entry is None:
-        return ""
-    return "; ".join(
-        f"{accounts[line.account_id].name}: {getattr(line, side):.2f}"
-        + (f" [budget: {line.budget_category}]" if line.budget_category is not None else "")
-        for line in entry.lines if getattr(line, side) > 0
-    )
-
-
-def _safe_text(value: str) -> str:
-    """
-    Prevent spreadsheet programs from evaluating exported text as a formula.
-    """
-    return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
-
-
-def _atomic_write(
-    path: Path, content: bytes, *, expected_hash: str | None = None, check_current: bool = False,
-) -> bool:
-    """
-    Replace a generated file after flushing it, checking for concurrent edits immediately before replacement.
-
-    Returns:
-        False when the destination changed during this run and must be preserved.
+    Replace readable guidance only after its complete contents have been flushed to disk.
     """
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -677,12 +533,7 @@ def _atomic_write(
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        if check_current:
-            current = sha256(path.read_bytes()).hexdigest() if path.exists() else None
-            if current != expected_hash:
-                return False
         os.replace(temporary, path)
-        return True
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

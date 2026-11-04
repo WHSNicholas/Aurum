@@ -97,6 +97,15 @@ CREATE TABLE IF NOT EXISTS journal_budget (
 ) STRICT;
 """
 
+ACCOUNT_INVESTMENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS journal_account_investments (
+    journal_row_id INTEGER PRIMARY KEY REFERENCES journal(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('contribution', 'earnings', 'opening', 'unclassified')),
+    cost_basis REAL CHECK (cost_basis >= 0 AND cost_basis = ROUND(cost_basis, 2)),
+    CHECK ((kind = 'opening' AND cost_basis IS NOT NULL) OR (kind != 'opening' AND cost_basis IS NULL))
+) STRICT;
+"""
+
 # Guidance assessment constraints
 GUIDANCE_CHECK = """
     (guidance_status IS NULL AND guidance_result IS NULL AND guidance_disposition IS NULL
@@ -261,7 +270,10 @@ def _create_tables(connection: sqlite3.Connection) -> None:
     """
     Create current tables inside the caller's transaction without an implicit commit.
     """
-    schema = SCHEMA + REVIEW_SCHEMA + MANUAL_SCHEMA + PRICE_SCHEMA + BUDGET_SCHEMA + SAVINGS_SCHEMA
+    schema = (
+        SCHEMA + REVIEW_SCHEMA + MANUAL_SCHEMA + PRICE_SCHEMA + BUDGET_SCHEMA + SAVINGS_SCHEMA
+        + ACCOUNT_INVESTMENT_SCHEMA
+    )
     for statement in schema.split(";"):
         if statement.strip():
             connection.execute(statement)

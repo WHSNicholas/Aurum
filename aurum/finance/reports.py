@@ -154,9 +154,9 @@ class ReportTheme(BaseModel):
     Palette colours run from darkest to lightest, with at least three quoted six-digit hex values. The first
     three shades colour major headings, highlighted cards and column headings unless explicitly overridden.
     Total bands share the column-heading colours. Highlight_text overrides highlighted-card subtext;
-    otherwise it uses the last palette shade. Group colours shade asset-class rows with an optional alpha byte.
+    otherwise it uses the last palette shade. Group colours shade asset-class rows with optional alpha bytes.
     Page colours cover the whole sheet, including margins; surfaces fill cards and tables.
-    Divider colours apply to the header, footer and table-row lines. Cards and panels have no visible outlines.
+    Divider colours apply to header, footer and table-row lines. Cards and panels have no visible outlines.
     Omitted background and divider fields use the default light and dark colours. An optional fixed appearance
     supplies backgrounds and text colours independently of dark_mode and the shared light/dark settings.
     """
@@ -209,7 +209,7 @@ class ReportSettings(BaseModel):
 
     Account references are stable configuration keys, not UUIDs. Omitted asset groups leave all assets under
     Other Assets. Account investments map an asset key to an investment-report group, using its posted
-    balance without assumed security units or contribution cost. Optional investment_symbols override
+    balance and explicitly classified contribution cost, without assumed units. investment_symbols override
     their investment-table labels without renaming accounts in other reports. Mappings are immutable.
     The colour scheme controls report accents and charts; budget section colours retain their meaning.
     Themes map each colour scheme to an editable palette and separate light/dark page and surface colours.
@@ -221,6 +221,7 @@ class ReportSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
     name: str = "Aurum"
+    output_directory: str = Field(default="data/reports", min_length=1)
     colour_scheme: ColourScheme = "teal"
     dark_mode: bool = Field(default=False, strict=True)
     themes: Mapping[ColourScheme, ReportTheme] = Field(default_factory=dict)
@@ -231,6 +232,25 @@ class ReportSettings(BaseModel):
     asset_groups: Mapping[str, tuple[str, ...]] = Field(default_factory=dict)
     account_investments: Mapping[str, str] = Field(default_factory=dict)
     investment_symbols: Mapping[str, str] = Field(default_factory=dict)
+
+    @property
+    def owner_name(self) -> str:
+        """
+        Return the personal name, accepting earlier configuration that included the Aurum prefix.
+        """
+        name = self.name.strip()
+        if name == "Aurum":
+            return ""
+        if name.startswith("Aurum |"):
+            return name.partition("|")[2].strip()
+        return name
+
+    @property
+    def display_name(self) -> str:
+        """
+        Brand the configured personal name consistently in report headers and footers.
+        """
+        return f"Aurum | {self.owner_name}" if self.owner_name else "Aurum"
 
     @property
     def theme(self) -> ReportTheme:
@@ -257,7 +277,10 @@ class ReportSettings(BaseModel):
         """
         return {scheme: colours.model_dump() for scheme, colours in value.items()}
 
-    @field_validator("name", "capital_account", "retained_earnings_account", "unrealised_gains_account")
+    @field_validator(
+        "name", "output_directory", "capital_account", "retained_earnings_account",
+        "unrealised_gains_account",
+    )
     @classmethod
     def _check_text(cls, value: str) -> str:
         """
@@ -315,7 +338,8 @@ class ReportSettings(BaseModel):
         if self.colour_scheme not in self.themes and self.colour_scheme not in DEFAULT_THEMES:
             choices = ", ".join(sorted(set(DEFAULT_THEMES) | set(self.themes)))
             raise ValueError(
-                f"Unknown report colour_scheme {self.colour_scheme!r}; choose {choices} or add it under themes"
+                f"Unknown report colour_scheme {self.colour_scheme!r}; "
+                f"choose {choices} or add it under themes"
             )
         return self
 
@@ -462,11 +486,12 @@ class InvestmentRow(BaseModel):
     """
     Show a security holding or a whole-account investment such as Superannuation.
 
-    Gains compare the current holding's value with its carrying cost. They exclude dividends, interest
-    and realised gains, so the percentage is neither an annualised return nor total investment performance.
+    Security gains compare current value with carrying cost, excluding distributions and realised gains.
+    Whole-account gains compare recorded value with net contributions and explicit opening cost, including
+    separately recorded fund earnings. Neither percentage is annualised or time weighted.
     Missing security prices leave valuation fields blank. Whole-account investments instead show their
     recorded journal balance without traded units or quotes. An account with no postings has zero cost and
-    gain. Once it has activity, contribution cost and gains remain unknown until explicitly supported.
+    gain. Unclassified activity leaves contribution cost and gains unknown until explicitly supported.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -496,15 +521,18 @@ class InvestmentRow(BaseModel):
         if self.security_key is None:
             security_fields = (
                 self.units, self.average_cost, self.price, self.price_date, self.market_value,
-                self.return_percentage,
             )
             if self.recorded_value is None or any(value is not None for value in security_fields):
                 raise ValueError("An account investment needs a recorded balance without security quantities")
             if self.cost_basis is None:
-                if self.unrealised_gain is not None:
+                if self.unrealised_gain is not None or self.return_percentage is not None:
                     raise ValueError("Unknown contribution cost must leave the account's gain unknown")
-            elif (self.cost_basis, self.recorded_value, self.unrealised_gain) != (0, 0, 0):
-                raise ValueError("Only an account without activity can currently have known zero cost and gain")
+            elif (
+                self.unrealised_gain is None
+                or _cents(self.unrealised_gain) != _cents(self.recorded_value) - _cents(self.cost_basis)
+                or self.return_percentage != _gain_percentage(self.unrealised_gain, self.cost_basis)
+            ):
+                raise ValueError("Account investment value, contribution cost and gain must reconcile")
             return self
         if self.recorded_value is not None or any(
             value is None for value in (self.units, self.average_cost, self.cost_basis)
@@ -759,6 +787,25 @@ def build_reports(
     )
 
 
+def recorded_net_worth(
+    entries: Iterable[JournalEntry], accounts: AccountRegistry, cutoff: date,
+) -> Decimal:
+    """
+    Return posted assets less liabilities through the cutoff using their recorded journal amounts.
+
+    The caller supplies posted entries only. Budget exclusions do not remove assets from financial position,
+    and security holdings retain their recorded value without looking up prices or applying market quotes.
+    """
+    validated = _validate_entries(entries, accounts)
+    balances = _balances(entry for entry in validated if entry.date <= cutoff)
+    # Liability debit balances already have the opposite sign to the amount owed.
+    total = sum(
+        balances.get(account.id, 0) for account in accounts.accounts.values()
+        if account.account_type in {AccountType.ASSET, AccountType.LIABILITY}
+    )
+    return _money(total)
+
+
 # %% 4. Helpers ----------------------------------------------------------------------------------------------
 def _validate_settings(settings: ReportSettings, accounts: AccountRegistry) -> None:
     """
@@ -808,6 +855,10 @@ def _validate_entries(entries: Iterable[JournalEntry], accounts: AccountRegistry
                 account.account_type != AccountType.ASSET or account.bank_details is not None
             ):
                 raise ValueError("Investment units require a non-bank asset account")
+            if line.account_investment is not None and (
+                account.account_type != AccountType.ASSET or account.bank_details is not None
+            ):
+                raise ValueError("Whole-account investment treatment requires a non-bank asset account")
         result.append(entry)
     return tuple(result)
 
@@ -945,18 +996,22 @@ def _value_holdings(
         except ValueError as error:
             positions.append(InvestmentRow(**fields))
             drafts.append(f"{account.name} / {security.name}: {error}; market valuation is unavailable.")
-    active_accounts = {line.account_id for entry in entries for line in entry.lines}
     for key, group in settings.account_investments.items():
         account = accounts.accounts[key]
-        # Accounts start at zero. A zero balance after activity does not establish zero contribution cost.
-        empty = account.id not in active_accounts
+        cost = _account_investment_cost(entries, account.id)
+        value = _money(balances.get(account.id, 0))
+        gain = _money(_cents(value) - _cents(cost)) if cost is not None else None
+        if cost is None:
+            drafts.append(
+                f"{account.name}: classify its investment movements as contributions, earnings or an opening "
+                "position with historical cost. Its value is available, but cost and return are unknown."
+            )
         positions.append(InvestmentRow(
             account_key=key, account_name=account.name, name=account.name,
             symbol=settings.investment_symbols.get(key, account.name),
             asset_class=group,
-            recorded_value=_money(balances.get(account.id, 0)),
-            cost_basis=Decimal("0.00") if empty else None,
-            unrealised_gain=Decimal("0.00") if empty else None,
+            recorded_value=value, cost_basis=cost, unrealised_gain=gain,
+            return_percentage=_gain_percentage(gain, cost) if gain is not None else None,
         ))
     positions.sort(key=lambda row: (
         row.asset_class, -_cents(row.allocation_value), row.name, row.account_name,
@@ -979,6 +1034,28 @@ def _value_holdings(
         return_percentage=_gain_percentage(total_gain, total_cost) if total_gain is not None else None,
         draft_reasons=tuple(dict.fromkeys(drafts)),
     )
+
+
+def _account_investment_cost(entries: tuple[JournalEntry, ...], account_id: UUID) -> Decimal | None:
+    """
+    Sum net contributions and supplied opening costs without counting fund earnings as new money.
+
+    Every movement must be classified. An unexplained debit, withdrawal or charge leaves cost unknown;
+    it is never inferred from a description, posting sign or the account's final balance.
+    """
+    cents = 0
+    for entry in entries:
+        for line in entry.lines:
+            if line.account_id != account_id:
+                continue
+            details = line.account_investment
+            if details is None or details.kind == "unclassified":
+                return None
+            if details.kind == "contribution":
+                cents += _cents(line.debit)
+            elif details.kind == "opening":
+                cents += _cents(details.cost_basis)
+    return _money(cents)
 
 
 def _gain_percentage(gain: Decimal, cost: Decimal) -> Decimal | None:

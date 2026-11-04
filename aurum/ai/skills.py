@@ -85,7 +85,9 @@ def guidance_context(
     ]
     ranked = sorted(
         candidates,
-        key=lambda item: len(words & set(re.findall(r"[a-z0-9]{3,}", item.scope.casefold()))),
+        key=lambda item: len(words & set(re.findall(
+            r"[a-z0-9]{3,}", (item.scope + " " + item.instruction).casefold(),
+        ))),
         reverse=True,
     )[:12]
     references = {f"g{index}": item for index, item in enumerate(ranked, start=1)}
@@ -99,6 +101,29 @@ def guidance_context(
         for reference, item in references.items()
     ]
     return payload, references
+
+
+def explicit_memory_context(memory: list[dict] | None, accounts: AccountRegistry) -> list[dict]:
+    """
+    Send every explicitly remembered human note without private provenance or bank identifiers.
+
+    These notes bypass inferred guidance ranking. Their scope remains the person's exact wording, never
+    an instruction to create transactions or override accounting validation. Source identities stay local.
+    """
+    payload = []
+    seen = set()
+    for item in memory or []:
+        note = redact_bank_details(item["text"], accounts)
+        note = re.sub(
+            r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b", "[local record]", note,
+            flags=re.IGNORECASE,
+        )
+        note = re.sub(r"(?<!\w)#\d+\b", "[transaction reference]", note)
+        if note in seen:
+            continue
+        seen.add(note)
+        payload.append({"memory_ref": f"m{len(payload) + 1}", "instruction": note})
+    return payload
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
