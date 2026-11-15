@@ -448,7 +448,11 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Show every configured account in its relevant financial statement, including unused accounts at $0.00.
   Group Superannuation and Real Estate with the other Investments on the balance sheet.
 - Choose `colour_scheme` in `config/reports.yaml`: a configured theme key or the built-in `teal` (default),
-  `navy_blue`, `plum_purple`, `forest_green`, `burgundy` or `copper`. Apply it to report accents, icons and charts.
+  `navy_blue`, `plum_purple`, `forest_green`, `burgundy`, `copper`, `tranquil_earth`, `warm_neutrals`,
+  `velvet_neutrals`, `twilight_mauve` or `sunset_hues`. Ship all eleven in the tracked `DEFAULT_THEMES`
+  catalogue so cloned and new workspaces have them without private configuration. Local theme definitions
+  override built-ins; keep personal report configuration excluded from Git. Apply themes to report accents,
+  icons and charts.
   For the original themes, keep budget Income/Expenses/Savings
   progress and Remaining indicators in their original blue/red/green shades by default, independently editable
   under shared mode colours rather than tied to the theme palette.
@@ -489,8 +493,9 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   between two configurable colours. Preserve original budget indicator hues unless the user edits them.
 - A theme's optional `fixed` block supplies `page`, `surface`, `divider`, `group` and its own `colours`.
   It ignores `dark_mode` and all shared mode colours, including icons, budget indicators and draft notices.
-  Missing fixed colour fields use model defaults, never the shared configuration. Keep sampled palettes and
-  labelled companion colours in config. Convert embedded image profiles to sRGB before sampling; textured
+  Missing fixed colour fields use model defaults, never the shared configuration. Keep reusable sampled
+  palettes and labelled companion colours in built-ins, with optional workspace overrides in config.
+  Convert embedded image profiles to sRGB before sampling; textured
   swatches are approximate. New fixed themes are Tranquil Earth, Warm Neutrals, Velvet Neutrals, Twilight Mauve
   and Sunset Hues. Twilight Mauve has a fixed dark appearance; original themes retain their existing behaviour.
 - Keep PDF assets local under `reporting/`; match Eigen One's A4 layout with safe continuation pages.

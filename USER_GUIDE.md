@@ -38,6 +38,10 @@ Regenerate reports to apply a changed name to saved PDFs.
 
 Choose a theme in the **THEME** card. Save, then refresh the workspace to apply its colours to the app.
 Fixed themes retain their own appearance; adjustable themes offer Light/Dark.
+All eleven themes ship with Aurum: Teal, Navy Blue, Plum Purple, Forest Green, Burgundy, Copper,
+Tranquil Earth, Warm Neutrals, Velvet Neutrals, Twilight Mauve and Sunset Hues. They are available in
+new and cloned workspaces without copying personal configuration. Existing workspace colour overrides
+still take precedence.
 Palette definitions remain in code rather than appearing as editable colour controls.
 
 The bottom save icon saves staged Setup changes. Reload discards the current section's changes only after

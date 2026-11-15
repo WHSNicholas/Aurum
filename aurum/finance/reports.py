@@ -200,6 +200,96 @@ DEFAULT_THEMES: Mapping[ColourScheme, ReportTheme] = MappingProxyType({
     "copper": ReportTheme(
         palette=("#462e22", "#654431", "#875e43", "#a37a5e", "#be997d", "#d7bca4", "#eadacf"),
     ),
+    "tranquil_earth": ReportTheme(
+        palette=("#73877B", "#839788", "#BDBBB5", "#E5D1CF", "#F5E4D7"),
+        primary="#73877B", table_header="#BDBBB5", highlight="#839788", highlight_text="#0B0D0C",
+        fixed=ReportAppearance(
+            page="#FBF8F5", surface="#F5EAE2", divider="#E5D1CF", group="#E5D1CF",
+            colours=ReportColours(
+                heading_text="#0B0D0C", group_text="#0B0D0C", icon="#627369", chart_text="#0B0D0C",
+                text="#0B0D0C", muted="#627369", on_primary="#0B0D0C", on_table_header="#0B0D0C",
+                on_highlight="#0B0D0C", positive="#627166", negative="#736968", remaining="#0B0D0C",
+                budget_income="#627369", budget_expenses="#736968", budget_savings="#627166",
+                income_track="#73877B33", income_fill="#839788",
+                expenses_track="#73877B33", expenses_fill="#839788",
+                savings_track="#73877B33", savings_fill="#839788",
+                draft_bg="#F5E4D7", draft_text="#0B0D0C", draft_border="#BDBBB5",
+                bar_text_dark="#0B0D0C", bar_text_light="#FBF4EF",
+            ),
+        ),
+    ),
+    "warm_neutrals": ReportTheme(
+        palette=("#A5A58D", "#CB997E", "#B7B7A4", "#DDBEA9", "#EDDCD2", "#F0EFEB", "#FFF0E6"),
+        primary="#A5A58D", table_header="#DDBEA9", highlight="#A5A58D", highlight_text="#10100E",
+        fixed=ReportAppearance(
+            page="#F6F6F5", surface="#FFF0E6", divider="#EDDCD2", group="#EDDCD2",
+            colours=ReportColours(
+                heading_text="#10100E", group_text="#10100E", icon="#737363", chart_text="#10100E",
+                text="#10100E", muted="#737363", on_primary="#10100E", on_table_header="#10100E",
+                on_highlight="#10100E", positive="#737363", negative="#7A695D", remaining="#10100E",
+                budget_income="#8E6B58", budget_expenses="#7A695D", budget_savings="#737363",
+                income_track="#DDBEA933", income_fill="#DDBEA9",
+                expenses_track="#DDBEA933", expenses_fill="#DDBEA9",
+                savings_track="#DDBEA933", savings_fill="#DDBEA9",
+                draft_bg="#FFF0E6", draft_text="#10100E", draft_border="#B7B7A4",
+                bar_text_dark="#10100E", bar_text_light="#FFF9F5",
+            ),
+        ),
+    ),
+    "velvet_neutrals": ReportTheme(
+        palette=("#33191F", "#481E20", "#B29C90", "#D7C5B5", "#EEE2D3"),
+        primary="#481E20", table_header="#481E20", highlight="#481E20", highlight_text="#F8F3ED",
+        fixed=ReportAppearance(
+            page="#F8F6F3", surface="#EEE2D3", divider="#B29C90", group="#D7C5B5",
+            colours=ReportColours(
+                heading_text="#050203", group_text="#050203", icon="#33191F", chart_text="#050203",
+                text="#050203", muted="#33191F", on_primary="#F8F3ED", on_table_header="#F8F3ED",
+                on_highlight="#F8F3ED", positive="#050203", negative="#A08D82", remaining="#050203",
+                budget_income="#A08D82", budget_expenses="#A08D82", budget_savings="#A08D82",
+                income_track="#B29C9033", income_fill="#B29C90",
+                expenses_track="#B29C9033", expenses_fill="#B29C90",
+                savings_track="#B29C9033", savings_fill="#B29C90",
+                draft_bg="#EEE2D3", draft_text="#050203", draft_border="#B29C90",
+                bar_text_dark="#050203", bar_text_light="#F8F3ED",
+            ),
+        ),
+    ),
+    "twilight_mauve": ReportTheme(
+        palette=("#22223B", "#4A4E69", "#9B8B98", "#C9ADA7", "#F2E9E4"),
+        primary="#22223B", table_header="#9B8B98", highlight="#F2E9E4", highlight_text="#22223B",
+        fixed=ReportAppearance(
+            page="#0E0E19", surface="#4A4E69", divider="#B8ADB6", group="#B8ADB6",
+            colours=ReportColours(
+                heading_text="#F2E9E4", group_text="#030306", icon="#F2E9E4", chart_text="#F2E9E4",
+                text="#F2E9E4", muted="#E0D1CE", on_primary="#FAF6F4", on_table_header="#030306",
+                on_highlight="#22223B", positive="#D3C4D0", negative="#E6C8C0", remaining="#F2E9E4",
+                budget_income="#C2C5DF", budget_expenses="#E6C8C0", budget_savings="#D3C4D0",
+                income_track="#A9AECF33", income_fill="#A9AECF",
+                expenses_track="#A9AECF33", expenses_fill="#A9AECF",
+                savings_track="#A9AECF33", savings_fill="#A9AECF",
+                draft_bg="#22223B", draft_text="#F2E9E4", draft_border="#9B8B98",
+                bar_text_dark="#030306", bar_text_light="#FAF6F4",
+            ),
+        ),
+    ),
+    "sunset_hues": ReportTheme(
+        palette=("#4D6A6D", "#798478", "#A0A083", "#C9ADA1", "#EAE0CC"),
+        primary="#4D6A6D", table_header="#A0A083", highlight="#798478", highlight_text="#080B0B",
+        fixed=ReportAppearance(
+            page="#D6D0C4", surface="#F7F3EB", divider="#999983", group="#D9D9BA",
+            colours=ReportColours(
+                heading_text="#080B0B", group_text="#080B0B", icon="#4D6A6D", chart_text="#080B0B",
+                text="#080B0B", muted="#4D6A6D", on_primary="#F7F3EB", on_table_header="#080B0B",
+                on_highlight="#080B0B", positive="#677066", negative="#796861", remaining="#080B0B",
+                budget_income="#4D6A6D", budget_expenses="#796861", budget_savings="#677066",
+                income_track="#C9ADA1", income_fill="#73635C",
+                expenses_track="#C9ADA1", expenses_fill="#73635C",
+                savings_track="#C9ADA1", savings_fill="#73635C",
+                draft_bg="#EAE0CC", draft_text="#080B0B", draft_border="#A0A083",
+                bar_text_dark="#080B0B", bar_text_light="#F7F3EB",
+            ),
+        ),
+    ),
 })
 
 
