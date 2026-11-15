@@ -80,18 +80,19 @@ QLineEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QDateEdit:disab
 }
 QLabel:disabled { color: #9ba8a1; }
 QCheckBox { spacing: 7px; }
-QCheckBox::indicator {
+QCheckBox::indicator, QListWidget#budgetAccountChecklist::indicator {
     width: 17px;
     height: 17px;
     border: 1px solid #738d85;
     border-radius: 3px;
     background: white;
 }
-QCheckBox::indicator:checked {
+QCheckBox::indicator:checked, QListWidget#budgetAccountChecklist::indicator:checked {
     background: #2e6a61; border-color: #2e6a61; image: url("aurumui:check.svg");
 }
 QCheckBox::indicator:disabled { border-color: #b9c6bf; background: #e6ede8; }
 QCheckBox::indicator:checked:disabled { background: #94afa5; }
+QListWidget#budgetAccountChecklist { outline: none; }
 QComboBox::drop-down { width: 24px; border: none; }
 QComboBox { padding-right: 28px; border: none; border-radius: 9px; combobox-popup: 0; }
 QComboBox:hover { background: #edf3f0; }

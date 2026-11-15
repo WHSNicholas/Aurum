@@ -23,8 +23,8 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QRadioButton, QSizePolicy, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
-    QToolButton, QVBoxLayout, QWidget,
+    QPushButton, QRadioButton, QSizePolicy, QStyleFactory, QStyledItemDelegate, QTableWidget,
+    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
@@ -566,6 +566,15 @@ class BudgetForm(QWidget):
         search.setPlaceholderText("Search accounts")
         layout.addWidget(search)
         listing = QListWidget()
+        listing.setObjectName("budgetAccountChecklist")
+        listing.setAccessibleName("Linked accounts")
+        listing.setItemDelegate(_AccountCheckDelegate(listing))
+        listing.setUniformItemSizes(True)
+        listing.setCursor(Qt.CursorShape.PointingHandCursor)
+        # macOS can leave unchecked item indicators invisible. Give this list its own visible checkbox style.
+        listing._check_style = QStyleFactory.create("Fusion")
+        listing._check_style.setParent(listing)
+        listing.setStyle(listing._check_style)
         for account_key in available:
             label = names.get(account_key, account_key + " (unavailable)")
             item = QListWidgetItem(label)
@@ -580,13 +589,20 @@ class BudgetForm(QWidget):
             ).casefold()) for index in range(listing.count())]
         )
         layout.addWidget(listing)
-        note = QLabel("Account mappings apply to every month.")
+        account_kind = {
+            "income": "income or equity", "expense": "expense", "savings": "asset or liability",
+        }.get(category.get("kind"), "eligible")
+        note = QLabel(
+            "Click an account to include or exclude it. Links apply to every month." if available else
+            f"Add and save an {account_kind} account in Setup → Accounts first."
+        )
         note.setWordWrap(True)
         layout.addWidget(note)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Cancel,
         )
         buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(dialog.accept)
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setEnabled(bool(available))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -644,6 +660,33 @@ class BudgetForm(QWidget):
 
 
 # %% 2. Table Controls ---------------------------------------------------------------------------------------
+class _AccountCheckDelegate(QStyledItemDelegate):
+    """
+    Toggle account links across the full row while retaining native check-state and keyboard support.
+    """
+
+    def sizeHint(self, option, index) -> QSize:
+        """
+        Keep account labels and their visible checkboxes comfortably separated.
+        """
+        size = super().sizeHint(option, index)
+        size.setHeight(max(34, size.height()))
+        return size
+
+    def editorEvent(self, event, model, option, index) -> bool:
+        """
+        Treat a left-click on the label like its checkbox, without toggling checkbox clicks twice.
+        """
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            flags = index.flags()
+            if (flags & Qt.ItemFlag.ItemIsEnabled and flags & Qt.ItemFlag.ItemIsUserCheckable
+                    and option.rect.contains(event.position().toPoint())):
+                checked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked.value
+                state = Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked
+                return model.setData(index, state.value, Qt.ItemDataRole.CheckStateRole)
+        return super().editorEvent(event, model, option, index)
+
+
 class _CenteredCategoryDelegate(QStyledItemDelegate):
     """
     Keep category names centred when editing as well as when displaying their table cells.

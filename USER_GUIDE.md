@@ -112,6 +112,9 @@ The chart shows income above expenses and savings. Muted blue represents income,
 savings, consistently across GUI themes.
 Segments run from largest allocation to smallest; hover for category amounts. The tables list every category
 without separate inner scroll areas. Use plus/bin icons to add or remove categories.
+In a category's **Accounts** cell, click an account row to check or uncheck it, then **Apply** and save Setup.
+You can also use the arrow keys and Space. Add and save income/expense accounts in **Accounts** first;
+the picker shows accounts eligible for that budget section.
 
 Categories can use account defaults or explicit labels on journal postings. Virtual savings pots divide the
 month's surplus without creating bank balances or journal entries. The residual pot receives the unallocated

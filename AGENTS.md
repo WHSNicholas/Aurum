@@ -197,6 +197,9 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Other Assets groups. Keep Reports concise, with account-based investment and optional-label guidance in tooltips.
   Give account-based investments the budget tables' centred, bounded width and clean headers without cell grids;
   show every row in the outer form scroll. Centre budget category names, monthly amounts and their editors.
+  Budget account linking uses visible checked/unchecked indicators and toggles from the whole account row
+  or Space. Apply stages the links; Setup Save persists them. Keep category-type filtering, search, cancelled
+  drafts and unavailable saved references intact. Empty pickers explain which account type to add in Accounts.
   Create missing workspace files explicitly before editing; failed reloads must not leave stale forms active.
 - Setup's ChatGPT settings are workspace-wide, with connection before model selection.
   Distinguish saved credentials from a live connection check. Preserve staged model choices across refreshes,
