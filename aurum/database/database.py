@@ -21,6 +21,7 @@ from pathlib import Path
 import sqlite3
 
 # Aurum imports
+from aurum.database.bank_feeds import BANK_FEED_SCHEMA
 from aurum.database.prices import PRICE_SCHEMA
 from aurum.database.savings import SAVINGS_SCHEMA
 
@@ -272,7 +273,7 @@ def _create_tables(connection: sqlite3.Connection) -> None:
     """
     schema = (
         SCHEMA + REVIEW_SCHEMA + MANUAL_SCHEMA + PRICE_SCHEMA + BUDGET_SCHEMA + SAVINGS_SCHEMA
-        + ACCOUNT_INVESTMENT_SCHEMA
+        + ACCOUNT_INVESTMENT_SCHEMA + BANK_FEED_SCHEMA
     )
     for statement in schema.split(";"):
         if statement.strip():

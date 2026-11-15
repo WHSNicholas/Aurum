@@ -318,7 +318,9 @@ def _protect_history(workspace: Path, kind: str, previous: Any, proposed: Any, m
         if kind in {"accounts", "securities"}:
             new = {str(item["id"]): item for item in proposed}
             identity_column = "account_id" if kind == "accounts" else "security_id"
-            identity_tables = {"transactions", "journal"} if kind == "accounts" else {"journal"}
+            identity_tables = (
+                {"transactions", "journal", "bank_feed_accounts"} if kind == "accounts" else {"journal"}
+            )
             for table in identity_tables & table_names:
                 stored = connection.execute(
                     f'SELECT DISTINCT {identity_column} FROM "{table}" WHERE {identity_column} IS NOT NULL'

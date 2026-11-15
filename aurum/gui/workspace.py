@@ -315,12 +315,19 @@ class OverviewPage(QWidget):
         queued = work["bank_queued"] + work["manual_queued"]
         failed = work["bank_failed"] + work["manual_failed"]
         questions = work["bank_attention"] + work["manual_attention"]
-        attention = questions + failed + work["investment"]
+        feed_state = snapshot.get("bank_feed", {})
+        feed_conflicts = len(feed_state.get("review_conflicts", feed_state.get("conflicts", [])))
+        attention = questions + failed + work["investment"] + feed_conflicts
         investment_error = str(snapshot.get("investment_reviews_error") or "")
         imported = len(snapshot.get("transactions", []))
         manuals = len(snapshot.get("manuals", []))
         posted = len(snapshot.get("entries", []))
-        activity = bool(imported or manuals or posted)
+        checked_feeds = any(
+            item.get("last_success") and not item.get("error")
+            and str(item.get("checked_through") or "") >= str(snapshot.get("cutoff") or "")
+            for item in snapshot.get("bank_feed", {}).get("mappings", [])
+        )
+        activity = bool(imported or manuals or posted or checked_feeds)
         report_paths = tuple(dict.fromkeys(snapshot.get("report_paths", [])))
         saved = sum(Path(path).is_file() for path in report_paths)
         previous_steps_complete = activity and not (queued or attention or investment_error)
@@ -340,17 +347,18 @@ class OverviewPage(QWidget):
             else "No work queued",
         )
         self._set_stage(
-            "review", "attention" if investment_error or questions or work["investment"]
+            "review", "attention" if investment_error or questions or work["investment"] or feed_conflicts
             else "waiting" if queued or failed
             or not activity else "done",
-            "UNAVAILABLE" if investment_error else "ATTENTION" if questions or work["investment"]
+            "UNAVAILABLE" if investment_error else "ATTENTION" if questions or work["investment"] or feed_conflicts
             else "PENDING" if queued or failed
             or not activity else "CLEAR",
             "—" if investment_error else
-            _overview_count(questions + work["investment"], "item to check", "items to check"),
+            _overview_count(questions + work["investment"] + feed_conflicts, "item to check", "items to check"),
             _overview_count(questions, "known question") + " · Investment unavailable"
             if investment_error and questions else
             "Investment review could not load" if investment_error else
+            _overview_count(feed_conflicts, "bank import issue") if feed_conflicts else
             f"{questions} questions · {work['investment']} investment"
             if questions or work["investment"] else "Check again after processing" if queued or failed
             else "No outstanding questions",
@@ -378,6 +386,8 @@ class OverviewPage(QWidget):
             bool(auth.get("error")) or not auth.get("signed_in") or not auth.get("model")
         )
         tasks = [
+            ("Review bank imports", "Check possible duplicates or changed bank facts in Review before "
+             "finishing this month.", feed_conflicts),
             ("Check investment review",
              "Investment review could not load. Refresh the workspace, then check Review. "
              + investment_error,
@@ -417,6 +427,8 @@ class OverviewPage(QWidget):
             title, status = {
                 "unavailable": ("Check statement PDFs", "Source PDFs unavailable"),
                 "unimported": ("Import updated statement", "Updated source awaiting import"),
+                "feed_attention": ("Check bank syncing", "Bank sync needs attention"),
+                "feed_current": ("Up to date", "Bank activity synced"),
             }.get(completion.get("status"), ("Up to date", "Final statement awaited"))
             self.next_title.setText(title)
             self.next_detail.setText(completion["message"])

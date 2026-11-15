@@ -86,7 +86,8 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   entry point using the project's .venv; choose workspaces through the GUI rather than command-line options.
   Use the abstract app artwork in `gui/assets/app/`: the PNG supplies Qt's application icon and the ICNS
   supplies the macOS launcher's bundle icon. Keep the original master and generation prompt alongside them.
-  Open the existing workspace read-only; creation, saves, imports and processing require explicit UI actions.
+  Open the existing workspace read-only, then sync previously enabled bank feeds in a background job.
+  Ordinary refresh stays read-only; first connection, saves, PDF imports and processing require UI actions.
   Main page titles and the Aurum wordmark use the PDF title's Cormorant font, semibold with small caps.
   Keep larger initial capitals and smaller capitals for lowercase letters. Place a 13px normal-weight muted subtitle
   directly below every title on one line, with no added gap and roughly 35px before the page content.
@@ -319,6 +320,42 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   retain YAML comments and identities; prevent changes that orphan accounting history. Reports preview locally
   and never process answers or call AI. Saved but unapplied corrections keep affected reports marked draft.
 
+- Redbark is the primary bank-import option for new users, with PDF imports retained. Configure it within
+  Setup's Accounts section, retaining five Setup children. Store the API key only in macOS Keychain under
+  a workspace-specific identifier; never put it in YAML, SQLite, logs, command arguments or AI context.
+  Use API v2 with its explicit version header, data:read and only read endpoints. Connection checking and
+  import preview do not save credentials or transactions. Confirm each ANZ Plus AUD asset-bank mapping
+  and handover date before Enable & import saves the connection and first import. Existing bank details
+  are still required; masked provider account numbers do not supply missing routing information.
+  PDFs own earlier dates; Redbark owns booking dates from the handover onward. Reject overlapping PDF
+  imports under the database write lock, including after disconnect, to preserve permanent source ownership.
+  Import posted provider transactions only; provider posted does not mean posted in Aurum's journal.
+  Use post_date or, when absent, date; retain all original provider date fields and wording separately.
+  Convert validated integer AUD cents through Decimal. Never derive journal positions from API balances.
+  Map external account/transaction IDs permanently to immutable Aurum transaction UUIDs in additive feed
+  tables. Repeat unchanged observations are no-ops. Missing observations never delete transactions.
+  Hold handover duplicates, possible replacement IDs and changed known facts for explicit decisions in
+  Review. Linking or confirming a distinct transaction never rewrites existing postings. Acknowledging
+  changed facts keeps the saved source; accounting adjustments remain explicit journal work.
+  Rescan available posted history inside Redbark's approximate seven-year purchase-date limit, using
+  365-day years and a one-day boundary margin in requests and new-handover validation. Preserve saved
+  handovers as the available history window moves forward. Apply the handover locally so late posting
+  dates are not lost to a short lookback. Explain documented API errors using local wording and allowlisted
+  codes/field names; never echo remote messages or credentials. Follow same-origin pagination, split
+  truncated windows and reject incomplete responses. Commit complete accounts atomically, with
+  stale configuration checks and cooperative cancellation. Do not change earlier successful imports
+  when another account fails. Reconnection requires explicit mapping and reconciliation.
+  Saved automatic-sync permission authorises one startup job after the first workspace display. Sync is
+  also available on Statements and never runs Process or AI. Keep feed errors and last successful checks
+  visible without claiming live-bank freshness. Feed-owned periods do not require final PDF statements;
+  current periods remain Up to date, while missing coverage or conflicts withhold workflow completion.
+  Disconnect removes the local credential and stops syncing while retaining all source and journal history.
+  Coordinate credential deletion and database disconnect under the workspace connection lock. A denied
+  deletion leaves the connection intact; a failed database save restores the key. Refresh after failed
+  disconnects and retain the error. Corroborating feed evidence never relabels a PDF's original source or
+  statement date as API booking facts; show additional feed dates in the source tooltip instead.
+  Use separate, consistent full transfer routing from description or extended_description as evidence;
+  never concatenate incomplete fields or assume a provider reference is the bank's trailing # reference.
 - Run PDF importing separately. Journal runs process manual instructions and human answers before ordinary
   bank categorisation, then apply savings-pot instructions against the completed income and expense figures.
   Keep desktop progress brief and distinguish current work from previously saved outcomes.

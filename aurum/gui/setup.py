@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 # Aurum imports
 from aurum.finance.reports import DEFAULT_THEMES
 from aurum.finance.dates import reporting_month
+from aurum.gui.bank_feeds import BankConnectionPanel
 from aurum.gui.budget import BudgetForm
 from aurum.gui.catalogue import AccountsForm, SecuritiesForm
 from aurum.gui.icons import icon
@@ -69,6 +70,7 @@ class SetupPage(QWidget):
         self._missing = False
         self._current = 0
         self.leave_guard = None
+        self.continue_save = None
         year, month = reporting_month(date.today())
         self._month = f"{year:04d}-{month:02d}"
         self.documents, self.forms, self.pages, self.errors = {}, {}, {}, {}
@@ -81,6 +83,7 @@ class SetupPage(QWidget):
         self.configuration_kinds = tuple(CONFIGURATION_MODELS)
         self.kinds = (*self.configuration_kinds, "chatgpt")
         self.chatgpt = ChatGPTPage(embedded=True)
+        self.bank_connection = BankConnectionPanel()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
@@ -210,6 +213,8 @@ class SetupPage(QWidget):
             description.setWordWrap(True)
             description.setVisible(bool(HELP[kind]))
             page_layout.addWidget(description)
+            if kind == "accounts":
+                page_layout.addWidget(self.bank_connection)
             if kind == "budget":
                 self.budget_actions_layout = section_heading
                 page_layout.addLayout(self.budget_header_layout)
@@ -260,6 +265,7 @@ class SetupPage(QWidget):
         actions.addWidget(self.save_button)
         layout.addWidget(footer)
         self.chatgpt.changed.connect(self._update_labels)
+        self.bank_connection.changed.connect(self._update_labels)
         self.refresh()
 
     def refresh(self, force: bool = False) -> None:
@@ -355,8 +361,16 @@ class SetupPage(QWidget):
         """
         if not self.save_changes():
             return False
+        if self.continue_save is not None and (
+            self.chatgpt.has_unsaved_changes() or self.bank_connection.has_unsaved_changes()
+        ):
+            self.continue_save()
+            return False
         if self.chatgpt.has_unsaved_changes():
             self.chatgpt.save_changes()
+            return False
+        if self.bank_connection.has_unsaved_changes():
+            self.bank_connection.save_changes()
             return False
         return True
 
@@ -519,7 +533,8 @@ class SetupPage(QWidget):
         """
         Tell the main window whether navigation might discard configuration edits.
         """
-        return bool(self._dirty) or self.chatgpt.has_unsaved_changes()
+        return (bool(self._dirty) or self.chatgpt.has_unsaved_changes()
+                or self.bank_connection.has_unsaved_changes())
 
     def has_unsaved_changes(self) -> bool:
         """
@@ -532,6 +547,7 @@ class SetupPage(QWidget):
         Reload saved files after the user explicitly discards form changes.
         """
         self.chatgpt.discard_changes()
+        self.bank_connection.discard_changes()
         self.refresh(force=True)
 
     def maybe_leave(self) -> bool:
@@ -557,6 +573,7 @@ class SetupPage(QWidget):
         Suspend settings changes while the current workspace job uses saved configuration.
         """
         self._busy = busy
+        self.bank_connection.set_busy(busy)
         self._update_labels()
 
     def _load(self, kind: str, choices: dict) -> None:
@@ -692,6 +709,8 @@ class SetupPage(QWidget):
         """
         for index, kind in enumerate(self.kinds):
             dirty = self.chatgpt.has_unsaved_changes() if kind == "chatgpt" else kind in self._dirty
+            if kind == "accounts":
+                dirty = dirty or self.bank_connection.has_unsaved_changes()
             self.tabs.setTabText(index, _section_name(kind) + (" *" if dirty else ""))
         kind = self.kinds[self._current]
         self.save_button.setEnabled(
@@ -708,7 +727,16 @@ class SetupPage(QWidget):
         self.owner_name.setEnabled(not self._busy and not self._missing and "reports" in self.forms)
         self.theme.setEnabled(not self._busy and not self._missing and "reports" in self.forms)
         self.appearance.setEnabled(not self._busy and not self._missing and "reports" in self.forms)
+        self.bank_connection.configure.setEnabled(
+            not self._busy and not self._missing and "accounts" not in self._dirty
+        )
+        self.bank_connection.configure.setToolTip(
+            "Save account changes before linking bank accounts" if "accounts" in self._dirty else
+            "Check your API key, link accounts and preview the first import"
+        )
         dirty_kinds = [item for item in self.configuration_kinds if item in self._dirty]
+        if self.bank_connection.has_unsaved_changes() and "accounts" not in dirty_kinds:
+            dirty_kinds.append("accounts")
         if self.chatgpt.has_unsaved_changes():
             dirty_kinds.append("chatgpt")
         self.save_status.setText(
@@ -772,12 +800,15 @@ class SetupPage(QWidget):
             ) == QMessageBox.StandardButton.Discard:
                 self.chatgpt.discard_changes()
             return
-        if kind in self._dirty and QMessageBox.question(
+        bank_dirty = kind == "accounts" and self.bank_connection.has_unsaved_changes()
+        if (kind in self._dirty or bank_dirty) and QMessageBox.question(
             self, "Discard local changes?", "Reloading replaces your unsaved changes in this section.",
             QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         ) != QMessageBox.StandardButton.Discard:
             return
+        if bank_dirty:
+            self.bank_connection.discard_changes()
         self._dirty.discard(kind)
         self._messages.pop(kind, None)
         if self._dirty:

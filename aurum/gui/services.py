@@ -18,6 +18,7 @@ from datetime import date
 from functools import partial
 from pathlib import Path
 import sqlite3
+from uuid import uuid4
 
 # Aurum imports
 from aurum.ai.chatgpt import connect, connection_status
@@ -65,6 +66,9 @@ class WorkspaceService:
         self.database = self.data / "aurum.sqlite3"
         self._prepared_statements = {}
         self._statement_metadata = {}
+        self._bank_connections = {}
+        self._bank_previews = {}
+        self._bank_sync_error = ""
 
     def default_month(self) -> str:
         """
@@ -101,6 +105,7 @@ class WorkspaceService:
             "owner_name": "", "financials": {}, "financial_transaction_counts": {},
             "net_worth_unpriced_holdings": [], "net_worth_price_dates": [],
             "posted_entry_count": 0,
+            "bank_feed": {"configured": False, "auto_sync": False, "mappings": [], "conflicts": []},
             "statement_folder": str(self.data / "bank_statements"),
             "report_paths": [str(self.data / "reports" / month / name) for name in report_filenames(month)],
         }
@@ -128,6 +133,14 @@ class WorkspaceService:
                 result.update(journal_snapshot(
                     connection, accounts, period=period, securities=securities, budget=budget,
                 ))
+                from aurum.database.bank_feeds import feed_snapshot
+                result["bank_feed"] = feed_snapshot(connection)
+                result["bank_feed"]["connection_error"] = self._bank_sync_error
+                result["bank_feed"]["review_conflicts"] = [
+                    item for item in result["bank_feed"].get("conflicts", [])
+                    if str(item.get("review_date") or item.get("date") or "") <= period.cutoff.isoformat()
+                ]
+                _add_feed_sources(result, result["bank_feed"])
                 entries = load_journal_entries(connection, accounts, securities=securities)
                 quotes = {}
                 if "price_quotes" in tables:
@@ -189,7 +202,9 @@ class WorkspaceService:
             result["statement_completion"] = statement_completion(
                 month, accounts, self.data / "bank_statements", import_rows,
                 metadata_cache=self._statement_metadata,
+                feed_mappings=result.get("bank_feed", {}).get("mappings", []),
             )
+            _feed_completion(result, period)
             result["financial_transaction_counts"] = financial_counts
             result["gui_theme"] = resolve_gui_theme(settings)
             result["ready"] = True
@@ -203,6 +218,9 @@ class WorkspaceService:
         Dispatch one explicit desktop action and return a structured result for its page.
         """
         if cancelled():
+            if action.startswith("redbark_"):
+                from aurum.banking.redbark import RedbarkCancelled
+                raise RedbarkCancelled("Bank action stopped. No new work was started.")
             return {"message": "Stopped before starting."}
         if action == "reload_entry_editor":
             action = "open_entry_editor"
@@ -211,6 +229,8 @@ class WorkspaceService:
             return {"message": "Workspace ready. Add your bank and category accounts in Setup."}
         if action in {"connect_chatgpt", "save_model"}:
             return self._chatgpt(action, payload, progress, cancelled)
+        if action.startswith("redbark_"):
+            return self._redbark(action, payload, month, progress, cancelled)
         if action == "stage_statements":
             results = stage_statements(
                 payload["paths"], load_accounts(self.config / "accounts.yaml"),
@@ -284,6 +304,8 @@ class WorkspaceService:
                         source_ids=sources, date=initial_date,
                     )
                 context["transactions"] = snapshot["transactions"]
+                from aurum.database.bank_feeds import feed_snapshot
+                _add_feed_sources(context, feed_snapshot(connection))
                 line_number = payload.get("line_number")
                 if type(line_number) is int and line_number > 0:
                     context["focus_line_number"] = line_number
@@ -387,6 +409,186 @@ class WorkspaceService:
         budget = load_budget_settings(self.config / "budget.yaml", accounts)
         return accounts, securities, budget
 
+    def _redbark(
+        self, action: str, payload: dict, month: str, progress, cancelled, *, connection_locked: bool = False,
+    ) -> dict:
+        """
+        Keep connection secrets and first-import previews in the worker, outside GUI result payloads.
+        """
+        from aurum.banking.credentials import bank_connection_lock, delete_key, get_key, save_key
+        from aurum.banking.redbark import RedbarkCancelled, RedbarkClient
+        from aurum.database.bank_feeds import feed_snapshot
+        from aurum.workflows.bank_feeds import (
+            disconnect_feed, preview_connection, resolve_feed_conflict, save_connection,
+            set_auto_sync, sync_bank_feeds,
+        )
+
+        if action in {"redbark_enable", "redbark_disconnect"} and not connection_locked:
+            with bank_connection_lock(self.root):
+                return self._redbark(
+                    action, payload, month, progress, cancelled, connection_locked=True,
+                )
+
+        configuration = (self.config / "accounts.yaml").read_bytes()
+        accounts = load_accounts(self.config / "accounts.yaml", initialise_ids=False)
+        def verify_configuration():
+            """
+            Reject an import if saved account definitions changed during networking or a Keychain prompt.
+            """
+            if (self.config / "accounts.yaml").read_bytes() != configuration:
+                raise ValueError("Account settings changed during syncing. Refresh and sync again.")
+        verify_configuration()
+        if action == "redbark_check":
+            key = str(payload.get("api_key") or "").strip() or get_key(self.root)
+            if not key:
+                raise ValueError("Enter your Redbark API key to check the connection.")
+            client = RedbarkClient(key, cancel=cancelled, progress=progress)
+            client.check_connection()
+            discovered = client.list_accounts()
+            if cancelled():
+                raise RedbarkCancelled("Connection check stopped. No transactions were imported.")
+            with closing(self._connection(read_only=True)) as connection:
+                latest = dict(connection.execute(
+                    "SELECT account_id, MAX(date) FROM transactions "
+                    "WHERE source_file NOT LIKE 'redbark:%' GROUP BY account_id"
+                ))
+                saved = feed_snapshot(connection)
+            token = str(uuid4())
+            self._bank_connections.clear()
+            self._bank_previews.clear()
+            self._bank_connections[token] = {
+                "key": key, "accounts": discovered, "configuration": configuration,
+                "feed_revision": saved["revision"],
+            }
+            handovers = {}
+            for mapping in saved.get("mappings", []):
+                account_id = mapping["account_id"]
+                handovers[account_id] = min(
+                    handovers.get(account_id, mapping["handover_date"]), mapping["handover_date"],
+                )
+            return {"message": "Redbark connection checked. Link your ANZ Plus accounts.", "data": {
+                "connection_token": token, "accounts": discovered,
+                "aurum_accounts": [
+                    {"id": str(account.id), "key": account.key, "name": account.name,
+                     "last_pdf_date": latest.get(str(account.id)),
+                     "handover_date": handovers.get(str(account.id))}
+                    for account in accounts.accounts.values()
+                    if account.account_type.value == "asset" and account.bank_details is not None
+                ],
+                "suggested_handover": resolve_period([], month=month).start_date.isoformat(),
+                "mappings": saved.get("mappings", []),
+            }}
+        if action == "redbark_preview":
+            session = self._bank_connections.get(payload.get("connection_token"))
+            if session is None or session["configuration"] != configuration:
+                raise ValueError("Account settings changed or the connection expired. Check the connection again.")
+            client = RedbarkClient(session["key"], cancel=cancelled, progress=progress)
+            with closing(self._connection(read_only=True)) as connection:
+                if feed_snapshot(connection)["revision"] != session["feed_revision"]:
+                    raise ValueError("Bank connection settings changed. Check the connection again.")
+                preview = preview_connection(
+                    connection, accounts, client, payload.get("mappings", []),
+                    auto_sync=bool(payload.get("auto_sync", True)),
+                    cancelled=cancelled, progress=progress,
+                )
+                if preview["revision"] != session["feed_revision"]:
+                    raise ValueError("Bank connection settings changed. Check the connection again.")
+            if cancelled():
+                raise RedbarkCancelled("Preview stopped. No transactions were imported.")
+            token = str(uuid4())
+            self._bank_previews.clear()
+            self._bank_previews[token] = {**session, "preview": preview}
+            return {"message": "Preview ready. Confirm to enable the connection and import.", "data": {
+                "preview_token": token, "accounts": preview.get("accounts", []),
+                "mappings": preview.get("mappings", []), "auto_sync": preview.get("auto_sync", True),
+            }}
+        if action == "redbark_enable":
+            session = self._bank_previews.get(payload.get("preview_token"))
+            if session is None or session["configuration"] != configuration:
+                raise ValueError("The preview is no longer current. Preview the import again.")
+            previous = get_key(self.root)
+            save_key(self.root, session["key"])
+            try:
+                if cancelled():
+                    raise ValueError("Connection setup stopped before saving.")
+                with closing(self._connection()) as connection:
+                    result = save_connection(
+                        connection, accounts, session["preview"], verify_configuration=verify_configuration,
+                    )
+            except Exception:
+                if previous is None:
+                    delete_key(self.root)
+                else:
+                    save_key(self.root, previous)
+                raise
+            self._bank_connections.clear()
+            self._bank_previews.clear()
+            self._bank_sync_error = ""
+            return {"message": "Redbark connected. New transactions are ready to Process.", "data": result}
+        if action == "redbark_sync":
+            try:
+                key = get_key(self.root)
+                if not key:
+                    raise ValueError("The Redbark key is unavailable. Reconnect in Setup → Accounts.")
+            except (OSError, ValueError, RuntimeError) as error:
+                self._bank_sync_error = str(error)
+                raise
+            self._bank_sync_error = ""
+            client = RedbarkClient(key, cancel=cancelled, progress=progress)
+            with closing(self._connection()) as connection:
+                result = sync_bank_feeds(
+                    connection, accounts, client, cancelled=cancelled, progress=progress,
+                    verify_configuration=verify_configuration,
+                )
+            outcomes = result.get("results", [])
+            added = sum(item.get("new_count", 0) for item in outcomes)
+            failed = sum(item.get("status") == "failed" for item in outcomes)
+            conflicts = len(result.get("conflicts", []))
+            message = ("Sync stopped. " if result.get("cancelled") else "Sync finished. ")
+            message += f"{added} new transaction(s)."
+            if conflicts:
+                message += f" {conflicts} import issue(s) in Review."
+            if failed:
+                message += f" {failed} account(s) could not sync; retry from Statements."
+            return {"message": message, "data": result}
+        with closing(self._connection()) as connection:
+            if action == "redbark_settings":
+                state = set_auto_sync(connection, bool(payload["auto_sync"]), payload["revision"])
+                return {"message": "Bank sync settings saved.", "data": state}
+            if action == "redbark_disconnect":
+                if feed_snapshot(connection)["revision"] != payload["revision"]:
+                    raise ValueError("Bank connection settings changed. Refresh before disconnecting.")
+                previous = get_key(self.root)
+                if cancelled():
+                    raise RedbarkCancelled("Disconnect stopped. The saved connection is unchanged.")
+                delete_key(self.root)
+                try:
+                    if cancelled():
+                        raise RedbarkCancelled("Disconnect stopped. The saved connection is unchanged.")
+                    state = disconnect_feed(connection, payload["revision"])
+                except Exception:
+                    if previous is not None:
+                        try:
+                            save_key(self.root, previous)
+                        except (OSError, RuntimeError, ValueError):
+                            self._bank_sync_error = (
+                                "Disconnect did not finish and the saved key could not be restored. "
+                                "Reconnect Redbark in Setup → Accounts. Imported history is retained."
+                            )
+                            raise RuntimeError(self._bank_sync_error) from None
+                    raise
+                self._bank_connections.clear()
+                self._bank_previews.clear()
+                self._bank_sync_error = ""
+                return {"message": "Redbark disconnected. Imported history is retained.", "data": state}
+            if action == "redbark_resolve":
+                resolve_feed_conflict(
+                    connection, payload["id"], payload["revision"], payload["action"],
+                    transaction_id=payload.get("transaction_id"),
+                )
+                return {"message": "Bank import review saved. Existing journal entries are unchanged."}
+        raise ValueError("Unknown bank connection action.")
+
     def _chatgpt(self, action: str, payload: dict, progress, cancelled) -> dict:
         """
         Check sign-in or save an available model, releasing the credential lock before the user chooses.
@@ -477,4 +679,61 @@ class WorkspaceService:
             ),
             "data": counts, "guidance_warnings": warnings,
             "guidance_counts_complete": guidance_counts_complete,
+        }
+
+
+# %% 2. Helpers ----------------------------------------------------------------------------------------------
+def _add_feed_sources(snapshot: dict, feed: dict) -> None:
+    """
+    Attach readable API provenance without replacing immutable bank wording or source identities.
+    """
+    provenance = feed.get("provenance", {})
+    for collection in ("transactions", "reviews"):
+        for record in snapshot.get(collection, []):
+            evidence = provenance.get(str(record.get("transaction_id")))
+            if evidence:
+                record["bank_source"] = evidence
+                if str(record.get("source_file") or "").casefold().startswith("redbark:"):
+                    record["source_label"] = evidence.get("source_label") or "Redbark · ANZ Plus"
+                else:
+                    record.pop("source_label", None)
+
+
+def _feed_completion(snapshot: dict, period) -> None:
+    """
+    Combine successful feed checks with PDF completion without certifying live bank freshness.
+    """
+    feed = snapshot.get("bank_feed", {})
+    by_account = {}
+    for item in feed.get("mappings", []):
+        if str(item.get("handover_date", "")) <= period.cutoff.isoformat():
+            previous = by_account.get(item["account_id"], {})
+            if item.get("enabled") or not previous.get("enabled"):
+                by_account[item["account_id"]] = item
+    mappings = list(by_account.values())
+    if not mappings:
+        return
+    visible_conflicts = feed.get("review_conflicts", feed.get("conflicts", []))
+    conflicted = {item["external_account_id"] for item in feed.get("conflicts", [])}
+    incomplete = [
+        item for item in mappings if (item.get("error") and not (
+            item["external_account_id"] in conflicted
+            and "import conflict" in str(item["error"])
+        )) or not item.get("last_success")
+        or str(item.get("checked_through") or "") < period.cutoff.isoformat()
+    ]
+    conflicts = visible_conflicts
+    disconnected = not feed.get("configured") and period.is_partial
+    if incomplete or conflicts or disconnected or feed.get("connection_error"):
+        snapshot["statement_completion"] = {
+            "pending": True, "status": "feed_attention",
+            "message": "Resolve bank import conflicts in Review." if conflicts else
+            "Reconnect Redbark in Setup → Accounts to check this month's bank activity." if disconnected else
+            "Sync your bank accounts in Statements. A complete bank check is still needed.",
+        }
+    elif not snapshot.get("statement_completion", {}).get("pending") and period.is_partial:
+        snapshot["statement_completion"] = {
+            "pending": True, "status": "feed_current",
+            "message": "Your saved bank activity is up to date with the last successful sync. "
+                       "More transactions may arrive during the month.",
         }

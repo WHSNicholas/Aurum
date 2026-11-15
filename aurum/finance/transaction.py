@@ -3,10 +3,10 @@
 #                                                Finance - Transaction                                                 #
 # -------------------------------------------------------------------------------------------------------------------- #
 """
-Aurum uses Transaction objects to carry bank statement lines through importing and storage.
+Aurum uses Transaction objects to carry bank statement lines and settled bank-feed activity through storage.
 
 Each object keeps the bank's description, dates, signed AUD amount, source account UUID and source filename
-without its directory or extension. Positive amounts are money entering the account, and negative amounts
+or a stable feed source identifier. Positive amounts are money entering the account, and negative amounts
 are money leaving it.
 
 Transfers between accounts keep a separate line from each account's statement. Journal preparation uses
@@ -31,12 +31,12 @@ class Transaction(BaseModel):
     Attributes:
         transaction_id: UUID generated on first construction and retained when saved and loaded.
         account_id: Persistent UUID of the configured account whose statement contains this line.
-        date: Date printed beside the transaction on the statement.
-        effective_date: Separately printed effective date, or None when the bank does not supply one.
+        date: Statement date, or a feed's posting date with its transaction date as fallback.
+        effective_date: Separately supplied effective/value date, or None when the bank does not supply one.
         description: Original bank wording, with wrapped description lines joined by spaces.
         amount: Signed AUD amount. A credit is positive and a debit is negative; this is not categorisation.
         statement_balance: Running balance printed beside this line, if supplied.
-        source_file: Original filename without its directory or extension, such as "2026-05_everyday".
+        source_file: PDF filename stem, or a stable "redbark:" source identifier for API activity.
         transfer_reference: Single trailing # reference, preserving leading zeros, or None.
 
     Fields cannot be reassigned. Later enrichment should validate replacement objects while retaining their

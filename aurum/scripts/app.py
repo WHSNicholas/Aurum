@@ -7,7 +7,8 @@ Open Aurum's desktop workspace for setup, statements, review, accounting and PDF
 
 Run this file in PyCharm, use python aurum/scripts/app.py, or open the installed macOS Aurum application.
 The window uses the project's private config and data folders; choose another workspace inside the app.
-Opening the app only reads saved state; imports, AI processing and configuration saves require user actions.
+Opening the app reads saved state, then syncs bank feeds only when previously enabled in Setup. AI processing
+and configuration saves require explicit user actions.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------

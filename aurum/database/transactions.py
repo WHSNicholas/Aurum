@@ -181,6 +181,9 @@ def _save_import(
     # the same additional occurrences. Both tables commit together.
     with connection:
         connection.execute("BEGIN IMMEDIATE")
+        from aurum.database.bank_feeds import assert_pdf_handover
+        for account_id in {item.account_id for item in transactions}:
+            assert_pdf_handover(connection, account_id, transactions)
         known = is_imported(connection, source_hash)
         changed, ambiguous = (0, 0)
         if canonical_source:

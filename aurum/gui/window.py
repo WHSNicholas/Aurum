@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self._new_window = None
         self.editor = None
         self._last_message = "Workspace ready."
+        self._startup_sync_pending = True
         try:
             self.month = self.service.default_month()
         except (OSError, ValueError, RuntimeError, sqlite3.Error):
@@ -224,7 +225,10 @@ class MainWindow(QMainWindow):
         self.pages["ChatGPT"] = self.pages["Setup"].chatgpt
         self.pages["Statements"].set_statement_folder(str(self.service.data / "bank_statements"))
         self.pages["ChatGPT"].action_requested.connect(self._action)
+        self.pages["Setup"].bank_connection.action_requested.connect(self._action)
+        self.pages["Setup"].bank_connection.cancel_requested.connect(self._stop)
         self.pages["Setup"].leave_guard = self._guard_changes
+        self.pages["Setup"].continue_save = self._continue_setup_save
         self.pages["Setup"].changed.connect(self._configuration_saved)
         self.pages["Setup"].section_changed.connect(self._sync_setup_section)
         self.pages["Setup"].section_labels_changed.connect(self._setup_section_labels)
@@ -490,10 +494,12 @@ class MainWindow(QMainWindow):
             if isinstance(page, SetupPage):
                 if not page.save_changes():
                     return False
-                if not page.chatgpt.has_unsaved_changes():
+                pending = next((item for item in (page.chatgpt, page.bank_connection)
+                                if item.has_unsaved_changes()), None)
+                if pending is None:
                     return True
-                self._continuation = continuation
-                page.chatgpt.save_changes()
+                self._continuation = lambda: self._continue_setup_save(continuation)
+                pending.save_changes()
                 if self.job is None:
                     self._continuation = None
                 return False
@@ -502,6 +508,21 @@ class MainWindow(QMainWindow):
             if self.job is None:
                 self._continuation = None
         return False
+
+    def _continue_setup_save(self, continuation=None) -> None:
+        """
+        Save remaining explicit Setup drafts before resuming a requested navigation.
+        """
+        page = self.pages["Setup"]
+        pending = next((item for item in (page.chatgpt, page.bank_connection)
+                        if item.has_unsaved_changes()), None)
+        if pending is not None:
+            self._continuation = lambda: self._continue_setup_save(continuation)
+            pending.save_changes()
+            if self.job is None:
+                self._continuation = None
+        elif continuation is not None:
+            continuation()
 
     def _action(self, action: str, payload: dict) -> None:
         """
@@ -523,6 +544,11 @@ class MainWindow(QMainWindow):
         if action == "open_report_settings":
             self._open_report_settings()
             return
+        if action == "open_bank_settings":
+            if self._guard_changes(lambda: self._action(action, payload)):
+                self.navigate("Setup")
+                self.pages["Setup"].select_section("accounts")
+            return
         if self.job is not None:
             return
         if action not in {
@@ -530,6 +556,8 @@ class MainWindow(QMainWindow):
             "reload_entry_editor",
             "reload_manual_editor",
             "connect_chatgpt", "save_model",
+            "redbark_check", "redbark_preview", "redbark_enable", "redbark_settings",
+            "redbark_disconnect",
         }:
             continuation_payload = payload
             if action == "open_entry_editor" and payload.get("from_manual_form"):
@@ -680,6 +708,10 @@ class MainWindow(QMainWindow):
         self.details_button.setChecked(True)
         if self._active_action == "refresh":
             self.pages["Overview"].refresh({"ready": False, "error": message})
+        if self._active_action.startswith("redbark_"):
+            self.pages["Setup"].bank_connection.deliver_error(self._active_action, message)
+            if self._active_action == "redbark_disconnect":
+                self._last_message = message
         for page in self.pages.values():
             if hasattr(page, "action_failed"):
                 page.action_failed(self._active_action, message)
@@ -713,6 +745,7 @@ class MainWindow(QMainWindow):
                         page.refresh()
                     else:
                         page.refresh(result)
+                self.pages["Setup"].bank_connection.set_snapshot(result)
                 if theme:
                     # Setup can rebuild controls during refresh; tint those after they exist as well.
                     apply_gui_theme(self, theme)
@@ -742,6 +775,8 @@ class MainWindow(QMainWindow):
                 elif not self._closing:
                     self._progress(result.get("message", "Stopped before opening the editor."))
             else:
+                if action.startswith("redbark_"):
+                    self.pages["Setup"].bank_connection.deliver_result(action, result)
                 if action == "save_model" and not result.get("data", {}).get("models"):
                     self._continuation = None
                 saved_identity = {
@@ -769,14 +804,34 @@ class MainWindow(QMainWindow):
                         page.action_completed(action, data)
                 self._last_message = result.get("message", "Saved.")
                 self._progress(self._last_message)
-                if not self._closing:
+                if not self._closing and action not in {"redbark_check", "redbark_preview"}:
                     QTimer.singleShot(0, self.refresh)
         if action == "refresh" and self._continuation and not self._failed:
             continuation, self._continuation = self._continuation, None
             QTimer.singleShot(0, continuation)
+        elif action == "refresh" and not self._failed and not self._closing:
+            QTimer.singleShot(0, self._startup_bank_sync)
+        if action in {"redbark_sync", "redbark_disconnect"} and self._failed and not self._closing:
+            QTimer.singleShot(0, self.refresh)
         if self._closing:
             self._closing = False
             QTimer.singleShot(0, self.close)
+
+    def _startup_bank_sync(self) -> None:
+        """
+        Run one previously authorised bank sync after the initial workspace has become visible.
+        """
+        if not self._startup_sync_pending or self.job is not None or self._closing:
+            return
+        if not self.snapshot.get("ready") or self.snapshot.get("error"):
+            return
+        self._startup_sync_pending = False
+        feed = self.snapshot.get("bank_feed", {})
+        if feed.get("configured") and feed.get("auto_sync"):
+            month = self.month
+            self._start("redbark_sync", lambda progress, cancelled: self.service.run(
+                "redbark_sync", {}, month, progress, cancelled,
+            ))
 
     def _open_review_kind(self, kind: str) -> None:
         """

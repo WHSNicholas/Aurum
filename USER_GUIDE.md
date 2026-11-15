@@ -18,8 +18,9 @@ For development, run `aurum/scripts/app.py` in PyCharm, or use the one startup c
 .venv/bin/python aurum/scripts/app.py
 ```
 
-Opening Aurum reads the saved workspace. Importing, processing, editing and generating reports require an
-explicit action. The folder icon in the sidebar footer opens another workspace through the GUI.
+Opening Aurum reads the saved workspace, then syncs any bank connection you have enabled for automatic
+syncing. Processing, editing and generating reports still require an explicit action.
+The folder icon in the sidebar footer opens another workspace through the GUI.
 The refresh icon reloads saved facts and settings.
 
 ## Setup
@@ -57,6 +58,46 @@ account has no bank details. Accounts start at zero; record starting balances as
 
 Add equities and cryptocurrencies under Securities. Stable account/security identifiers are saved automatically.
 Changing a display name does not change its identity. System equity names and roles are fixed.
+
+### Connect ANZ Plus with Redbark
+
+Set up your bank connection in Redbark first and create an API key with **data:read** access.
+Then, in Aurum:
+
+1. Save your ANZ Plus bank accounts in **Setup → Accounts**, including BSB and account number.
+2. Click **Connect Redbark**, enter the API key and click **Check connection**.
+3. Link each returned account to its Aurum account. Check the masked account number carefully.
+4. Choose a **handover date** for each account. PDFs cover dates before it; Redbark covers booking dates
+   from that date onward. The suggested date follows existing imported activity.
+5. Click **Preview import**. Check the counts of new transactions, existing transactions and possible duplicates.
+6. Click **Enable & import**. This saves the key in macOS Keychain and imports the previewed bank activity.
+
+The API key is kept separately for each workspace, outside the repository and database. Aurum never sends
+it to ChatGPT. Checking the connection or previewing an import does not save transactions.
+If Redbark rejects a request, the error identifies its documented reason and any recognised request field.
+Aurum stays just inside Redbark's approximate seven-year history limit and shows the earliest allowed
+handover when an older date is selected.
+
+**Sync when this workspace opens** is enabled by default. Change it in Setup and use the normal save icon.
+You can also click **Sync** on Statements. Syncing imports settled bank transactions; it does not run AI
+or post journal entries. Click **Process** separately when you want to prepare the journal.
+Redbark may return cached bank activity, so a successful check does not guarantee a live bank refresh.
+
+Repeated syncing skips previously imported transactions and preserves posted entries. Possible duplicates
+around the handover, replacement identifiers and changed bank facts appear under **Bank imports** in Review.
+Link an already imported transaction, or confirm that the new record is a separate transaction. Changed facts
+never overwrite the saved source: **Keep saved record** acknowledges the observation while retaining the
+original accounting. Make any required accounting adjustment explicitly in the journal.
+
+PDF imports remain available for earlier dates and other accounts. PDFs overlapping a Redbark-owned period
+are rejected to avoid duplicate accounting, including after a local disconnect. Handovers are retained with
+the imported history. Use **Manage connection** to reconnect or replace a key, or the disconnect icon to stop
+syncing and remove the workspace's saved key. Disconnecting never deletes bank or journal history.
+If Keychain refuses access, the connection stays enabled; allow access and retry. Aurum refreshes the
+connection state after a failed disconnect and explains any recovery needed.
+
+New accounts still start at zero. Record any starting position as a balanced manual journal entry;
+Redbark balances do not become opening entries automatically.
 
 ### Budget
 
@@ -123,6 +164,12 @@ These indicators describe saved activity; they do not prove that every expected 
 or that saved reports include later accounting changes.
 
 ## Statements
+
+Use **Sync** for connected bank accounts, or retain the PDF workflow below for other accounts and earlier dates.
+The **Source** column distinguishes Redbark activity from PDFs. Selecting a feed transaction shows its booking
+date and original description; the source tooltip and copy action retain the additional bank evidence.
+When Redbark corroborates a transaction already imported from a PDF, its original PDF source and statement
+date stay visible. The additional Redbark dates and references appear in the source tooltip.
 
 Click the folder icon beside **Choose PDFs**, or drop PDFs on the page.
 The chooser starts in `data/bank_statements`; PDFs from other locations are also accepted.

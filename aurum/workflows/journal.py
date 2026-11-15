@@ -16,7 +16,7 @@ evidence for ambiguity. Snapshots expose saved facts without making AI calls mer
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, ExitStack
 from pathlib import Path
 import re
@@ -30,6 +30,7 @@ from aurum.ai.skills import Skill, load_categorisation_skill, load_manual_skill
 from aurum.database.categorisation import (
     load_decisions, reserve_decisions, save_categorisation_batch, save_decisions,
 )
+from aurum.database.bank_feeds import feed_snapshot
 from aurum.database.journal import (
     load_journal_entries, posted_transaction_ids, prepare_journal, save_journal_entry,
 )
@@ -388,6 +389,7 @@ def _processing_scope(
     pairs, _ = _match_transfers(
         [row for row in transactions if row.transaction_id not in posted],
         {account.id: account for account in accounts.accounts.values()},
+        evidence=feed_snapshot(connection)["provenance"],
     )
     for outgoing, incoming in pairs:
         if {outgoing.transaction_id, incoming.transaction_id} & sources:
@@ -493,7 +495,9 @@ def _process_transactions(
     }
 
     # Find every possible pair before choosing one, so repeated amounts cannot hide an ambiguous match.
-    pairs, internal = _match_transfers(pending, by_account)
+    pairs, internal = _match_transfers(
+        pending, by_account, evidence=feed_snapshot(connection)["provenance"],
+    )
     for outgoing, incoming in pairs:
         if cancelled and cancelled():
             return
@@ -625,6 +629,7 @@ def _check_sources(transactions: list[Transaction], accounts: dict[UUID, Account
 
 def _match_transfers(
     transactions: list[Transaction], accounts: dict[UUID, Account],
+    *, evidence: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[list[tuple[Transaction, Transaction]], set[UUID]]:
     """
     Find uniquely paired internal transfers and identify all rows needing internal-transfer handling.
@@ -640,6 +645,8 @@ def _match_transfers(
 
     Known internal movements with missing or conflicting details remain in review. Equal amounts alone
     never substitute for a missing transfer reference. Effective dates do not change matching or event dates.
+    Feed evidence can supply a complete ANZ route and trailing reference in extended_description. It never
+    replaces source wording, combines separate partial fields, or treats a provider reference as an ANZ #.
 
     Returns:
         Outgoing/incoming pairs, and IDs of every identified or potentially matched internal movement.
@@ -664,30 +671,41 @@ def _match_transfers(
     for row in transactions:
         if row.account_id not in bank_ids:
             continue
+        source = (evidence or {}).get(str(row.transaction_id), {})
+        extended = source.get("extended_description")
+        descriptions = (row.description,)
+        if isinstance(extended, str) and extended.strip() and extended != row.description:
+            descriptions += (extended,)
+        # Observe each original field separately. Partial bank fields must never manufacture a full route.
+        description = _transfer_route_text(descriptions)
         # Recognise own-account mentions even when their format is too uncertain for automatic matching.
-        transfer_word = re.search(r"\bTRANSFER\b", row.description, re.IGNORECASE)
-        known_number = transfer_word is not None and any(
-            re.search(
-                r"(?<!\w)" + r"[ \t-]*".join(number) + r"(?!\w)",
-                row.description,
+        for wording in descriptions:
+            transfer_word = re.search(r"\bTRANSFER\b", wording, re.IGNORECASE)
+            known_number = transfer_word is not None and any(
+                re.search(r"(?<!\w)" + r"[ \t-]*".join(number) + r"(?!\w)", wording)
+                for number in numbers
             )
-            for number in numbers
-        )
-        if known_number or _names_internal_account(row, bank_accounts):
-            internal.add(row.transaction_id)
-        if re.search(r"\bTRANSFER\s+WITHIN\b", row.description, re.IGNORECASE):
-            within_mentions.add(row.transaction_id)
-            internal.add(row.transaction_id)
-
-        reference = row.transfer_reference
-        if reference is None:
+            if known_number or _names_internal_account(row, bank_accounts, description=wording):
+                internal.add(row.transaction_id)
+            if source and transfer_word:
+                # An API transfer with insufficient routing needs a human rather than inferred categories.
+                internal.add(row.transaction_id)
+            if re.search(r"\bTRANSFER\s+WITHIN\b", wording, re.IGNORECASE):
+                within_mentions.add(row.transaction_id)
+                internal.add(row.transaction_id)
+        references = {
+            reference for wording in descriptions
+            if (reference := _wording_reference(wording)) is not None
+        }
+        # Conflicting observations still participate in ambiguity checks for every reference they name.
+        for reference in references:
+            grouped.setdefault(reference, []).append(row)
+        if description is None:
             continue
-        # Keep the full reference as text so #00123 and #123 remain different bank references.
-        grouped.setdefault(reference, []).append(row)
         if row.transaction_id in within_mentions:
             route = re.fullmatch(
                 r"TRANSFER\s+WITHIN\s+([0-9]{6})\s*-\s*([0-9]+)\s+#[0-9]+\s*",
-                row.description, re.IGNORECASE,
+                description, re.IGNORECASE,
             )
             if (
                 route is not None and row.amount != 0
@@ -697,7 +715,7 @@ def _match_transfers(
             continue
         routes = re.findall(
             r"\bTRANSFER\s+(FROM|TO)\s+([0-9]{6})\s*-\s*([0-9]+)(?!\w)",
-            row.description, re.IGNORECASE,
+            description, re.IGNORECASE,
         )
         if len(routes) != 1:
             continue
@@ -753,11 +771,53 @@ def _match_transfers(
     return pairs, internal
 
 
-def _names_internal_account(transaction: Transaction, accounts: list[Account]) -> bool:
+def _transfer_route_text(descriptions: tuple[str, ...]) -> str | None:
+    """
+    Choose one complete original field only when its reference, direction and route are uncontradicted.
+
+    A provider payment reference is not supplied here: it is not guaranteed to be ANZ's trailing # value.
+    Returning text only for matching leaves both saved source objects and resulting journal lines unchanged.
+    """
+    references, directions, routes = set(), set(), set()
+    candidates = []
+    for description in descriptions:
+        observed = re.findall(r"(?<!\w)#([0-9]+)(?!\w)", description)
+        if len(observed) > 1:
+            return None
+        references.update(observed)
+        directions.update(
+            match.upper() for match in re.findall(
+                r"\bTRANSFER\s+(FROM|TO|WITHIN)\b", description, re.IGNORECASE,
+            )
+        )
+        matches = re.findall(
+            r"\bTRANSFER\s+(FROM|TO|WITHIN)\s+([0-9]{6})\s*-\s*([0-9]+)(?!\w)",
+            description, re.IGNORECASE,
+        )
+        routes.update((direction.upper(), bsb, number) for direction, bsb, number in matches)
+        if _wording_reference(description) is not None and len(matches) == 1:
+            candidates.append(description)
+    if len(references) != 1 or len(directions) != 1 or len(routes) != 1:
+        return None
+    return next(iter(candidates), None)
+
+
+def _wording_reference(description: str) -> str | None:
+    """
+    Keep a single complete trailing numeric reference as text, including its leading zeroes.
+    """
+    match = re.search(r"(?<!\w)#([0-9]+)\s*$", description)
+    references = re.findall(r"(?<!\w)#([0-9]+)(?!\w)", description)
+    return match[1] if match is not None and len(references) == 1 else None
+
+
+def _names_internal_account(
+    transaction: Transaction, accounts: list[Account], *, description: str | None = None,
+) -> bool:
     """
     Keep explicitly named own-account transfers in review when an exact account-number match is absent.
     """
-    description = transaction.description.casefold()
+    description = (transaction.description if description is None else description).casefold()
     if "transfer" not in description:
         return False
     if "between my accounts" in description or "between own accounts" in description:

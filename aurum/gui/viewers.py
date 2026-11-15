@@ -159,7 +159,10 @@ class TransactionDetails(QWidget):
         )):
             columns = 2 if compact else 5
             column, row = index % columns, (index // columns) * 2
-            facts.addWidget(_label(label), row, column)
+            caption = _label(label)
+            facts.addWidget(caption, row, column)
+            if key == "date":
+                self.date_caption = caption
             value = _value()
             if compact and key in {"date", "effective_date"}:
                 value.setWordWrap(False)
@@ -175,7 +178,7 @@ class TransactionDetails(QWidget):
             facts.setColumnStretch(5, 1)
         source_row, source_column = (4, 0) if compact else (0, 4)
         span = 2 if compact else 1
-        facts.addWidget(_label("Statement"), source_row, source_column, 1, span)
+        facts.addWidget(_label("Source"), source_row, source_column, 1, span)
         self.source = _value()
         if not compact:
             self.source.setMaximumWidth(240)
@@ -224,8 +227,23 @@ class TransactionDetails(QWidget):
         self.fields["account"].setToolTip(
             str(record.get("account") or "") + "\nAccount ID: " + str(record.get("account_id") or "")
         )
-        self.source.setText(_statement_name(record.get("source_file")))
-        self.source.setToolTip(str(record.get("source_file") or ""))
+        evidence = record.get("bank_source") or {}
+        source_file = str(record.get("source_file") or "")
+        from_feed = source_file.casefold().startswith("redbark:") or record.get("kind") == "feed"
+        self.date_caption.setText("Booking date" if from_feed else "Statement date")
+        source_label = str(record.get("source_label") or "Redbark · ANZ Plus") if from_feed else (
+            _statement_name(source_file)
+        )
+        self.source.setText(source_label)
+        source_details = source_label
+        if evidence:
+            evidence_label = "Redbark bank evidence" if from_feed else "Corroborating Redbark evidence"
+            source_details += "\n\n" + evidence_label + "\n" + _facts(evidence)
+        self.source.setToolTip(source_details)
+        self.description.setToolTip(str(evidence.get("extended_description") or "") if from_feed else "")
+        if from_feed and evidence.get("reference") and not record.get("transfer_reference"):
+            self.fields["transfer_reference"].setText(str(evidence["reference"]))
+            self.fields["transfer_reference"].setToolTip(str(evidence["reference"]))
         self.copy_button.setToolTip(
             "Copy complete transaction facts\n" + str(record.get("transaction_id") or "")
         )
@@ -535,6 +553,8 @@ def _statement_name(value) -> str:
     Show a PDF filename while retaining the original stored stem in the underlying snapshot and copy text.
     """
     text = str(value or "")
+    if text.casefold().startswith("redbark"):
+        return "Redbark · ANZ Plus"
     return text if not text or text.lower().endswith(".pdf") else text + ".pdf"
 
 

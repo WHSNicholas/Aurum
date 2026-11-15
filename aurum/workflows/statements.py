@@ -15,6 +15,7 @@ managed replacements are atomic. Independent failures leave the remaining files 
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from contextlib import closing
 from dataclasses import dataclass, replace
+from datetime import date, timedelta
 import hashlib
 import os
 from pathlib import Path
@@ -25,9 +26,11 @@ from unicodedata import normalize
 from pdfplumber.utils.exceptions import PdfminerException
 
 # Aurum imports
+from aurum.database.bank_feeds import assert_pdf_handover
 from aurum.database.database import open_database
-from aurum.database.transactions import is_imported, save_import, save_managed_import
+from aurum.database.transactions import is_imported, load_transactions, save_import, save_managed_import
 from aurum.finance.accounts import AccountRegistry
+from aurum.finance.reports import resolve_period
 from aurum.workflows.pdf_importer import ParsedStatement, parse_anz_statement, read_anz_document_metadata
 
 
@@ -171,6 +174,17 @@ def import_statements(
                 known = is_imported(connection, source_hash)
                 prepared = (prepared_statements or {}).get(source_hash) if folder is not None else None
                 if known and prepared is None:
+                    saved_name = connection.execute(
+                        "SELECT source_file FROM imports WHERE source_hash = ?", (source_hash,),
+                    ).fetchone()[0]
+                    saved_rows = [
+                        item for item in load_transactions(connection) if item.source_file == saved_name
+                    ]
+                    for account_id in {item.account_id for item in saved_rows}:
+                        assert_pdf_handover(
+                            connection, account_id,
+                            [item for item in saved_rows if item.account_id == account_id],
+                        )
                     message = "Already imported."
                     if folder is not None:
                         message += " Select the PDF again to validate and reconcile its source filename."
@@ -180,6 +194,7 @@ def import_statements(
                     stored = path
                     statement = parse_anz_statement(path, accounts, contents=contents)
                     transactions = list(statement.transactions)
+                    assert_pdf_handover(connection, statement.account.id, transactions)
                     inserted = save_import(
                         connection, stored, source_hash, transactions,
                         cumulative_period=(statement.start_date, statement.end_date),
@@ -191,6 +206,7 @@ def import_statements(
                         else parse_anz_statement(path, accounts, contents=contents)
                     )
                     destination = statement_destination(statement, accounts, folder)
+                    assert_pdf_handover(connection, statement.account.id, list(statement.transactions))
                     previous = destination.read_bytes() if destination.exists() else None
                     staged = _stage_statement(
                         path, contents, statement, accounts, folder, protected, rename_source=False,
@@ -257,6 +273,7 @@ def statement_destination(statement: ParsedStatement, accounts: AccountRegistry,
 def statement_completion(
     month: str, accounts: AccountRegistry, folder: Path, imports: list[dict], *,
     metadata_cache: MutableMapping[str, ParsedStatement] | None = None,
+    feed_mappings: list[dict] | None = None,
 ) -> dict:
     """
     Check the current month's source PDFs for Overview without changing accounting or storing document flags.
@@ -269,8 +286,17 @@ def statement_completion(
     imported_names = {item["source_file"] for item in imports}
     awaiting_final = awaiting_import = unavailable = False
     folder = Path(folder)
+    period = resolve_period([], month=month)
     for account in accounts.accounts.values():
         if account.bank_details is None:
+            continue
+        handovers = [
+            date.fromisoformat(item["handover_date"])
+            for item in (feed_mappings or [])
+            if item["account_id"] == str(account.id)
+        ]
+        handover = min(handovers) if handovers else None
+        if handover is not None and handover <= period.start_date:
             continue
         stem = f"{month}_{_account_slug(account.key)}"
         names = [name for name in (stem, stem + "_list") if (folder / (name + ".pdf")).exists()]
@@ -294,6 +320,12 @@ def statement_completion(
                 if metadata_cache is not None:
                     metadata_cache[digest] = metadata
                 if name == stem and metadata.document_kind == "statement" and digest in known_hashes:
+                    account_final = True
+                    break
+                if (
+                    handover is not None and handover <= period.end_date and digest in known_hashes
+                    and metadata.end_date >= handover - timedelta(days=1)
+                ):
                     account_final = True
                     break
                 account_list |= metadata.document_kind == "transaction_list"

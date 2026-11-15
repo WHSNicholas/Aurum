@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 # Aurum imports
 from aurum.gui.controls import EntryTable, HeaderActionButton, PageActionRow, SearchField
 from aurum.gui.icons import icon
-from aurum.gui.viewers import DETAIL_SECTION_GAP, DETAIL_TEXT_INSET, JournalDetails, TransactionDetails
+from aurum.gui.viewers import DETAIL_SECTION_GAP, DETAIL_TEXT_INSET, JournalDetails, TransactionDetails, _aud
 
 # %% 1. Activity Tables --------------------------------------------------------------------------------------
 class ActivityPage(QWidget):
@@ -313,10 +313,10 @@ class StatementsPage(ActivityPage):
         Keep statement preparation, saved transactions and inline inspection in one monthly workspace.
         """
         super().__init__(
-            "Statements", "Import bank statements, then inspect the saved transactions.",
+            "Statements", "Sync your bank accounts or import PDFs, then inspect the transactions.",
             (
                 ("date", "Date"), ("account", "Account"), ("description", "Description"),
-                ("amount", "Amount"), ("source_file", "Statement"), ("status", "Status"),
+                ("amount", "Amount"), ("source_file", "Source"), ("status", "Status"),
             ),
             "transaction_id", parent,
         )
@@ -334,6 +334,25 @@ class StatementsPage(ActivityPage):
         self.layout.removeItem(self.toolbar)
         self.layout.removeWidget(self.splitter)
         self.layout.removeWidget(self.empty)
+
+        bank_row = QHBoxLayout()
+        bank_row.setContentsMargins(4, 0, 12, 4)
+        bank_row.setSpacing(10)
+        self.bank_sync = QPushButton("Connect bank")
+        self.bank_sync.setIcon(icon("refresh", size=18))
+        self.bank_sync.setIconSize(QSize(18, 18))
+        self.bank_sync.setAccessibleName("Connect or sync bank accounts")
+        self.bank_sync.clicked.connect(lambda: self.action_requested.emit(
+            "redbark_sync" if self.snapshot.get("bank_feed", {}).get("configured")
+            else "open_bank_settings", {},
+        ))
+        bank_row.addWidget(self.bank_sync)
+        self.bank_status = QLabel("Connect Redbark in Setup → Accounts.")
+        self.bank_status.setObjectName("workspaceHint")
+        self.bank_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.bank_status.setWordWrap(True)
+        bank_row.addWidget(self.bank_status, 1)
+        self.layout.addLayout(bank_row)
 
         queue = QFrame()
         queue.setObjectName("statementImportPanel")
@@ -458,6 +477,26 @@ class StatementsPage(ActivityPage):
         super().refresh(snapshot)
         self._refresh_error = ""
         self._statement_folder = str(snapshot.get("statement_folder") or self._statement_folder)
+        feed = snapshot.get("bank_feed", {})
+        connected = bool(feed.get("configured"))
+        self.bank_sync.setText("Sync" if connected else "Connect bank")
+        self.bank_sync.setEnabled(not self._busy)
+        mappings = [item for item in feed.get("mappings", []) if item.get("enabled")]
+        errors = [str(item["error"]) for item in mappings if item.get("error")]
+        if feed.get("connection_error"):
+            errors.insert(0, str(feed["connection_error"]))
+        checked = [str(item["last_success"]) for item in mappings if item.get("last_success")]
+        count = len(feed.get("conflicts", []))
+        self.bank_status.setText(
+            f"{count} bank import issue(s) in Review" if count else
+            "Bank sync needs attention" if errors else
+            f"{len(mappings)} account(s) connected" if connected else
+            "Connect Redbark in Setup → Accounts."
+        )
+        self.bank_status.setToolTip("\n".join(errors) if errors else (
+            "Last successful check: " + min(checked) + "\nRedbark may return cached bank activity."
+            if checked else "Sync imports bank evidence. Process creates journal entries separately."
+        ))
         reviews = {row["transaction_id"]: row for row in snapshot.get("reviews", [])}
         rows = []
         for source in snapshot.get("transactions", []):
@@ -469,7 +508,10 @@ class StatementsPage(ActivityPage):
         self._set_records(rows)
         for row, record in enumerate(self.records):
             source = str(record.get("source_file") or "")
-            self.table.item(row, 4).setText(Path(source).name if source else "")
+            self.table.item(row, 4).setText(
+                str(record.get("source_label")) if record.get("source_label")
+                else Path(source).name if source else ""
+            )
         for column, width in ((0, 112), (1, 130), (3, 100), (4, 120), (5, 145)):
             self.table.setColumnWidth(column, width)
         self._refresh_history()
@@ -492,6 +534,7 @@ class StatementsPage(ActivityPage):
         Keep read-only inspection and adding PDFs available while preventing competing queue actions.
         """
         self._busy = busy
+        self.bank_sync.setEnabled(not busy)
         self._update_queue_controls()
         self.transaction_details.set_busy(busy)
         if not busy:
@@ -926,7 +969,7 @@ class ReviewPage(ActivityPage):
         self.scope.setObjectName("reviewScope")
         self.scope.setView(QListView(self.scope))
         self.scope.setAccessibleName("Review item type")
-        for label, kind in (("All types", ""), ("Bank", "bank"), ("Manual", "manual"),
+        for label, kind in (("All types", ""), ("Bank", "bank"), ("Bank imports", "feed"), ("Manual", "manual"),
                             ("Investments", "investment")):
             self.scope.addItem(label, kind)
         self.filter = QComboBox()
@@ -1052,6 +1095,16 @@ class ReviewPage(ActivityPage):
         self.other_details.setTextFormat(Qt.TextFormat.PlainText)
         self.other_details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         other_layout.addWidget(self.other_details)
+        self.feed_candidate = QComboBox()
+        self.feed_candidate.setAccessibleName("Previously imported transaction")
+        self.feed_candidate.setView(QListView(self.feed_candidate))
+        other_layout.addWidget(self.feed_candidate)
+        self.feed_import = QPushButton("Import as a separate transaction")
+        self.feed_import.setIcon(icon("add", size=16))
+        self.feed_import.clicked.connect(lambda: self._resolve_feed("import"))
+        other_layout.addWidget(self.feed_import, 0, Qt.AlignmentFlag.AlignLeft)
+        self.feed_candidate.hide()
+        self.feed_import.hide()
         self.other_action = QPushButton()
         self.other_action.setIcon(icon("pen", size=16))
         self.other_action.clicked.connect(self._open_other)
@@ -1133,6 +1186,15 @@ class ReviewPage(ActivityPage):
                 "review_id": f"investment:{source['journal_entry_id']}:{source['line_number']}",
                 "kind": "investment", "type_label": "Investment",
             })
+        feed = snapshot.get("bank_feed", {})
+        for source in feed.get("review_conflicts", feed.get("conflicts", [])):
+            rows.append({
+                **source, "conflict_kind": source.get("kind"),
+                "review_id": f"feed:{source['id']}", "kind": "feed", "type_label": "Bank import",
+                "source_label": "Redbark · ANZ Plus",
+                "account": source.get("account_name", ""), "bank_source": source.get("payload", {}),
+                "status": "import_conflict",
+            })
         labels = {"needs_answer": "Needs answer", "ready": "Ready to process",
                   "retry": "Retry needed", "complete": "Posted"}
         for row in rows:
@@ -1148,7 +1210,7 @@ class ReviewPage(ActivityPage):
         """
         Describe the next action from saved processing states, without treating old questions as new answers.
         """
-        if record.get("kind") == "investment":
+        if record.get("kind") in {"investment", "feed"}:
             return "needs_answer"
         status = str(record.get("status", "")).casefold()
         review = str(record.get("review_status", "")).casefold()
@@ -1258,7 +1320,7 @@ class ReviewPage(ActivityPage):
         """
         raw = str(identifier)
         target = self._bank_aliases.get(raw, f"bank:{raw}")
-        return self.select_item(raw if raw.startswith(("bank:", "manual:", "investment:")) else target)
+        return self.select_item(raw if raw.startswith(("bank:", "manual:", "investment:", "feed:")) else target)
 
     def select_item(self, identifier: str) -> bool:
         """
@@ -1456,7 +1518,7 @@ class ReviewPage(ActivityPage):
         query = self.search.text().casefold().strip()
         dirty = self.has_unsaved_changes()
         selected = self.current.get(self.identity) if self.current else None
-        counts = {"bank": 0, "manual": 0, "investment": 0}
+        counts = {"bank": 0, "manual": 0, "investment": 0, "feed": 0}
         retained, selected_row = False, None
         previous_loading, self._loading = self._loading, True
         for index, record in enumerate(self.records):
@@ -1487,6 +1549,8 @@ class ReviewPage(ActivityPage):
             message = (
                 f"Bank {counts['bank']} · Manual {counts['manual']} · Investments {counts['investment']}"
             )
+            if counts["feed"]:
+                message += f" · Bank imports {counts['feed']}"
         if retained:
             message = "\n".join(filter(None, (message, "Your edited bank answer is kept visible.")))
         self.empty.setText(message)
@@ -1566,7 +1630,7 @@ class ReviewPage(ActivityPage):
             }
         if entry is not None:
             self.journal_details.update_record(entry, self.snapshot)
-        elif record.get("kind") == "bank":
+        elif record.get("kind") in {"bank", "feed"}:
             self.transaction_details.update_record(record, self.snapshot)
         else:
             self.journal_details.update_record({
@@ -1578,7 +1642,36 @@ class ReviewPage(ActivityPage):
         """
         Keep manual and investment next steps beside the same shared facts, without a second response editor.
         """
-        if record["kind"] == "manual":
+        feed = record["kind"] == "feed"
+        self.feed_candidate.setVisible(feed and record.get("conflict_kind") != "changed")
+        self.feed_import.setVisible(feed and record.get("conflict_kind") != "changed")
+        if feed:
+            changed = record.get("conflict_kind") == "changed"
+            self.question.setText("Status: " + (
+                "Redbark returned changed facts for an imported transaction." if changed else
+                "Check whether this transaction was already imported."
+            ))
+            self.feed_candidate.clear()
+            sources = {item["transaction_id"]: item for item in self.snapshot.get("transactions", [])}
+            for candidate in record.get("candidate_records") or record.get("candidates", []):
+                identifier = candidate.get("transaction_id") if isinstance(candidate, dict) else str(candidate)
+                item = candidate if isinstance(candidate, dict) else sources.get(identifier, {})
+                amount = _aud(item.get("amount"), code=False)
+                label = " · ".join((str(item.get("date") or ""), str(item.get("description") or ""), amount))
+                self.feed_candidate.addItem(label.strip(" ·") or identifier, identifier)
+            sections = [str(record.get("message") or record.get("reason") or (
+                "Your saved transaction and posted entries have not changed. Keep the saved record only "
+                "after checking the bank evidence; any accounting adjustment belongs in the journal."
+                if changed else "Link the existing record, or confirm that this is a separate transaction."
+            ))]
+            if changed:
+                for saved in record.get("candidate_records", []):
+                    amount = _aud(saved.get("amount"), code=False)
+                    sections.insert(0, "Saved record\n" + str(saved.get("date") or "") + " · "
+                                    + amount + "\n" + str(saved.get("description") or ""))
+            self.other_action.setText("Keep saved record" if changed else "Already imported")
+            self.other_action.setToolTip("Resolve this source conflict without overwriting posted entries.")
+        elif record["kind"] == "manual":
             status = record.get("question") or record.get("error") or record["status_label"]
             self.question.setText("Status: " + str(status))
             sections = []
@@ -1605,7 +1698,9 @@ class ReviewPage(ActivityPage):
         """
         if not self.current or not self.other_action.isEnabled():
             return
-        if self.current.get("kind") == "manual":
+        if self.current.get("kind") == "feed":
+            self._resolve_feed("keep" if self.current.get("conflict_kind") == "changed" else "link")
+        elif self.current.get("kind") == "manual":
             self.action_requested.emit("open_manual_editor", {
                 "manual_entry_id": self.current["manual_entry_id"],
                 "journal_entry_id": self.current.get("journal_entry_id") or None,
@@ -1616,6 +1711,20 @@ class ReviewPage(ActivityPage):
                 "journal_entry_id": self.current["journal_entry_id"],
                 "line_number": self.current["line_number"],
             })
+
+    def _resolve_feed(self, action: str) -> None:
+        """
+        Submit an explicit source reconciliation using the exact conflict revision shown to the user.
+        """
+        if not self.current or self.current.get("kind") != "feed" or self._busy:
+            return
+        identifier = self.feed_candidate.currentData() if action == "link" else None
+        if action == "link" and not identifier:
+            return
+        self.action_requested.emit("redbark_resolve", {
+            "id": self.current["id"], "revision": self.current["revision"],
+            "action": action, "transaction_id": identifier,
+        })
 
     def _pending_answer(self) -> bool:
         """
@@ -1669,6 +1778,8 @@ class ReviewPage(ActivityPage):
         self.direct_button.setEnabled(bank and available and not blocked)
         self.other_action.setVisible(bool(self.current) and not bank)
         self.other_action.setEnabled(bool(self.current) and not bank and available)
+        self.feed_candidate.setEnabled(available)
+        self.feed_import.setEnabled(available)
         self.footer.setVisible(bank or dirty)
         self.process_button.setEnabled(ready and not self._busy)
         self.process_button.setText("Processing…" if self._busy and self._processing else "Process")
