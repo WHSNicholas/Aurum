@@ -65,7 +65,7 @@ _LEGACY_ROLES = {colour: role for role, colours in _COLOUR_ROLES.items() for col
 # %% 1. Saved Theme Resolution -------------------------------------------------------------------------------
 def resolve_gui_theme(settings: ReportSettings) -> dict[str, str]:
     """
-    Derive serialisable GUI roles from the same selected appearance used by the PDF renderer.
+    Derive quiet desktop surfaces and clear controls from the selected report palette.
 
     This calculation is safe in a read-only workspace worker. Fixed themes ignore the shared mode switch,
     while budget charts keep their blue/red/green meanings independently of report palette overrides.
@@ -73,51 +73,66 @@ def resolve_gui_theme(settings: ReportSettings) -> dict[str, str]:
     theme, colours = settings.theme, settings.mode_colours
     if theme.fixed is not None:
         page, surface = theme.fixed.page, theme.fixed.surface
-        divider, group = theme.fixed.divider, theme.fixed.group
+        group = theme.fixed.group
     else:
         page = theme.dark_page if settings.dark_mode else theme.light_page
         surface = theme.dark_surface if settings.dark_mode else theme.light_surface
-        divider = theme.dark_divider if settings.dark_mode else theme.light_divider
         group = theme.dark_group if settings.dark_mode else theme.light_group
     if settings.colour_scheme == "sunset_hues":
-        # Desktop panels use the dusty rose palette shade; PDF group fills keep their saved colour.
+        # Dusty rose supplies desktop tints; the report's pale-yellow group fill stays in PDFs.
         group = theme.palette[min(3, len(theme.palette) - 1)]
     primary = theme.primary or theme.palette[0]
-    accent = theme.highlight or theme.palette[1]
-    table_header = theme.table_header or theme.palette[2]
     dark = _luminance(page) < 0.18
-    panel = _composite(group, surface) if group else _mix(surface, primary, 0.12 if dark else 0.07)
-    text = _readable(colours.text, (page, surface, panel))
-    muted = _readable(colours.muted, (page, surface, panel))
-    heading = _readable(colours.heading_text or primary, (page, surface, panel))
-    selected = _mix(surface, accent, 0.28 if dark else 0.18)
+    # Report fills carry large printed groups. Desktop surfaces need quieter, repeated working areas.
+    surface = _mix(page, surface, 0.32) if dark else _mix("#ffffff", surface, 0.22)
+    page = page if dark else _mix("#ffffff", page, 0.24)
+    tint = _composite(group, surface) if group else primary
+    panel = _mix(surface, tint, 0.20 if dark else 0.18)
+    table_header = _mix(surface, primary, 0.16 if dark else 0.07)
+    selected = _mix(surface, theme.highlight or primary, 0.26 if dark else 0.18)
+    hover = _mix(surface, theme.highlight or primary, 0.12 if dark else 0.07)
+    focus = _mix(surface, theme.highlight or primary, 0.32 if dark else 0.23)
+    backgrounds = (page, surface, panel, table_header, hover, selected, focus)
+    text = _readable(colours.text, backgrounds)
+    muted = _readable(colours.muted, backgrounds)
+    heading = _readable(colours.heading_text or primary, backgrounds)
+    accent = primary
+    on_accent = _readable(colours.on_primary, (accent,))
+    accent_hover = _interaction_surface(accent, on_accent, 0.10)
+    accent_focus = _interaction_surface(accent, on_accent, 0.20)
     sidebar = primary
     sidebar_text = _readable(colours.on_primary, (sidebar,))
-    warning_bg = colours.draft_bg
+    sidebar_hover = _interaction_surface(sidebar, sidebar_text, 0.08)
+    sidebar_selected = _interaction_surface(sidebar, sidebar_text, 0.16)
+    warning_bg = _mix(surface, tint, 0.36) if settings.colour_scheme == "sunset_hues" else (
+        _mix(surface, colours.draft_border, 0.22) if dark else _mix(surface, colours.draft_bg, 0.55)
+    )
     roles = {
         "name": settings.colour_scheme, "dark": "true" if dark else "false",
         "page": page, "surface": surface, "panel": panel, "text": text, "muted": muted,
-        "heading": heading, "icon": _readable(colours.icon or heading, (page, surface, panel)),
-        "accent": accent, "on_accent": _readable(colours.on_highlight, (accent,)),
-        "accent_hover": _mix(accent, "#ffffff" if dark else "#000000", 0.12),
+        "heading": heading, "icon": _readable(colours.icon or heading, backgrounds),
+        "accent": accent, "on_accent": on_accent,
+        "accent_hover": accent_hover, "accent_focus": accent_focus,
         "accent_disabled": _mix(surface, accent, 0.45),
-        "border": divider, "hover": _mix(surface, accent, 0.14),
+        "border": _mix(surface, text, 0.18 if dark else 0.14),
+        "control_border": _readable(_mix(surface, text, 0.28), (surface,), minimum=3),
+        "hover": hover, "focus": focus,
         "selected": selected, "on_selected": _readable(text, (selected,)),
-        "alternate": _mix(surface, primary, 0.04),
+        "alternate": _mix(surface, primary, 0.025),
         "sidebar": sidebar, "sidebar_text": sidebar_text,
         "sidebar_muted": _readable(_mix(sidebar_text, sidebar, 0.25), (sidebar,)),
-        "sidebar_hover": _mix(sidebar, sidebar_text, 0.10),
-        "sidebar_selected": _mix(sidebar, sidebar_text, 0.18),
+        "sidebar_hover": sidebar_hover, "sidebar_selected": sidebar_selected,
         "table_header": table_header,
-        "on_table_header": _readable(colours.on_table_header, (table_header,)),
+        "on_table_header": _readable(muted, (table_header,)),
         "disabled": _mix(text, surface, 0.52), "disabled_bg": _mix(surface, page, 0.55),
         "scroll": _mix(surface, text, 0.25), "scroll_hover": _mix(surface, text, 0.45),
         "positive": _readable(colours.positive, (page, surface)),
         "negative": _readable(colours.negative, (page, surface)),
         "success_bg": _mix(surface, colours.positive, 0.15),
         "danger_bg": _mix(surface, colours.negative, 0.15),
-        "warning_bg": warning_bg, "warning_text": _readable(colours.draft_text, (warning_bg, page)),
-        "warning_border": colours.draft_border,
+        "warning_bg": warning_bg,
+        "warning_text": _readable(colours.draft_text, (warning_bg, page, surface)),
+        "warning_border": _mix(warning_bg, colours.draft_border, 0.35),
         "budget_income": BUDGET_COLOURS["income"], "budget_expenses": BUDGET_COLOURS["expense"],
         "budget_savings": BUDGET_COLOURS["savings"],
     }
@@ -347,12 +362,24 @@ def _style_colour(selector: str, declaration: str, colour: str, theme: dict[str,
     if "QHeaderView" in selector:
         role = "on_table_header" if foreground else "border" if "border" in declaration else "table_header"
         return theme[role]
-    primary = 'primary="true"' in selector or selector.strip() == "QTabBar::tab:selected" or (
+    filled_tab = "QTabBar" in selector and "::tab:selected" in selector and not any(
+        name in selector for name in (
+            "#setupTabs", "#statementTabs", "#manualTabs", "#caseTabs", "#reportsTabs",
+        )
+    )
+    primary = 'primary="true"' in selector or filled_tab or (
         "QCheckBox::indicator:checked" in selector
     )
     if primary:
         return theme["on_accent" if foreground else "accent_disabled" if ":disabled" in selector else
-                     "accent_hover" if ":hover" in selector or ":focus" in selector else "accent"]
+                     "accent_focus" if ":focus" in selector else "accent_hover" if ":hover" in selector
+                     else "accent"]
+    if not foreground and ":focus" in selector:
+        return theme["icon" if "border" in declaration else "focus"]
+    if "border" in declaration and any(name in selector for name in (
+        "QLineEdit", "QPlainTextEdit", "QTextEdit", "QDateEdit", "QSpinBox", "QDoubleSpinBox",
+    )) and ":disabled" not in selector:
+        return theme["control_border"]
     key = colour.lower()
     if key in {"white", "#ffffff"}:
         return theme["text" if foreground else "surface"]
@@ -427,17 +454,28 @@ def _contrast(first: str, second: str) -> float:
     return (max(a, b) + .05) / (min(a, b) + .05)
 
 
-def _readable(colour: str, backgrounds: tuple[str, ...]) -> str:
+def _interaction_surface(surface: str, foreground: str, weight: float) -> str:
     """
-    Retain configured text where readable, otherwise move its shade toward the better neutral endpoint.
+    Highlight a control without reducing the foreground's contrast below readable body text.
     """
-    if min(_contrast(colour, background) for background in backgrounds) >= 4.5:
+    candidate = _mix(surface, foreground, weight)
+    if _contrast(candidate, foreground) >= 4.5:
+        return candidate
+    endpoint = "#000000" if _luminance(foreground) > 0.5 else "#ffffff"
+    return _mix(surface, endpoint, weight)
+
+
+def _readable(colour: str, backgrounds: tuple[str, ...], *, minimum: float = 4.5) -> str:
+    """
+    Retain a configured shade when its contrast is sufficient, otherwise move toward the better endpoint.
+    """
+    if min(_contrast(colour, background) for background in backgrounds) >= minimum:
         return colour
     target = max(("#ffffff", "#000000"), key=lambda value: min(
         _contrast(value, background) for background in backgrounds
     ))
     for step in range(1, 21):
         candidate = _mix(colour, target, step / 20)
-        if min(_contrast(candidate, background) for background in backgrounds) >= 4.5:
+        if min(_contrast(candidate, background) for background in backgrounds) >= minimum:
             return candidate
     return target

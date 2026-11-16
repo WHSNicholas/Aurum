@@ -103,11 +103,14 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Provisional and name affected holdings in its tooltip. Whole-account cost questions do not make their
   recorded values provisional. Preserve budget exclusions and signed refunds; incomplete budget targets
   must not block these actuals.
-  Label the first card Net Worth. Keep its cutoff date and Savings' Income less expenses caption. Income
-  and Expenses show their included transaction counts: each posted journal event counts once per side,
+  Lead the shared financial summary with Net Worth. Keep its cutoff date and Savings' Income less expenses
+  caption. Income and Expenses show their included transaction counts: each posted journal event counts once per side,
   including manual events, gifts and signed refunds, without multiplying split postings. Use the same
   budget inclusions and reporting cutoff as their totals. Omit explanatory paragraphs beneath the cards.
-  Centre the financial cards' contents. Format Overview money and transaction counts
+  Centre the prominent Net Worth amount beside three compact monthly rows, with labels and transaction
+  counts on the left and amounts on the right. Use one shared financial surface, with quiet separators
+  instead of four equally weighted cards. Stack the two groups when the content area is narrow.
+  Format Overview money and transaction counts
   with narrow no-break spaces (U+202F) for thousands, retaining dollar signs, cents and negative signs.
   Omit the Overview header's Updated timestamp; refresh activity stays in its existing spinner and status.
   Use local replaceable Solar Bold SVG icons and a Sources → Journal → Review → Reports flow titled Workflow.
@@ -122,6 +125,8 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   saved-activity caveat. Counts still reflect saved activity, not proof all expected statements were supplied.
   Distinguish queued answers from questions/retries and include investment classifications affecting reports.
   Keep next-step guidance informational; use sidebar navigation instead of Overview action/link sections.
+  Place next-step guidance within Workflow beneath its four stages, without a separate eyebrow label or
+  competing coloured panel. Completion retains the theme's primary colour and explicit All done text.
   Complete the Reports stage and show All done when Sources, Journal and Review are complete and all four
   expected report PDFs exist in the configured output directory's selected reporting-month folder.
   Check saved files on refresh so this works after reopening the app. Missing PDFs or an incomplete earlier
@@ -184,10 +189,13 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   accounts have fixed names, types and role mappings in Setup; retain existing legacy values without renaming.
   The theme card exposes Light/Dark only for themes with adjustable appearance. Keep detailed palette definitions
   out of the GUI, preserving existing custom settings.
-  GUI appearance follows the saved report theme on a successful workspace refresh, including fixed-theme
-  backgrounds and independent colours. Keep it scoped to each workspace window; retain the current appearance
+  GUI appearance follows the saved report theme on a successful workspace refresh, deriving quieter canvas,
+  panel and table surfaces from the palette while retaining fixed light/dark appearance and sidebar identity.
+  Report colours remain unchanged. Keep it scoped to each workspace window; retain the current appearance
   on invalid or failed refreshes. Unsaved theme choices do not change the GUI. Adapt controls, popups, icons
   and selections for contrast while preserving budget and positive/negative meanings.
+  Use the primary theme colour for consequential actions, clear filled selections for tabs and controls,
+  and restrained table headers. Activity tables use horizontal row separators without vertical grids.
   Sunset Hues uses its fourth palette shade (dusty rose) for GUI panels instead of the pale-yellow report
   group fill. Keep this desktop override out of report configuration and PDF rendering.
   Assign each asset account through one

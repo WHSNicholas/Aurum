@@ -159,8 +159,12 @@ Overview reads posted accounting only:
 Amounts use small spaces for thousands. Pending work is not included, and incomplete budget targets do not
 block actual figures.
 
+The financial summary gives Net Worth prominence beside compact Income, Expenses and Savings rows.
+These groups stack in narrower views; the figures and reporting cutoff stay the same.
+
 **Workflow** shows Sources → Journal → Review → Reports. Completed stages retain their icons and gain a
-highlighted background and tick. **Next step** explains the remaining work; use the sidebar to navigate.
+highlighted background and tick. Guidance below the stages explains the remaining work; use the sidebar
+to navigate.
 
 **All done** requires the earlier steps to be complete and all four report PDFs to exist for the selected month.
 While only transaction lists are available, the completed workflow shows **Up to date** instead.

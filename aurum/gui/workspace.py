@@ -39,7 +39,7 @@ class OverviewPage(QWidget):
 
     def __init__(self, parent=None) -> None:
         """
-        Arrange owner metadata, financial cards and a connected monthly workflow.
+        Lead with financial position, then group monthly cash flow and the work still to finish.
         """
         super().__init__(parent)
         self._metric_columns = 0
@@ -78,8 +78,19 @@ class OverviewPage(QWidget):
         header.addLayout(identity)
         layout.insertLayout(0, header)
 
-        self.metrics = QGridLayout()
-        self.metrics.setSpacing(12)
+        self.financials = QFrame()
+        self.financials.setObjectName("overviewFinancials")
+        self.metrics = QGridLayout(self.financials)
+        self.metrics.setContentsMargins(24, 24, 24, 24)
+        self.metrics.setHorizontalSpacing(24)
+        self.metrics.setVerticalSpacing(20)
+        self.monthly = QFrame()
+        self.monthly.setObjectName("overviewMonthly")
+        monthly_layout = QVBoxLayout(self.monthly)
+        monthly_layout.setContentsMargins(0, 0, 0, 0)
+        monthly_layout.setSpacing(0)
+        self.financial_divider = QFrame()
+        self.financial_divider.setObjectName("overviewFinancialDivider")
         self.cards, self.values, self.captions = [], {}, {}
         for key, name, symbol, caption in (
             ("net_worth", "Net Worth", "wallet", "Assets less liabilities"),
@@ -88,44 +99,61 @@ class OverviewPage(QWidget):
             ("savings", "Savings", "savings", "Income less expenses"),
         ):
             frame = QFrame()
-            frame.setObjectName("overviewMetric")
-            box = QVBoxLayout(frame)
-            box.setContentsMargins(18, 12, 18, 12)
-            box.setSpacing(7)
-            top = QHBoxLayout()
-            top.addStretch()
-            top.addWidget(self._symbol(symbol, 23))
-            top.addStretch()
-            box.addLayout(top)
+            position = key == "net_worth"
+            frame.setObjectName("overviewNetWorth" if position else "overviewMetric")
+            frame.setProperty("separator", key in {"income", "expenses"})
             label = QLabel(name)
             label.setObjectName("overviewMetricLabel")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            box.addWidget(label)
             value = QLabel("—")
-            value.setObjectName("overviewValue")
-            value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            value.setObjectName("overviewNetWorthValue" if position else "overviewValue")
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            box.addWidget(value)
             detail = QLabel(caption)
             detail.setObjectName("overviewCaption")
-            detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
             detail.setWordWrap(True)
             detail.setVisible(bool(caption))
             if key in {"income", "expenses"}:
                 detail.setToolTip(
                     f"Transactions included in this month's {name.lower()}. Split postings count once."
                 )
-            box.addWidget(detail)
-            box.addStretch()
+            if position:
+                box = QVBoxLayout(frame)
+                box.setContentsMargins(0, 12, 0, 12)
+                box.setSpacing(12)
+                box.addStretch()
+                top = QHBoxLayout()
+                top.setSpacing(8)
+                top.addStretch()
+                top.addWidget(self._symbol(symbol, 22))
+                top.addWidget(label)
+                top.addStretch()
+                box.addLayout(top)
+                value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                box.addWidget(value)
+                box.addWidget(detail)
+                box.addStretch()
+            else:
+                box = QHBoxLayout(frame)
+                box.setContentsMargins(0, 12, 0, 12)
+                box.setSpacing(12)
+                box.addWidget(self._symbol(symbol, 22))
+                description = QVBoxLayout()
+                description.setSpacing(3)
+                description.addWidget(label)
+                description.addWidget(detail)
+                box.addLayout(description, 1)
+                value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                box.addWidget(value)
+                monthly_layout.addWidget(frame)
             self.cards.append(frame)
             self.values[key], self.captions[key] = value, detail
-        self._arrange_metrics(4)
-        body.addLayout(self.metrics)
+        self._arrange_metrics(2)
+        body.addWidget(self.financials)
 
         process = QFrame()
         process.setObjectName("overviewProcess")
         process_layout = QVBoxLayout(process)
-        process_layout.setContentsMargins(20, 18, 20, 20)
+        process_layout.setContentsMargins(20, 20, 20, 20)
         process_layout.setSpacing(16)
         process_heading = QHBoxLayout()
         label = QLabel("Workflow")
@@ -134,6 +162,8 @@ class OverviewPage(QWidget):
         process_heading.addStretch()
         self.process_status = QLabel("Waiting for workspace")
         self.process_status.setObjectName("overviewCaption")
+        self.process_status.setWordWrap(True)
+        self.process_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         process_heading.addWidget(self.process_status)
         process_layout.addLayout(process_heading)
         flow = QHBoxLayout()
@@ -148,8 +178,8 @@ class OverviewPage(QWidget):
             frame = QFrame()
             frame.setObjectName("overviewStage")
             stage = QVBoxLayout(frame)
-            stage.setContentsMargins(12, 13, 12, 13)
-            stage.setSpacing(9)
+            stage.setContentsMargins(12, 12, 12, 12)
+            stage.setSpacing(6)
             top = QHBoxLayout()
             emblem = self._symbol(symbol, 23)
             top.addWidget(emblem)
@@ -162,6 +192,7 @@ class OverviewPage(QWidget):
             stage.addLayout(top)
             title = QLabel(f"{number} · {name}")
             title.setObjectName("overviewStageTitle")
+            title.setWordWrap(True)
             stage.addWidget(title)
             value = QLabel("—")
             value.setObjectName("overviewStageValue")
@@ -180,30 +211,27 @@ class OverviewPage(QWidget):
         self.scope.setWordWrap(True)
         self.scope.hide()
         process_layout.addWidget(self.scope)
-        body.addWidget(process)
-
         self.next_panel = QFrame()
         self.next_panel.setObjectName("overviewNext")
         hero_layout = QHBoxLayout(self.next_panel)
-        hero_layout.setContentsMargins(20, 18, 20, 18)
+        hero_layout.setContentsMargins(16, 16, 16, 12)
         hero_layout.setSpacing(14)
-        self.next_icon = self._symbol("clock", 26)
+        self.next_icon = self._symbol("clock", 22)
         hero_layout.addWidget(self.next_icon, 0, Qt.AlignmentFlag.AlignTop)
         text = QVBoxLayout()
         text.setSpacing(6)
-        self.next_eyebrow = QLabel("NEXT STEP")
-        self.next_eyebrow.setObjectName("overviewEyebrow")
-        text.addWidget(self.next_eyebrow)
         self.next_title = QLabel("Your month at a glance")
         self.next_title.setObjectName("overviewNextTitle")
         self.next_title.setWordWrap(True)
         text.addWidget(self.next_title)
         self.next_detail = QLabel("Saved activity will appear here.")
+        self.next_detail.setObjectName("overviewNextDetail")
         self.next_detail.setWordWrap(True)
         self.next_detail.setTextFormat(Qt.TextFormat.PlainText)
         text.addWidget(self.next_detail)
         hero_layout.addLayout(text, 1)
-        body.addWidget(self.next_panel)
+        process_layout.addWidget(self.next_panel)
+        body.addWidget(process)
 
         self.other_work = QLabel("")
         self.other_work.setObjectName("overviewCaption")
@@ -359,7 +387,7 @@ class OverviewPage(QWidget):
             if investment_error and questions else
             "Investment review could not load" if investment_error else
             _overview_count(feed_conflicts, "bank import issue") if feed_conflicts else
-            f"{questions} questions · {work['investment']} investment"
+            _overview_count(questions, "question") + f" · {work['investment']} investment"
             if questions or work["investment"] else "Check again after processing" if queued or failed
             else "No outstanding questions",
         )
@@ -419,7 +447,7 @@ class OverviewPage(QWidget):
         if active:
             title, detail, _ = active[0]
             self.next_title.setText(title)
-            self.next_detail.setText(detail + " The figures above reflect posted entries only.")
+            self.next_detail.setText(detail)
             self.other_work.setText("Also waiting: " + " · ".join(task[0] for task in active[1:]))
             self.other_work.setVisible(len(active) > 1)
         elif reports_complete and snapshot.get("statement_completion", {}).get("pending"):
@@ -461,23 +489,31 @@ class OverviewPage(QWidget):
 
     def resizeEvent(self, event) -> None:
         """
-        Keep financial values readable by using two columns in narrower windows.
+        Keep position and monthly activity together, stacking them only in narrow content areas.
         """
         super().resizeEvent(event)
-        self._arrange_metrics(2 if self.width() < 880 else 4)
+        self._arrange_metrics(1 if self.width() < 700 else 2)
 
     def _arrange_metrics(self, columns: int) -> None:
         """
-        Reflow the existing cards without rebuilding their values or interactions.
+        Reflow the two financial groups without rebuilding values or changing their accounting.
         """
         if columns == self._metric_columns:
             return
-        for frame in self.cards:
-            self.metrics.removeWidget(frame)
-        for index, frame in enumerate(self.cards):
-            self.metrics.addWidget(frame, index // columns, index % columns)
-        for index in range(4):
-            self.metrics.setColumnStretch(index, 1 if index < columns else 0)
+        for widget in (self.cards[0], self.financial_divider, self.monthly):
+            self.metrics.removeWidget(widget)
+        self.metrics.addWidget(self.cards[0], 0, 0)
+        if columns == 2:
+            self.financial_divider.setFixedSize(1, 160)
+            self.metrics.addWidget(self.financial_divider, 0, 1, Qt.AlignmentFlag.AlignVCenter)
+            self.metrics.addWidget(self.monthly, 0, 2)
+        else:
+            self.financial_divider.setMinimumSize(0, 1)
+            self.financial_divider.setMaximumSize(16777215, 1)
+            self.metrics.addWidget(self.financial_divider, 1, 0)
+            self.metrics.addWidget(self.monthly, 2, 0)
+        for index in range(3):
+            self.metrics.setColumnStretch(index, 1 if index == 0 or index == 2 and columns == 2 else 0)
         self._metric_columns = columns
 
     def _set_stage(self, key: str, tone: str, state: str, value: str, detail: str) -> None:
@@ -514,12 +550,11 @@ class OverviewPage(QWidget):
         for widget in (self.next_panel, *self.next_panel.findChildren(QLabel)):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
-        self.next_eyebrow.setText("MONTH COMPLETE" if complete else "NEXT STEP")
         role = "sidebar_text" if complete else "icon"
         colour = gui_colour(self, role, "#ffffff" if complete else "#2e6a61")
         self.next_icon.setProperty("aurumIconRole", role)
         self.next_icon.setPixmap(
-            icon("check" if complete else "clock", colour, 26).pixmap(26, 26)
+            icon("check" if complete else "clock", colour, 22).pixmap(22, 22)
         )
 
     @staticmethod

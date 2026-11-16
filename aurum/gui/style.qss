@@ -61,7 +61,7 @@ QPushButton:disabled, QToolButton:disabled { color: #9baaa6; border-color: #dde5
 QPushButton[primary="true"] { background: #2e6a61; color: white; border-color: #2e6a61; }
 QPushButton[headerAction="true"] { padding: 6px 13px; }
 QLabel#tableEmptyState { background: transparent; color: #637a78; font-weight: normal; }
-QPushButton[primary="true"]:hover { background: #24594f; }
+QPushButton[primary="true"]:hover, QToolButton[primary="true"]:hover { background: #24594f; }
 QPushButton[primary="true"]:focus, QToolButton[primary="true"]:focus { background: #24594f; }
 QPushButton[primary="true"]:disabled { background: #a6beb6; border-color: #a6beb6; }
 QPushButton#step { text-align: left; padding: 15px; background: white; }
@@ -125,13 +125,19 @@ QTableWidget::item { padding: 7px 5px; }
 QHeaderView::section {
     background: #e0ebe5;
     border: none;
-    border-right: 1px solid #d0ddd5;
+    border-bottom: 1px solid #d0ddd5;
     padding: 8px;
     color: #365850;
+    font-size: 11px;
     font-weight: 600;
 }
+QTableWidget[ledgerTable="true"] { border: none; border-radius: 12px; }
+QTableWidget[ledgerTable="true"]::item { border: none; border-bottom: 1px solid #d7e1dc; padding: 7px 8px; }
+QTableWidget[ledgerTable="true"]::item:hover { background: #eaf2ee; }
+QTableWidget[ledgerTable="true"]::item:selected { background: #d6e6df; color: #243b3b; }
+QTableWidget[ledgerTable="true"]::item:selected:hover { background: #d6e6df; color: #243b3b; }
 QTabWidget::pane { border: 1px solid #d4e0d9; background: #f5f7f6; border-radius: 6px; }
-QTabBar::tab { padding: 10px 18px; background: #e6ede9; margin-right: 3px; }
+QTabBar::tab { padding: 10px 18px; background: transparent; margin-right: 3px; }
 QTabBar::tab:selected { background: #2e6a61; color: white; }
 QScrollArea { border: none; background: transparent; }
 QGroupBox {
@@ -161,26 +167,30 @@ QToolButton#monthArrow:focus, QToolButton#workspaceRefresh:focus { background: #
 QFrame#sidebar QToolButton#workspaceRefresh:hover,
 QFrame#sidebar QToolButton#workspaceRefresh:focus { background: #275251; }
 QFrame#sidebar QToolButton#workspaceRefresh:pressed { background: #32605e; }
-QFrame#overviewNext { background: #e3eeea; border: none; border-radius: 10px; }
-QFrame#overviewNext[complete="true"] { background: #183f42; }
+QFrame#overviewNext { background: transparent; border: none; border-top: 1px solid #d7e1dc; }
+QFrame#overviewNext[complete="true"] { background: #183f42; border: none; border-radius: 12px; }
 QFrame#overviewNext QLabel { background: transparent; }
 QFrame#overviewNext[complete="true"] QLabel { color: white; }
 QLabel#overviewEyebrow { font-size: 10px; font-weight: 600; color: #4d7069; }
-QLabel#overviewNextTitle { font-size: 19px; font-weight: 600; color: #204e48; }
+QLabel#overviewNextTitle { font-size: 17px; font-weight: 600; color: #204e48; }
 QLabel#overviewOwner { font-size: 15px; font-weight: 500; color: #47665d; }
-QFrame#overviewMetric { background: white; border: none; border-radius: 10px; }
-QFrame#overviewMetric QLabel { background: transparent; }
-QLabel#overviewMetricLabel { font-size: 12px; color: #536f64; }
-QLabel#overviewValue { font-family: "Geist Mono"; font-size: 24px; font-weight: 500; color: #235b58; }
+QFrame#overviewFinancials { background: white; border: none; border-radius: 16px; }
+QFrame#overviewNetWorth, QFrame#overviewMonthly, QFrame#overviewMetric { background: transparent; border: none; }
+QFrame#overviewMetric[separator="true"] { border-bottom: 1px solid #d7e1dc; }
+QFrame#overviewFinancials QLabel { background: transparent; }
+QFrame#overviewFinancialDivider { background: #d7e1dc; border: none; }
+QLabel#overviewMetricLabel { font-size: 13px; font-weight: 500; color: #536f64; }
+QLabel#overviewNetWorthValue { font-family: "Geist"; font-size: 44px; font-weight: 500; color: #235b58; }
+QLabel#overviewValue { font-family: "Geist"; font-size: 24px; font-weight: 500; color: #235b58; }
 QLabel#overviewCaption { font-size: 11px; color: #637a78; }
 QLabel#overviewSection { font-size: 16px; font-weight: 600; }
-QFrame#overviewProcess { background: white; border: none; border-radius: 10px; }
+QFrame#overviewProcess { background: white; border: none; border-radius: 16px; }
 QFrame#overviewProcess QLabel { background: transparent; }
-QFrame#overviewStage { background: #f0f4f1; border: 1px solid transparent; border-radius: 8px; }
+QFrame#overviewStage { background: transparent; border: none; border-radius: 12px; }
 QFrame#overviewStage[tone="done"] { background: #183f42; }
 QFrame#overviewStage[tone="done"] QLabel { color: white; }
-QFrame#overviewStage[tone="active"] { background: #eaf2ee; border-color: #7da597; }
-QFrame#overviewStage[tone="attention"] { background: #faf1df; border-color: #e3ce9e; }
+QFrame#overviewStage[tone="active"] { background: #eaf2ee; }
+QFrame#overviewStage[tone="attention"] { background: #faf1df; }
 QLabel#overviewStageTitle { font-size: 13px; font-weight: 600; }
 QLabel#overviewStageValue { font-size: 13px; font-weight: 500; }
 QLabel#overviewIcon { background: transparent; }
@@ -305,9 +315,10 @@ QLineEdit#catalogueBankField[emptyBankDetails="true"]:focus { background: white;
 QLabel#catalogueGroup { color: #587469; background: transparent; font-size: 11px; font-weight: 600; }
 QTabWidget#reportSettingsTabs::pane { border: none; background: transparent; }
 QTabWidget#reportSettingsTabs QTabBar::tab {
-    background: #e9efeb; border: none; border-radius: 7px; padding: 8px 13px; margin-right: 6px;
+    background: transparent; border: none; border-radius: 8px; padding: 8px 13px; margin-right: 6px;
 }
-QTabWidget#reportSettingsTabs QTabBar::tab:selected { background: #d4e7dc; color: #204e48; }
+QTabWidget#reportSettingsTabs QTabBar::tab:hover { background: #eaf2ee; }
+QTabWidget#reportSettingsTabs QTabBar::tab:selected { background: #2e6a61; color: white; }
 QListWidget#reportAccountChecklist { padding: 4px; border-radius: 8px; }
 QListWidget#reportAccountChecklist::item { padding: 8px; border-radius: 5px; }
 QPushButton#reportManageGroups {
@@ -361,11 +372,11 @@ QToolButton#manualIconAction::menu-indicator { image: none; width: 0; }
 QToolButton#manualDisclosure { border: none; background: transparent; padding: 6px 0; }
 QToolButton#manualDisclosure:hover { color: #2e6a61; }
 QTabBar#manualEntryModes::tab {
-    background: #e6ede9; color: #41655d; border: none; border-radius: 8px;
+    background: transparent; color: #41655d; border: none; border-radius: 8px;
     margin-right: 5px; padding: 9px 18px;
 }
-QTabBar#manualEntryModes::tab:selected { background: #d0e4da; color: #204e48; }
 QTabBar#manualEntryModes::tab:hover { background: #dcebe3; }
+QTabBar#manualEntryModes::tab:selected { background: #2e6a61; color: white; }
 QTabBar#manualEntryModes::tab:disabled { color: #9ba8a1; background: #edf1ef; }
 QPlainTextEdit#manualOutcomePreview { background: transparent; border: none; padding: 0; }
 QMenu { background: white; border: none; border-radius: 12px; padding: 6px; }
