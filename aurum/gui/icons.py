@@ -22,7 +22,7 @@ ICON_NAMES = (
     "home", "settings", "chat", "document", "checklist", "pen", "ledger", "chart", "wallet", "cash",
     "arrow_down_left", "arrow_up_right", "vault", "import", "process", "refresh", "chevron_left",
     "chevron_right", "folder", "person", "check", "error", "clock", "details", "add", "remove",
-    "save", "login", "copy", "chevron_up", "chevron_down", "search", "close", "fit",
+    "save", "login", "copy", "chevron_up", "chevron_down", "search", "close", "fit", "stop",
 )
 # Switch to "outline" and restart Aurum to restore the unchanged original icons.
 ICON_SET = "solar_bold"
@@ -55,7 +55,8 @@ def icon_path(name: str) -> Path:
         raise ValueError(f"Unknown desktop icon: {name}")
     if ICON_SET not in _ICON_FOLDERS:
         raise ValueError(f"Unknown desktop icon set: {ICON_SET}")
-    folder = "ui" if name in _DISCLOSURE_ICONS else _ICON_FOLDERS[ICON_SET]
+    # The stop square is an original Aurum asset shared by both icon sets.
+    folder = "ui" if name in _DISCLOSURE_ICONS or name == "stop" else _ICON_FOLDERS[ICON_SET]
     return _ICON_ROOT / folder / f"{name}.svg"
 
 
@@ -162,14 +163,14 @@ class RefreshButton(QToolButton):
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._advance)
 
-    def set_loading(self, loading: bool) -> None:
+    def set_loading(self, loading: bool, *, activity: str = "Refreshing workspace") -> None:
         """
         Update the activity indicator while preserving the caller's enabled or disabled state.
         """
         self._loading = bool(loading)
-        self.setToolTip("Refreshing workspace…" if self._loading else "Refresh workspace")
+        self.setToolTip(activity if self._loading else "Refresh workspace")
         self.setAccessibleDescription(
-            "The workspace is refreshing." if self._loading
+            activity if self._loading
             else "Reload the workspace without changing saved data."
         )
         if not self._loading:

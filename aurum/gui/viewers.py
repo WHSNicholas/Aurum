@@ -8,19 +8,21 @@ Inspect statement facts and journal events inline, with separate explicit editin
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
+from collections.abc import Callable
 from copy import deepcopy
 from decimal import Decimal
 import json
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
     QPlainTextEdit, QSizePolicy, QTableWidget, QTableWidgetItem, QToolButton,
     QVBoxLayout, QWidget,
 )
 
 # Aurum imports
 from aurum.gui.icons import icon
+from aurum.gui.theme import gui_colour, monetary_font
 
 DETAIL_TEXT_INSET = 24
 DETAIL_SECTION_GAP = 18
@@ -61,7 +63,7 @@ class _RecordPanel(QWidget):
 
     def set_busy(self, busy: bool) -> None:
         """
-        Keep inspection and copying available while a worker temporarily blocks further actions.
+        Keep inspection available while a worker temporarily blocks further actions.
         """
         self._busy = busy
         self._update_actions()
@@ -117,6 +119,9 @@ class TransactionDetails(QWidget):
         self.record, self.snapshot = {}, {}
         self._busy = self._stale = False
         self._compact = compact
+        self._header_callback = None
+        self._header_enabled = False
+        self._show_actions = False
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(14, 12, 14, 12)
         self.layout.setSpacing(8)
@@ -130,9 +135,10 @@ class TransactionDetails(QWidget):
         self.status = _value("", "viewerStatus")
         summary.addWidget(self.status)
         summary.addStretch()
-        self.copy_button = _icon_button("Copy complete transaction facts", "copy")
-        self.copy_button.clicked.connect(self._copy)
-        summary.addWidget(self.copy_button)
+        self.edit_button = _icon_button("Edit transaction", "pen")
+        self.edit_button.clicked.connect(self._edit)
+        self.edit_button.hide()
+        summary.addWidget(self.edit_button)
         close = _icon_button("Hide transaction details", "close")
         close.clicked.connect(self.dismissed.emit)
         close.setVisible(dismissible)
@@ -145,7 +151,7 @@ class TransactionDetails(QWidget):
         self.description.setObjectName("statementDescription")
         self.description.setReadOnly(True)
         self.description.document().setDocumentMargin(0)
-        self.description.setAccessibleName("Full original bank description")
+        self.description.setAccessibleName("Full bank description")
         self.description.setFixedHeight(46)
         self.layout.addWidget(self.description)
         facts = QGridLayout()
@@ -210,7 +216,7 @@ class TransactionDetails(QWidget):
         record = record or {}
         self.record, self.snapshot = deepcopy(record), snapshot
         self.amount.setText(_aud(record.get("amount")))
-        self.description.setPlainText(str(record.get("description") or ""))
+        self.description.setPlainText(str(record.get("description") or "").upper())
         status = _status(record.get("status") or "imported")
         review = record.get("review_status")
         if review in {"submitted", "stale", "needs_review", "failed", "interrupted"}:
@@ -244,10 +250,6 @@ class TransactionDetails(QWidget):
         if from_feed and evidence.get("reference") and not record.get("transfer_reference"):
             self.fields["transfer_reference"].setText(str(evidence["reference"]))
             self.fields["transfer_reference"].setToolTip(str(evidence["reference"]))
-        self.copy_button.setToolTip(
-            "Copy complete transaction facts\n" + str(record.get("transaction_id") or "")
-        )
-        self.copy_button.setEnabled(bool(record))
         self._update_actions()
         if self._compact:
             self.layout.invalidate()
@@ -262,18 +264,37 @@ class TransactionDetails(QWidget):
             and not self.snapshot.get("error")
         )
 
+    def set_header_action(
+        self, label: str | None, callback: Callable[[], None] | None = None,
+        *, symbol: str = "pen", enabled: bool = True,
+    ) -> None:
+        """
+        Let the owning page supply its exact edit route without weakening snapshot availability guards.
+        """
+        self._header_callback = callback
+        self._show_actions = bool(label)
+        self._header_enabled = enabled
+        if label:
+            self.edit_button.setAccessibleName(label)
+            self.edit_button.setToolTip(label)
+            _set_action_icon(self.edit_button, symbol)
+        self._update_actions()
+
     def _update_actions(self) -> None:
         """
-        Keep copying available independently of current processing work.
+        Allow the page's header action only for a selected, current transaction while no job is running.
         """
-        self.copy_button.setEnabled(bool(self.record))
+        self.edit_button.setVisible(self._show_actions)
+        self.edit_button.setEnabled(
+            self._show_actions and self._available() and self._header_enabled and callable(self._header_callback)
+        )
 
-    def _copy(self) -> None:
+    def _edit(self) -> None:
         """
-        Copy every available original field only in response to the explicit copy action.
+        Invoke the current page's action without interpreting ownership or changing accounting here.
         """
-        if self.record:
-            QApplication.clipboard().setText(_facts(self.record))
+        if self.edit_button.isEnabled() and self._available() and callable(self._header_callback):
+            self._header_callback()
 
 
 # %% 3. Journal Event Viewer ---------------------------------------------------------------------------------
@@ -292,6 +313,8 @@ class JournalDetails(_RecordPanel):
         self.setMinimumHeight(0)
         self.setMaximumHeight(16777215)
         self._show_actions = actions
+        self._header_callback = None
+        self._header_enabled = True
         self._compact = compact
         self._source_rows = []
         self._owner = None
@@ -310,9 +333,6 @@ class JournalDetails(_RecordPanel):
         self.edit_button.clicked.connect(self._edit)
         self.edit_button.setVisible(actions)
         summary.addWidget(self.edit_button)
-        self.copy_button = _icon_button("Copy complete journal facts", "copy")
-        self.copy_button.clicked.connect(self._copy)
-        summary.addWidget(self.copy_button)
         close = _icon_button("Hide journal details", "close")
         close.clicked.connect(self.dismissed.emit)
         close.setVisible(dismissible)
@@ -340,14 +360,16 @@ class JournalDetails(_RecordPanel):
         facts.setVerticalSpacing(3)
         self.fields = {}
         for index, (key, caption) in enumerate((
-            ("date", "Accounting date"), ("sources", "Bank transactions"), ("budget", "Budget treatment"),
+            ("date", "Accounting date"), ("sources", "Source"), ("accounts", "Account"),
         )):
             facts.addWidget(_label(caption), 0, index)
             value = _value()
             value.setMinimumWidth(0)
+            value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             facts.addWidget(value, 1, index)
             self.fields[key] = value
-        facts.setColumnStretch(3, 1)
+        facts.setColumnStretch(1, 1)
+        facts.setColumnStretch(2, 1)
         metadata_layout.addLayout(facts)
         content.addWidget(metadata, 0 if compact else 3, Qt.AlignmentFlag.AlignTop)
         self.postings = _table(("Account", "Debit", "Credit"))
@@ -387,7 +409,7 @@ class JournalDetails(_RecordPanel):
         self.status.setText(_status(record.get("status") or ("posted" if lines else "pending")))
         self.description.setPlainText(str(
             record.get("description") or record.get("instruction") or record.get("summary") or ""
-        ))
+        ).upper())
         self.fields["date"].setText(str(record.get("date") or "—"))
         source_ids = record.get("source_transactions") or [
             line["transaction_id"] for line in lines if line.get("transaction_id")
@@ -398,7 +420,6 @@ class JournalDetails(_RecordPanel):
                 "transaction_id": str(identifier), "description": "Source facts unavailable in this snapshot.",
             }) for identifier in dict.fromkeys(source_ids)
         ]
-        self.fields["sources"].setText(str(len(self._source_rows)))
         self.fields["sources"].setToolTip(
             "\n\n".join(_facts(source, internal=False) for source in self._source_rows)
         )
@@ -409,9 +430,23 @@ class JournalDetails(_RecordPanel):
             )
         if self._owner is None and record.get("manual_entry_id"):
             self._owner = record
-        self.fields["budget"].setText(_budget_treatment(lines))
-        self.fields["budget"].setToolTip("\n".join(
-            f"{line.get('account', 'Posting')}: {_budget_label(line.get('budget_category'))}" for line in lines
+        origins = []
+        if self._owner is not None:
+            origins.append(
+                "Manual entry" if self._owner.get("entry_mode") == "direct" else "Manual instruction"
+            )
+        for source in self._source_rows:
+            filename = str(source.get("source_file") or "")
+            origins.append(str(source.get("source_label") or "Redbark · ANZ Plus")
+                           if filename.casefold().startswith("redbark:") else _statement_name(filename))
+        self.fields["sources"].setText("\n".join(dict.fromkeys(origins)) or "—")
+        accounts = list(dict.fromkeys(
+            str(source["account"]) for source in self._source_rows if source.get("account")
+        ))
+        self.fields["accounts"].setText("\n".join(accounts) or "—")
+        self.fields["accounts"].setToolTip("\n".join(accounts))
+        self.description.setToolTip(str(
+            (self._owner or {}).get("instruction") or record.get("description") or ""
         ))
         self.postings.setRowCount(len(lines))
         for row, line in enumerate(lines):
@@ -423,13 +458,13 @@ class JournalDetails(_RecordPanel):
                 item = QTableWidgetItem(text)
                 item.setToolTip(_facts(line, internal=False))
                 if column:
+                    item.setFont(monetary_font(self.postings.font()))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.postings.setItem(row, column, item)
         self.postings.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff if len(lines) <= 5 else Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self.postings.setVisible(bool(lines))
-        self.copy_button.setToolTip("Copy complete journal facts\n" + str(entry_id or ""))
         self._update_actions()
         self._size_to_content()
 
@@ -470,59 +505,60 @@ class JournalDetails(_RecordPanel):
         if event.size().width() != event.oldSize().width() and hasattr(self, "postings"):
             self._size_to_content()
 
+    def set_header_action(
+        self, label: str | None, callback: Callable[[], None] | None = None,
+        *, symbol: str = "pen", enabled: bool = True,
+    ) -> None:
+        """
+        Override the trailing edit action while preserving the owning page's source and review routes.
+        """
+        self._header_callback = callback
+        self._show_actions = bool(label)
+        self._header_enabled = enabled
+        if label:
+            self.edit_button.setAccessibleName(label)
+            self.edit_button.setToolTip(label)
+            _set_action_icon(self.edit_button, symbol)
+        self._update_actions()
+
     def _update_actions(self) -> None:
         """
         Permit editing only when this exact saved record belongs to a fresh, idle snapshot.
         """
         if not hasattr(self, "edit_button"):
             return
-        editable = bool(self.record.get("journal_entry_id") or self.record.get("manual_entry_id"))
+        editable = bool(self.record and (
+            self.record.get("journal_entry_id") or self.record.get("manual_entry_id")
+            or callable(self._header_callback)
+        ))
         self.edit_button.setVisible(self._show_actions)
-        self.edit_button.setEnabled(self._available() and editable)
-        self.copy_button.setEnabled(bool(self.record))
+        self.edit_button.setEnabled(self._show_actions and self._available() and editable and self._header_enabled)
 
     def _edit(self) -> None:
         """
         Route a saved event to its complete editor, or an unposted instruction to its existing form.
         """
-        if self.record.get("journal_entry_id"):
+        if not self.edit_button.isEnabled() or not self._available():
+            return
+        if callable(self._header_callback):
+            self._header_callback()
+        elif self.record.get("journal_entry_id"):
             self._request("open_entry_editor", {"journal_entry_id": self.record["journal_entry_id"]})
         elif self.record.get("manual_entry_id"):
             self._request("open_manual_editor", {
                 "manual_entry_id": self.record["manual_entry_id"], "mode": "instruction",
             })
 
-    def _copy(self) -> None:
-        """
-        Copy exact postings, linked source facts and the original instruction on explicit request.
-        """
-        if not self.record:
-            return
-        sections = ["Journal entry\n" + _facts(self.record)]
-        sections.extend("Bank transaction\n" + _facts(source) for source in self._source_rows)
-        if self._owner:
-            sections.append("Manual entry\n" + _facts(self._owner))
-        QApplication.clipboard().setText("\n\n".join(sections))
-
-
 # %% 4. Helpers ----------------------------------------------------------------------------------------------
-def _budget_label(value) -> str:
+def _set_action_icon(button: QToolButton, symbol: str) -> None:
     """
-    Give explicit posting labels a concise readable name without inferring a new budget classification.
+    Retain a correctly themed header icon across response keystrokes instead of rebuilding it each time.
     """
-    if value in {None, "", "default"}:
-        return "Normal rules"
-    if value == "exclude":
-        return "Excluded"
-    return str(value).replace("_", " ").title()
-
-
-def _budget_treatment(lines: list[dict]) -> str:
-    """
-    Summarise the saved posting labels and retain mixed treatment rather than calling an event included.
-    """
-    labels = set(_budget_label(line.get("budget_category")) for line in lines)
-    return next(iter(labels)) if len(labels) == 1 else "Custom by line" if labels else "—"
+    colour = gui_colour(button, "icon", "#355653")
+    signature = symbol, colour
+    if getattr(button, "_header_icon_signature", None) != signature:
+        button.setIcon(icon(symbol, colour=colour, size=18))
+        button._header_icon_signature = signature
 
 
 def _aud(value, *, code: bool = True) -> str:
@@ -550,7 +586,7 @@ def _label(text: str) -> QLabel:
 
 def _statement_name(value) -> str:
     """
-    Show a PDF filename while retaining the original stored stem in the underlying snapshot and copy text.
+    Show a PDF filename while retaining the original stored stem in the underlying snapshot.
     """
     text = str(value or "")
     if text.casefold().startswith("redbark"):
@@ -620,10 +656,12 @@ def _status(value) -> str:
 
 def _facts(record: dict, *, internal: bool = True) -> str:
     """
-    Keep complete copyable evidence while showing readable values and hiding storage IDs in the viewer.
+    Keep complete evidence in tooltips while showing readable values and hiding internal storage IDs.
     """
     lines = []
     for key, value in record.items():
+        if key in {"budget_impact", "budget_impacts", "budget_impact_context"}:
+            continue
         if not internal and (
             key.endswith(("_id", "_ids")) or key in {
                 "context_revision", "answer_token", "source_transactions", "postings", "entry_mode",

@@ -11,53 +11,50 @@ outside changes are protected before navigation or replacement. This screen neve
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
+from copy import deepcopy
 from dataclasses import replace
 from datetime import date
+from decimal import Decimal, localcontext, ROUND_HALF_UP
+from html import escape
 from pathlib import Path
 
 from pydantic import ValidationError
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QPalette, QTextDocument
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox, QPushButton,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QListView, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QStyle, QStyleOptionComboBox, QStylePainter, QTabWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
 # Aurum imports
-from aurum.finance.reports import DEFAULT_THEMES
+from aurum.finance.reports import DEFAULT_THEMES, ReportSettings
 from aurum.finance.dates import reporting_month
 from aurum.gui.bank_feeds import BankConnectionPanel
 from aurum.gui.budget import BudgetForm
 from aurum.gui.catalogue import AccountsForm, SecuritiesForm
+from aurum.gui.controls import confirm_discard, confirm_unsaved
 from aurum.gui.icons import icon
+from aurum.gui.opening import BankOpeningDrafts
 from aurum.gui.report_settings import ReportForm
+from aurum.gui.theme import monetary_html
 from aurum.gui.theme_picker import ThemeComboBox
 from aurum.gui.workspace import ChatGPTPage
 from aurum.workflows.configuration import (
     CONFIGURATION_MODELS, configuration_schema, initialise_workspace, read_configuration, save_configuration,
+    save_configurations,
 )
-
-HELP = {
-    "accounts": "Select an account to edit its details, or add a new one. "
-                "Close accounts with history instead of removing them.",
-    "securities": "Add the equities and cryptocurrencies you hold before recording purchases. "
-                  "Select an investment to edit its symbol and pricing details.",
-    "budget": "",
-    "reports": "",
-    "chatgpt": "",
-}
-
 
 # %% 1. Setup Screen -----------------------------------------------------------------------------------------
 class SetupPage(QWidget):
     """
-    Keep all five Setup sections together with one persistent save bar and protected local changes.
+    Keep four Setup sections and independent connection settings beside protected configuration drafts.
     """
 
     changed = Signal()
     section_changed = Signal(str)
     section_labels_changed = Signal(dict)
+    action_requested = Signal(str, object)
 
     def __init__(self, workspace: Path, parent: QWidget | None = None) -> None:
         """
@@ -66,11 +63,11 @@ class SetupPage(QWidget):
         super().__init__(parent)
         self.workspace = Path(workspace).resolve()
         self._dirty = set()
+        self._account_roles_dirty = False
         self._busy = False
         self._missing = False
         self._current = 0
         self.leave_guard = None
-        self.continue_save = None
         year, month = reporting_month(date.today())
         self._month = f"{year:04d}-{month:02d}"
         self.documents, self.forms, self.pages, self.errors = {}, {}, {}, {}
@@ -81,9 +78,11 @@ class SetupPage(QWidget):
         self.budget_header_layout.setContentsMargins(0, 0, 0, 0)
         self._messages = {}
         self.configuration_kinds = tuple(CONFIGURATION_MODELS)
-        self.kinds = (*self.configuration_kinds, "chatgpt")
-        self.chatgpt = ChatGPTPage(embedded=True)
+        self.kinds = self.configuration_kinds
+        self.chatgpt = ChatGPTPage()
         self.bank_connection = BankConnectionPanel()
+        self.bank_openings = BankOpeningDrafts(self)
+        self.bank_openings.action_requested.connect(self.action_requested)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
@@ -97,24 +96,6 @@ class SetupPage(QWidget):
         heading.addWidget(title)
         heading.addStretch()
         header.addLayout(heading)
-        profile = QHBoxLayout()
-        profile.setContentsMargins(0, 0, 0, 0)
-        profile.setSpacing(10)
-        name_label = QLabel("&Name")
-        name_label.setObjectName("workspacePageSubtitle")
-        profile.addWidget(name_label)
-        self.owner_name = QLineEdit()
-        self.owner_name.setObjectName("setupOwner")
-        self.owner_name.setPlaceholderText("Your name")
-        self.owner_name.setMinimumWidth(200)
-        self.owner_name.setMaximumWidth(400)
-        self.owner_name.setAccessibleName("Name")
-        self.owner_name.setToolTip("Used throughout Aurum and in generated reports. Save Setup changes to apply.")
-        name_label.setBuddy(self.owner_name)
-        self.owner_name.textEdited.connect(self._edit_owner)
-        profile.addWidget(self.owner_name)
-        profile.addStretch()
-        header.addLayout(profile)
         layout.addLayout(header)
         cards = QHBoxLayout()
         cards.setSpacing(12)
@@ -152,15 +133,14 @@ class SetupPage(QWidget):
         swatches = QHBoxLayout()
         swatches.setSpacing(4)
         swatches.addStretch()
+        self.palette_pill = QFrame()
+        self.palette_pill.setObjectName("setupPalettePill")
+        self.palette_pill.setFixedHeight(18)
+        self.palette_layout = QHBoxLayout(self.palette_pill)
+        self.palette_layout.setContentsMargins(6, 6, 6, 6)
+        self.palette_layout.setSpacing(4)
         self.theme_swatches = []
-        for _ in range(5):
-            swatch = QLabel()
-            swatch.setFixedSize(22, 6)
-            swatches.addWidget(swatch)
-            self.theme_swatches.append(swatch)
-        self.theme_appearance = QLabel()
-        self.theme_appearance.setObjectName("overviewCaption")
-        swatches.addWidget(self.theme_appearance)
+        swatches.addWidget(self.palette_pill)
         self.appearance = _CentredComboBox()
         self.appearance.setObjectName("setupAppearance")
         self.appearance.setFixedHeight(18)
@@ -204,17 +184,25 @@ class SetupPage(QWidget):
             page_layout.setSpacing(12)
             section_title = QLabel(_section_name(kind))
             section_title.setObjectName("setupSectionTitle")
+            section_title.setProperty("headingLevel", 2)
             section_heading = QHBoxLayout()
             section_heading.addWidget(section_title)
             section_heading.addStretch()
             page_layout.addLayout(section_heading)
-            description = QLabel(HELP[kind])
-            description.setObjectName("muted")
-            description.setWordWrap(True)
-            description.setVisible(bool(HELP[kind]))
-            page_layout.addWidget(description)
             if kind == "accounts":
-                page_layout.addWidget(self.bank_connection)
+                connections_title = QLabel("Connections")
+                connections_title.setObjectName("setupConnectionsTitle")
+                page_layout.addWidget(connections_title)
+                connections = QFrame()
+                connections.setObjectName("setupConnections")
+                connections.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+                connections_layout = QVBoxLayout(connections)
+                connections_layout.setContentsMargins(0, 0, 0, 0)
+                connections_layout.setSpacing(0)
+                connections_layout.addWidget(self.bank_connection)
+                connections_layout.addWidget(self.chatgpt)
+                page_layout.addWidget(connections)
+                page_layout.addSpacing(12)
             if kind == "budget":
                 self.budget_actions_layout = section_heading
                 page_layout.addLayout(self.budget_header_layout)
@@ -230,25 +218,26 @@ class SetupPage(QWidget):
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             if kind == "budget":
                 scroll.setMinimumHeight(160)
+                scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             page_layout.addWidget(scroll, 1)
             self.pages[kind], self.errors[kind] = scroll, error
             self.tabs.addTab(page, _section_name(kind))
-            if kind == "chatgpt":
-                scroll.setWidget(self.chatgpt)
 
         footer = QFrame()
+        self.footer = footer
         footer.setObjectName("setupFooter")
         actions = QHBoxLayout(footer)
-        actions.setContentsMargins(0, 14, 0, 0)
-        self.save_status = QLabel("No unsaved changes")
+        actions.setContentsMargins(0, 0, 0, 0)
+        self.save_status = QLabel()
         self.save_status.setObjectName("muted")
         self.save_status.setWordWrap(True)
-        actions.addWidget(self.save_status, 1)
+        actions.addWidget(self.save_status)
+        actions.addStretch()
         self.reload_button = QToolButton()
         self.reload_button.setObjectName("setupIconAction")
         self.reload_button.setIcon(icon("refresh", size=18))
         self.reload_button.setIconSize(QSize(18, 18))
-        self.reload_button.setFixedSize(36, 36)
+        self.reload_button.setFixedSize(32, 32)
         self.reload_button.setAccessibleName("Reload current settings")
         self.reload_button.setToolTip("Reload this section from its saved settings.")
         self.reload_button.clicked.connect(lambda: self._reload(self.kinds[self._current]))
@@ -257,15 +246,14 @@ class SetupPage(QWidget):
         self.save_button.setObjectName("setupIconAction")
         self.save_button.setIcon(icon("save", "#ffffff", size=18))
         self.save_button.setIconSize(QSize(18, 18))
-        self.save_button.setFixedSize(36, 36)
+        self.save_button.setFixedSize(32, 32)
         self.save_button.setToolTip("Save Setup changes")
         self.save_button.setAccessibleName("Save Setup changes")
         self.save_button.setProperty("primary", True)
-        self.save_button.clicked.connect(self._save_all)
+        self.save_button.clicked.connect(self.save_changes)
         actions.addWidget(self.save_button)
         layout.addWidget(footer)
-        self.chatgpt.changed.connect(self._update_labels)
-        self.bank_connection.changed.connect(self._update_labels)
+        self.bank_openings.changed.connect(self._update_labels)
         self.refresh()
 
     def refresh(self, force: bool = False) -> None:
@@ -278,11 +266,13 @@ class SetupPage(QWidget):
         if not force and version is not None and version == self._refresh_version:
             return
         self._dirty.clear()
+        self._account_roles_dirty = False
         self._messages.clear()
         choices = self._choices()
         self._update_workspace_notice(choices)
         for kind in self.configuration_kinds:
             self._load(kind, choices)
+        self._sync_account_budget()
         # Only reuse a complete set of forms read from the same on-disk configuration snapshot.
         originals = dict(zip(self.configuration_kinds, version[:-1])) if version is not None else {}
         self._refresh_version = version if all(
@@ -301,6 +291,39 @@ class SetupPage(QWidget):
                     (self.workspace / "data" / "aurum.sqlite3").is_file())
         except OSError:
             return None
+
+    def set_bank_openings(self, contexts: dict) -> None:
+        """
+        Apply saved ledger context without replacing unposted opening fields or their original revisions.
+        """
+        self.bank_openings.set_contexts(contexts)
+        self._update_labels()
+
+    def guard_opening_changes(self) -> bool:
+        """
+        Keep configuration saves separate from the explicit action that posts a bank opening.
+        """
+        return self.bank_openings.guard(self)
+
+    def guard_connection_changes(self) -> bool:
+        """
+        Protect independent connection drafts before leaving or explicitly reloading Accounts.
+        """
+        return all(connection.guard_close() for connection in (self.bank_connection, self.chatgpt))
+
+    def action_completed(self, action: str, result: dict) -> None:
+        """
+        Clear only an opening balance whose atomic ledger save has been acknowledged.
+        """
+        if action == "save_bank_opening":
+            self.bank_openings.complete(result)
+
+    def action_failed(self, action: str, message: str) -> None:
+        """
+        Leave unsuccessful bank opening drafts available for correction or explicit discard.
+        """
+        if action == "save_bank_opening":
+            self.bank_openings.fail(message)
 
     def set_reporting_month(self, month: str) -> None:
         """
@@ -323,6 +346,7 @@ class SetupPage(QWidget):
         """
         Request a section through the same unsaved-change guard as the original tab navigation.
         """
+        kind = "accounts" if kind == "chatgpt" else kind
         if kind not in self.kinds or self._busy:
             return False
         self.tabs.setCurrentIndex(self.kinds.index(kind))
@@ -335,6 +359,16 @@ class SetupPage(QWidget):
         if self._busy or (self._missing and self._dirty):
             return False
         saved = []
+        if "accounts" in self._dirty and (self._account_roles_dirty or "budget" in self._dirty):
+            if not self._save_account_budget():
+                self.tabs.blockSignals(True)
+                self.tabs.setCurrentIndex(self.kinds.index("accounts"))
+                self.tabs.blockSignals(False)
+                self._current = self.kinds.index("accounts")
+                self.section_changed.emit("accounts")
+                self._update_labels()
+                return False
+            saved.extend(("accounts", "budget"))
         for kind in ("accounts", "securities", "reports", "budget"):
             if kind not in self._dirty:
                 continue
@@ -349,29 +383,12 @@ class SetupPage(QWidget):
                     self.save_status.setText(
                         ", ".join(item.title() for item in saved) + " saved. Correct the remaining changes."
                     )
+                    self.save_status.show()
                 return False
             saved.append(kind)
         if saved:
             self.save_status.setText("Changes saved")
-        return True
-
-    def _save_all(self) -> bool:
-        """
-        Save configuration first, then submit a staged model through the existing asynchronous action.
-        """
-        if not self.save_changes():
-            return False
-        if self.continue_save is not None and (
-            self.chatgpt.has_unsaved_changes() or self.bank_connection.has_unsaved_changes()
-        ):
-            self.continue_save()
-            return False
-        if self.chatgpt.has_unsaved_changes():
-            self.chatgpt.save_changes()
-            return False
-        if self.bank_connection.has_unsaved_changes():
-            self.bank_connection.save_changes()
-            return False
+            self.save_status.show()
         return True
 
     def _summary_card(
@@ -424,22 +441,26 @@ class SetupPage(QWidget):
         )
         budget = self.forms.get("budget")
         info = budget.summary_info() if budget is not None else {}
+        totals = info.get("totals", {})
         labels = {"balanced": "Ready", "incomplete": "Not set", "invalid": "Needs attention"}
         month = info.get("month") or self._month
         month_name = date.fromisoformat(month + "-01").strftime("%B %Y") if month else ""
+        allocation_lines = [
+            f"{_whole_money(totals.get(kind))} {label}" for kind, label in (
+                ("income", "Income"), ("expense", "Expenses"), ("savings", "Savings"),
+            )
+        ]
         allocation_text = " · ".join(
             f"{info.get(kind, '—')} {label}" for kind, label in (
                 ("income", "Income"), ("expense", "Expenses"), ("savings", "Savings"),
             )
         )
-        self.budget_detail.set_summary(allocation_text)
+        self.budget_detail.set_summary(" · ".join(allocation_lines[:2]), allocation_lines[2])
         self.budget_value.setToolTip(f"{month_name} · {labels.get(info.get('status'), 'Unavailable')}")
         self.budget_detail.setToolTip("\n".join(filter(None, (allocation_text, info.get("detail", "")))))
         reports = self.forms.get("reports")
         if reports is None:
             return
-        if not self.owner_name.hasFocus():
-            self.owner_name.setText(reports.owner_name())
         choices = reports.theme_choices()
         selected = reports.theme_key()
         self.theme.blockSignals(True)
@@ -455,13 +476,25 @@ class SetupPage(QWidget):
         })
         theme = reports.theme_info()
         palette = theme.get("palette") or []
+        while len(self.theme_swatches) > len(palette):
+            swatch = self.theme_swatches.pop()
+            self.palette_layout.removeWidget(swatch)
+            swatch.deleteLater()
+        while len(self.theme_swatches) < len(palette):
+            swatch = QLabel()
+            self.palette_layout.addWidget(swatch)
+            self.theme_swatches.append(swatch)
+        count = len(palette)
+        gap = 4 if count <= 5 else 2 if count <= 15 else 1 if count <= 42 else 0
+        width = min(22, max(1, (126 - gap * max(0, count - 1)) // max(1, count)))
+        self.palette_layout.setSpacing(gap)
+        self.palette_pill.setFixedWidth(count * width + gap * max(0, count - 1) + 12)
+        self.palette_pill.setVisible(bool(palette))
         for index, swatch in enumerate(self.theme_swatches):
-            swatch.setVisible(bool(palette))
-            colour = QColor(palette[min(index, len(palette) - 1)]) if palette else QColor("#dce5df")
+            swatch.setFixedSize(width, 6)
+            colour = QColor(palette[index])
             swatch.setStyleSheet(f"background: {colour.name()}; border-radius: 3px;")
         fixed = bool(theme.get("fixed"))
-        self.theme_appearance.setText("Fixed palette" if fixed else "")
-        self.theme_appearance.setVisible(fixed)
         self.appearance.setVisible(not fixed)
         self.appearance.blockSignals(True)
         self.appearance.setCurrentIndex(int(bool(theme.get("dark_mode"))))
@@ -475,13 +508,36 @@ class SetupPage(QWidget):
         if reports is not None and not self._busy:
             reports.set_dark_mode(bool(self.appearance.itemData(index)))
 
-    def _edit_owner(self, value: str) -> None:
+    def save_owner_name(self, document, value: str) -> str:
         """
-        Keep the global name in the same report draft used by the explicit Save changes action.
+        Save only the sidebar name, rebasing matching form revisions without committing their drafts.
+
+        Older form revisions remain stale when saved settings changed before name editing began.
+        The shared configuration save rejects any change made after the edit's snapshot was captured.
         """
-        reports = self.forms.get("reports")
-        if reports is not None and not self._busy:
-            reports.set_owner_name(value)
+        if self._busy:
+            raise ValueError("Wait for the current workspace action before saving your name.")
+        if document.kind != "reports" or document.workspace != self.workspace:
+            raise ValueError("Reload this workspace before editing your name.")
+        name = ReportSettings(name=value.strip() or "Aurum").owner_name
+        if name == ReportSettings(name=document.data.get("name", "Aurum")).owner_name:
+            return name
+        data = deepcopy(document.data)
+        data["name"] = name or "Aurum"
+        saved = save_configuration(document, data)
+        for kind, original in tuple(self.documents.items()):
+            if original.originals != document.originals:
+                continue
+            self.documents[kind] = replace(
+                original, data=saved.data if kind == "reports" else original.data,
+                originals=dict(saved.originals),
+            )
+            if kind == "reports" and kind in self.forms:
+                self.forms[kind].data["name"] = saved.data["name"]
+        self._refresh_version = None
+        self._update_labels()
+        self.changed.emit()
+        return name
 
     def _edit_theme(self, index: int) -> None:
         """
@@ -533,8 +589,7 @@ class SetupPage(QWidget):
         """
         Tell the main window whether navigation might discard configuration edits.
         """
-        return (bool(self._dirty) or self.chatgpt.has_unsaved_changes()
-                or self.bank_connection.has_unsaved_changes())
+        return bool(self._dirty) or self.bank_openings.has_unsaved_changes()
 
     def has_unsaved_changes(self) -> bool:
         """
@@ -546,27 +601,24 @@ class SetupPage(QWidget):
         """
         Reload saved files after the user explicitly discards form changes.
         """
-        self.chatgpt.discard_changes()
-        self.bank_connection.discard_changes()
+        self.bank_openings.discard()
         self.refresh(force=True)
 
     def maybe_leave(self) -> bool:
         """
         Ask to save, discard or keep editing before leaving a dirty setup section.
         """
+        if not self.guard_connection_changes() or not self.guard_opening_changes():
+            return False
         if not self.is_dirty():
             return True
-        answer = QMessageBox.question(
-            self, "Unsaved setup changes", "Save your configuration changes before continuing?",
-            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
-            QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save,
-        )
-        if answer == QMessageBox.StandardButton.Cancel:
+        answer = confirm_unsaved(self)
+        if answer == "cancel":
             return False
-        if answer == QMessageBox.StandardButton.Discard:
+        if answer == "discard":
             self.discard_changes()
             return True
-        return self._save_all()
+        return self.save_changes()
 
     def set_busy(self, busy: bool) -> None:
         """
@@ -589,10 +641,14 @@ class SetupPage(QWidget):
                 "accounts": AccountsForm, "securities": SecuritiesForm,
                 "budget": BudgetForm, "reports": ReportForm,
             }[kind]
-            form = editor(configuration_schema(kind), document.data, {**choices, "configuration_kind": kind})
+            form = editor(configuration_schema(kind), document.data, {
+                **choices, "configuration_kind": kind, "bank_opening_drafts": self.bank_openings,
+            })
             if kind == "budget":
                 form.set_reporting_month(self._month)
                 form.summary_changed.connect(self._update_summary)
+            elif kind == "accounts":
+                form.budget_changed.connect(self._edit_account_budget)
             form.changed.connect(lambda selected=kind: self._mark_dirty(selected))
         except (ValueError, OSError, TypeError, KeyError) as error:
             if kind == "budget" and self.budget_header is not None:
@@ -633,8 +689,6 @@ class SetupPage(QWidget):
             self.budget_actions_layout.addWidget(self.budget_copy)
             self.budget_copy.show()
         self.forms[kind], self.documents[kind] = form, document
-        if kind == "reports":
-            self.owner_name.setText(form.owner_name())
         self.errors[kind].clear()
         self.errors[kind].hide()
         if state is not None:
@@ -654,7 +708,8 @@ class SetupPage(QWidget):
         Build readable reference pickers from saved settings without generating UUIDs.
         """
         choices = {
-            "accounts": {}, "asset_accounts": {}, "non_bank_asset_accounts": {}, "equity_accounts": {},
+            "accounts": {}, "asset_accounts": {}, "non_bank_asset_accounts": {}, "bank_accounts": {},
+            "equity_accounts": {},
             "savings_categories": {}, "account_types": {}, "fixed_equity_accounts": {},
         }
         choices["workspace"] = self.workspace
@@ -670,6 +725,8 @@ class SetupPage(QWidget):
                     choices[f"{kind}_accounts"][item["key"]] = item["name"]
                 if kind == "asset" and not item.get("bank_details"):
                     choices["non_bank_asset_accounts"][item["key"]] = item["name"]
+                if kind == "asset" and item.get("bank_details"):
+                    choices["bank_accounts"][item["key"]] = item["name"]
             budget = read_configuration(self.workspace, "budget").data
             choices["categories"] = {
                 key: category.get("name", key) for key, category in budget.get("categories", {}).items()
@@ -701,49 +758,67 @@ class SetupPage(QWidget):
         self._messages.pop(kind, None)
         self.errors[kind].clear()
         self.errors[kind].hide()
+        if kind == "budget":
+            self._sync_account_budget()
         self._update_labels()
+
+    def _sync_account_budget(self) -> None:
+        """
+        Supply account rows with the current budget draft without replacing any account metadata.
+        """
+        accounts, budget = self.forms.get("accounts"), self.forms.get("budget")
+        if accounts is not None:
+            accounts.set_budget_context(budget.value() if budget is not None else None)
+
+    def _edit_account_budget(self, account: str, choice: object) -> None:
+        """
+        Keep the shared mapping draft under Accounts while leaving monthly targets untouched.
+        """
+        budget = self.forms.get("budget")
+        if self._busy or budget is None or not budget.set_account_role(account, choice):
+            return
+        self._account_roles_dirty = True
+        self._sync_account_budget()
+        self._mark_dirty("accounts")
 
     def _update_labels(self) -> None:
         """
         Keep tab markers, save state and action availability consistent with the selected section.
         """
         for index, kind in enumerate(self.kinds):
-            dirty = self.chatgpt.has_unsaved_changes() if kind == "chatgpt" else kind in self._dirty
-            if kind == "accounts":
-                dirty = dirty or self.bank_connection.has_unsaved_changes()
+            dirty = kind in self._dirty
             self.tabs.setTabText(index, _section_name(kind) + (" *" if dirty else ""))
         kind = self.kinds[self._current]
         self.save_button.setEnabled(
-            self.is_dirty() and not self._busy and (not self._missing or not self._dirty)
+            bool(self._dirty)
+            and not self._busy and (not self._missing or not self._dirty)
         )
         self.reload_button.setEnabled(not self._busy)
-        self.reload_button.setToolTip(
-            "Restore the saved model selection" if kind == "chatgpt" else "Reload this section's settings"
-        )
+        self.reload_button.setToolTip("Reload this section's settings")
         self.tabs.setEnabled(not self._busy)
         for selected in self.configuration_kinds:
             self.pages[selected].setEnabled(not self._busy and not self._missing)
         self.initialise_button.setEnabled(not self._busy)
-        self.owner_name.setEnabled(not self._busy and not self._missing and "reports" in self.forms)
         self.theme.setEnabled(not self._busy and not self._missing and "reports" in self.forms)
         self.appearance.setEnabled(not self._busy and not self._missing and "reports" in self.forms)
-        self.bank_connection.configure.setEnabled(
-            not self._busy and not self._missing and "accounts" not in self._dirty
+        self.bank_connection.set_config_blocked(
+            "Create the workspace files first." if self._missing else
+            "Save account changes before linking bank accounts." if "accounts" in self._dirty else ""
         )
-        self.bank_connection.configure.setToolTip(
-            "Save account changes before linking bank accounts" if "accounts" in self._dirty else
-            "Check your API key, link accounts and preview the first import"
+        self.bank_openings.set_blocked(
+            "Wait for the current workspace action to finish." if self._busy else
+            "Create the workspace files first." if self._missing else
+            "Save account settings before posting an opening balance." if "accounts" in self._dirty else
+            "Save report settings before posting an opening balance." if "reports" in self._dirty else ""
         )
         dirty_kinds = [item for item in self.configuration_kinds if item in self._dirty]
-        if self.bank_connection.has_unsaved_changes() and "accounts" not in dirty_kinds:
-            dirty_kinds.append("accounts")
-        if self.chatgpt.has_unsaved_changes():
-            dirty_kinds.append("chatgpt")
         self.save_status.setText(
             "Check the settings above" if self.errors[kind].text() else
             "Unsaved: " + ", ".join(_section_name(item) for item in dirty_kinds)
-            if dirty_kinds else self._messages.get(kind, "No unsaved changes")
+            if dirty_kinds else "Unposted opening balance" if self.bank_openings.has_unsaved_changes()
+            else self._messages.get(kind, "")
         )
+        self.save_status.setVisible(bool(self.save_status.text()))
         self._update_summary()
         self.section_labels_changed.emit({
             item: _section_name(item) + (" *" if item in dirty_kinds else "") for item in self.kinds
@@ -764,6 +839,8 @@ class SetupPage(QWidget):
             return False
         if kind not in self._dirty:
             return True
+        if kind == "accounts" and (self._account_roles_dirty or "budget" in self._dirty):
+            return self._save_account_budget()
         try:
             document = save_configuration(self.documents[kind], self.forms[kind].value())
         except (ValueError, OSError, TypeError) as error:
@@ -779,9 +856,49 @@ class SetupPage(QWidget):
         self._dirty.discard(kind)
         if self._dirty:
             self._load(kind, self._choices())
+            self._sync_account_budget()
         else:
             self.refresh(force=True)
         self._messages[kind] = kind.title() + " saved"
+        self._update_labels()
+        self.changed.emit()
+        return True
+
+    def _save_account_budget(self) -> bool:
+        """
+        Validate account edits and their budget roles together before acknowledging either draft.
+        """
+        kinds = ("accounts", "budget")
+        if self._busy or self._missing or any(
+            kind not in self.forms or kind not in self.documents for kind in kinds
+        ):
+            self._show_error("accounts", "Reload Accounts and Budget before saving account settings.")
+            return False
+        try:
+            saved = save_configurations(
+                {kind: self.documents[kind] for kind in kinds},
+                {kind: self.forms[kind].value() for kind in kinds},
+            )
+        except (ValueError, OSError, TypeError) as error:
+            self._show_error("accounts", _configuration_error(error))
+            self._update_labels()
+            return False
+        self.documents.update(saved)
+        originals = saved["accounts"].originals
+        for kind, document in tuple(self.documents.items()):
+            if kind not in saved:
+                self.documents[kind] = replace(document, originals=dict(originals))
+        self._dirty.difference_update(kinds)
+        self._account_roles_dirty = False
+        if self._dirty:
+            choices = self._choices()
+            for kind in kinds:
+                self._load(kind, choices)
+            self._sync_account_budget()
+        else:
+            self.refresh(force=True)
+        self._messages["accounts"] = "Accounts saved"
+        self._messages["budget"] = "Budget saved"
         self._update_labels()
         self.changed.emit()
         return True
@@ -792,29 +909,38 @@ class SetupPage(QWidget):
         """
         if self._busy:
             return
-        if kind == "chatgpt":
-            if self.chatgpt.has_unsaved_changes() and QMessageBox.question(
-                self, "Discard model selection?", "Restore the saved processing model?",
-                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            ) == QMessageBox.StandardButton.Discard:
-                self.chatgpt.discard_changes()
+        if kind == "accounts" and not self.guard_connection_changes():
             return
-        bank_dirty = kind == "accounts" and self.bank_connection.has_unsaved_changes()
-        if (kind in self._dirty or bank_dirty) and QMessageBox.question(
-            self, "Discard local changes?", "Reloading replaces your unsaved changes in this section.",
-            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        ) != QMessageBox.StandardButton.Discard:
+        if kind == "accounts" and not self.guard_opening_changes():
             return
-        if bank_dirty:
-            self.bank_connection.discard_changes()
+        if kind in self._dirty and not confirm_discard(
+            self, question="Discard changes in " + _section_name(kind) + "?",
+        ):
+            return
+        budget = self.forms.get("budget")
+        retained_roles = budget.account_roles() if (
+            kind == "budget" and self._account_roles_dirty and budget is not None
+        ) else None
+        if kind == "accounts":
+            try:
+                saved_budget = read_configuration(self.workspace, "budget")
+            except (ValueError, OSError, TypeError) as error:
+                self._show_error("accounts", _configuration_error(error))
+                return
+            if budget is not None:
+                budget.set_account_roles(saved_budget.data)
+            self._account_roles_dirty = False
         self._dirty.discard(kind)
         self._messages.pop(kind, None)
         if self._dirty:
             choices = self._choices()
             self._update_workspace_notice(choices)
             self._load(kind, choices)
+            if kind == "accounts" and "budget" not in self._dirty:
+                self._load("budget", choices)
+            if retained_roles is not None and "budget" in self.forms:
+                self.forms["budget"].set_account_roles(retained_roles)
+            self._sync_account_budget()
             self._update_labels()
         else:
             self.refresh(force=True)
@@ -856,6 +982,19 @@ class SetupPage(QWidget):
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
+def _whole_money(amount: Decimal | None) -> str:
+    """
+    Round card totals to whole dollars without changing their exact accounting or showing negative zero.
+    """
+    if amount is None or not amount.is_finite():
+        return "—"
+    with localcontext() as context:
+        context.prec = max(context.prec, amount.adjusted() + 2)
+        rounded = amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    digits = format(rounded.copy_abs(), ".0f")
+    return ("-" if rounded < 0 else "") + "$" + digits
+
+
 def _section_name(kind: str) -> str:
     """
     Use product spelling consistently in the sidebar, section titles and unsaved-state messages.
@@ -865,7 +1004,7 @@ def _section_name(kind: str) -> str:
 
 class _TwoLineSummary(QLabel):
     """
-    Flow compact totals across at most two lines while retaining the full wording for accessibility.
+    Keep cash totals on one line and total savings beneath them, with complete accessible wording.
     """
 
     def __init__(self, parent=None) -> None:
@@ -874,14 +1013,17 @@ class _TwoLineSummary(QLabel):
         """
         super().__init__(parent)
         self._summary_text = ""
+        self._summary_lines = ()
+        self.setTextFormat(Qt.TextFormat.RichText)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
 
-    def set_summary(self, text: str) -> None:
+    def set_summary(self, first_line: str, second_line: str = "") -> None:
         """
         Update the visible totals without inserting a third line into the summary card.
         """
-        self._summary_text = text
-        self.setAccessibleName(text)
+        self._summary_lines = tuple(filter(None, (first_line, second_line)))
+        self._summary_text = " · ".join(self._summary_lines)
+        self.setAccessibleName(self._summary_text)
         self._fit_text()
 
     def resizeEvent(self, event) -> None:
@@ -893,24 +1035,35 @@ class _TwoLineSummary(QLabel):
 
     def _fit_text(self) -> None:
         """
-        Wrap at ordinary spaces, keeping monetary separators intact and eliding only extreme overflow.
+        Preserve the intended two rows, eliding long lines while keeping full values in the tooltip.
         """
-        metrics = self.fontMetrics()
         width = max(1, self.contentsRect().width())
-        remaining = self._summary_text.split(" ")
-        first = []
-        while remaining and metrics.horizontalAdvance(" ".join((*first, remaining[0]))) <= width:
-            first.append(remaining.pop(0))
-        if not first and remaining:
-            first.append(remaining.pop(0))
-        if first and first[-1] == "·":
-            first.pop()
-        if remaining and remaining[0] == "·":
-            remaining.pop(0)
-        lines = [metrics.elidedText(" ".join(first), Qt.TextElideMode.ElideRight, width)]
-        if remaining:
-            lines.append(metrics.elidedText(" ".join(remaining), Qt.TextElideMode.ElideRight, width))
-        self.setText("\n".join(lines))
+        lines = list(self._summary_lines)
+        for index, line in enumerate(lines):
+            if self._text_width(line) > width:
+                while line and self._text_width(line + "…") > width:
+                    line = line[:-1]
+                lines[index] = line + "…"
+        self.setText("<br>".join(self._line_html(line) for line in lines))
+
+    def _line_html(self, text: str) -> str:
+        """
+        Use the same numeric markup when measuring and displaying each summary line.
+        """
+        return " ".join(
+            monetary_html(word) if word.startswith(("$", "-$")) else escape(word)
+            for word in text.split(" ")
+        )
+
+    def _text_width(self, text: str) -> int:
+        """
+        Measure Qt's actual rich-text width so narrow spaces and the numeric font cannot clip the ellipsis.
+        """
+        document = QTextDocument()
+        document.setDocumentMargin(0)
+        document.setDefaultFont(self.font())
+        document.setHtml(self._line_html(text))
+        return int(document.idealWidth() + 1)
 
 
 class _CentredComboBox(QComboBox):

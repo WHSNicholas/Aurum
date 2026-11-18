@@ -14,6 +14,7 @@ generate reports; no operation shells out to a command or derives its result fro
 # Imports
 from contextlib import closing
 from dataclasses import asdict
+from decimal import Decimal
 from datetime import date
 from functools import partial
 from pathlib import Path
@@ -24,23 +25,26 @@ from uuid import uuid4
 from aurum.ai.chatgpt import connect, connection_status
 from aurum.database.database import _check_schema
 from aurum.database.journal import load_journal_entries
-from aurum.database.manual import submit_manual_input
+from aurum.database.manual import load_opening_entry_ids, submit_manual_input, submit_review_responses
 from aurum.database.memory import remember_text
 from aurum.database.prices import load_valuation_quote
 from aurum.database.reviews import (
-    discard_review, list_guidance_cases, load_guidance_assessments, submit_review, submit_reviews,
+    discard_review, list_guidance_cases, load_guidance_assessments, submit_review,
 )
-from aurum.database.savings import load_savings_allocations
-from aurum.finance.accounts import load_accounts
-from aurum.finance.budget import budget_transaction_counts, load_budget_settings
+from aurum.finance.accounts import AccountType, load_accounts
+from aurum.finance.budget import (
+    BudgetSettings, budget_transaction_counts,
+    project_budget_entry, _validate_settings as validate_budget_settings,
+)
 from aurum.finance.dates import reporting_month
 from aurum.finance.investments import holdings_as_of, price_symbol
 from aurum.finance.manual import ManualInput
 from aurum.finance.reports import build_reports, load_report_settings, resolve_period
 from aurum.finance.securities import load_securities
 from aurum.gui.theme import resolve_gui_theme
-from aurum.workflows.configuration import initialise_workspace
+from aurum.workflows.configuration import initialise_workspace, read_configuration
 from aurum.workflows.editing import apply_journal_edit, editor_snapshot, load_journal_edit
+from aurum.workflows.opening import load_bank_openings, save_bank_opening
 from aurum.workflows.journal import (
     DEFAULT_MODEL, journal_snapshot, learn_from_reviews, process_journal,
 )
@@ -67,7 +71,6 @@ class WorkspaceService:
         self._prepared_statements = {}
         self._statement_metadata = {}
         self._bank_connections = {}
-        self._bank_previews = {}
         self._bank_sync_error = ""
 
     def default_month(self) -> str:
@@ -84,6 +87,13 @@ class WorkspaceService:
         value = min(date.fromisoformat(latest), date.today()) if latest else date.today()
         year, month = reporting_month(value)
         return f"{year:04d}-{month:02d}"
+
+    def release_bank_session(self, connection_token: str | None) -> None:
+        """
+        Release only an explicitly abandoned checked credential, without network or persistence work.
+        """
+        if connection_token:
+            self._bank_connections.pop(connection_token, None)
 
     def snapshot(self, month: str) -> dict:
         """
@@ -102,7 +112,7 @@ class WorkspaceService:
             "cutoff": period.cutoff.isoformat(),
             "transactions": [], "reviews": [], "manuals": [], "entries": [], "counts": {}, "imports": [],
             "investment_reviews": [], "investment_reviews_error": "",
-            "owner_name": "", "financials": {}, "financial_transaction_counts": {},
+            "owner_name": "", "financials": {}, "financial_transaction_counts": {}, "bank_openings": {},
             "net_worth_unpriced_holdings": [], "net_worth_price_dates": [],
             "posted_entry_count": 0,
             "bank_feed": {"configured": False, "auto_sync": False, "mappings": [], "conflicts": []},
@@ -157,12 +167,20 @@ class WorkspaceService:
                             continue
                         if quote is not None:
                             quotes[security.id] = quote
+                opening_ids = load_opening_entry_ids(connection)
+                result["bank_openings"] = load_bank_openings(
+                    connection, accounts, settings.capital_account, entries=entries, opening_ids=opening_ids,
+                )
                 reports = build_reports(
                     entries, accounts, settings, period, quotes=quotes, securities=securities,
                     budget_settings=budget,
-                    savings_allocations=load_savings_allocations(connection).values(),
+                    opening_entry_ids=opening_ids,
                 )
                 budget_report = reports.budget_report
+                result["budget_reviews"] = _budget_review_items(
+                    budget_report, entries, accounts, budget, opening_ids,
+                )
+                result["budget_provisional"] = bool(budget_report.issues)
                 result["financials"] = {
                     "net_worth": reports.balance_sheet.net_worth,
                     "income": budget_report.total_income, "expenses": budget_report.total_expenses,
@@ -178,7 +196,9 @@ class WorkspaceService:
                     if position.price_date is not None and position.market_value is not None
                 ]
                 result["posted_entry_count"] = sum(entry.date <= period.cutoff for entry in entries)
-                financial_counts = budget_transaction_counts(entries, accounts, budget, period)
+                financial_counts = budget_transaction_counts(
+                    entries, accounts, budget, period, opening_entry_ids=opening_ids,
+                )
                 try:
                     result["investment_reviews"] = investment_review_items(
                         connection, accounts, settings, period.cutoff,
@@ -186,6 +206,7 @@ class WorkspaceService:
                 except Exception as error:
                     from aurum.gui.background import error_message
                     result["investment_reviews_error"] = error_message(error)
+                _add_budget_statuses(result, entries, accounts, budget, opening_ids, period.cutoff)
                 import_rows = [
                     dict(zip(("source_hash", "source_file", "imported_at", "parsed_count", "inserted_count"), row))
                     for row in connection.execute(
@@ -284,6 +305,12 @@ class WorkspaceService:
                     if row["manual_entry_id"] == payload.get("manual_entry_id")
                 ), None)
                 manual_view = action in {"open_manual_editor", "reload_manual_editor"}
+                replace_sources = payload.get("replace_unposted_sources", False)
+                expected_manual_revision = payload.get("manual_context_revision")
+                if action == "reload_manual_editor" and payload.get("reload_saved") is True:
+                    expected_manual_revision = None
+                elif replace_sources and not isinstance(expected_manual_revision, str):
+                    raise ValueError("Reload the manual entry before changing its bank transactions.")
                 sources = tuple(payload.get("source_ids", ()))
                 if payload.get("transaction_id"):
                     sources += (payload["transaction_id"],)
@@ -294,32 +321,32 @@ class WorkspaceService:
                     context = {
                         "manual_entry_id": record["manual_entry_id"],
                         "entry": {"date": record["date"], "lines": []},
-                        "direct_unavailable": "Savings-pot allocations stay outside the journal. "
-                        "Edit this allocation as an instruction.",
+                        "direct_unavailable": "This historical savings allocation is inactive. "
+                        "Savings now follow posted cash movements automatically.",
                     }
                 else:
                     context = load_journal_edit(
                         connection, payload.get("journal_entry_id"), accounts,
                         securities=securities, budget=budget, manual_id=payload.get("manual_entry_id"),
                         source_ids=sources, date=initial_date,
+                        replace_unposted_sources=replace_sources, manual_revision=expected_manual_revision,
                     )
                 context["transactions"] = snapshot["transactions"]
                 from aurum.database.bank_feeds import feed_snapshot
-                _add_feed_sources(context, feed_snapshot(connection))
+                feed = feed_snapshot(connection)
+                _add_feed_sources(context, feed)
                 line_number = payload.get("line_number")
                 if type(line_number) is int and line_number > 0:
                     context["focus_line_number"] = line_number
                 settings = load_report_settings(self.config / "reports.yaml", accounts)
+                if context.get("investment_disposals"):
+                    context["investment_disposals"]["unrealised_account_key"] = settings.unrealised_gains_account
                 context.update({
                     "accounts": [
                         {"id": str(item.id), "key": item.key, "name": item.name,
                          "account_type": item.account_type.value, "is_bank": item.bank_details is not None,
                          "bank_details": item.bank_details is not None}
                         for item in accounts.accounts.values()
-                    ],
-                    "budget_categories": [
-                        {"key": key, "name": item.name, "kind": item.kind, "accounts": list(item.accounts)}
-                        for key, item in budget.categories.items()
                     ],
                     "account_investments": [
                         str(accounts.accounts[key].id) for key in settings.account_investments
@@ -341,9 +368,17 @@ class WorkspaceService:
                         "reload_instruction": bool(payload.get("reload_instruction")),
                     })
                 return {"message": "Journal editor ready.", "editor": context}
+            if action == "save_bank_opening":
+                settings = load_report_settings(self.config / "reports.yaml", accounts)
+                return save_bank_opening(
+                    connection, payload, accounts, settings.capital_account,
+                    securities=securities, budget=budget,
+                )
             if action == "apply_journal_edit":
+                settings = load_report_settings(self.config / "reports.yaml", accounts)
                 entry = apply_journal_edit(
                     connection, payload, accounts, securities=securities, budget=budget,
+                    unrealised_account_key=settings.unrealised_gains_account,
                 )
                 return {
                     "message": "Journal entry saved. No AI request was made.",
@@ -351,11 +386,19 @@ class WorkspaceService:
                 }
             if action == "save_reviews":
                 answers = payload.get("answers", [])
-                submit_reviews(connection, accounts, answers=answers)
+                manual_answers = payload.get("manual_answers", [])
+                submit_review_responses(connection, accounts, answers=answers, manual_answers=manual_answers)
+                review_ids = ["bank:" + answer["transaction_id"] for answer in answers]
+                review_ids.extend("manual:" + answer["manual_entry_id"] for answer in manual_answers)
+                count = len(review_ids)
                 return {
                     "transaction_ids": [answer["transaction_id"] for answer in answers],
-                    "message": f"{len(answers)} answers saved. Process to apply them." + (
-                        " Memory saved." if any(remember_text(item["text"]) for item in answers) else ""
+                    "manual_entry_ids": [answer["manual_entry_id"] for answer in manual_answers],
+                    "review_ids": review_ids,
+                    "message": f"{count} response{'s' if count != 1 else ''} saved. Process to apply." + (
+                        " Memory saved." if any(
+                            remember_text(item["text"]) for item in answers + manual_answers
+                        ) else ""
                     ),
                 }
             if action in {"save_review", "discard_review"}:
@@ -406,21 +449,21 @@ class WorkspaceService:
         """
         accounts = load_accounts(self.config / "accounts.yaml", initialise_ids=False)
         securities = load_securities(self.config / "securities.yaml", initialise_ids=False)
-        budget = load_budget_settings(self.config / "budget.yaml", accounts)
+        budget = BudgetSettings.model_validate(read_configuration(self.root, "budget").data)
+        validate_budget_settings(budget, accounts)
         return accounts, securities, budget
 
     def _redbark(
         self, action: str, payload: dict, month: str, progress, cancelled, *, connection_locked: bool = False,
     ) -> dict:
         """
-        Keep connection secrets and first-import previews in the worker, outside GUI result payloads.
+        Keep connection secrets and first-import validation in the worker, outside GUI result payloads.
         """
         from aurum.banking.credentials import bank_connection_lock, delete_key, get_key, save_key
         from aurum.banking.redbark import RedbarkCancelled, RedbarkClient
         from aurum.database.bank_feeds import feed_snapshot
         from aurum.workflows.bank_feeds import (
-            disconnect_feed, preview_connection, resolve_feed_conflict, save_connection,
-            set_auto_sync, sync_bank_feeds,
+            disconnect_feed, preview_connection, resolve_feed_conflict, save_connection, sync_bank_feeds,
         )
 
         if action in {"redbark_enable", "redbark_disconnect"} and not connection_locked:
@@ -444,6 +487,11 @@ class WorkspaceService:
                 raise ValueError("Enter your Redbark API key to check the connection.")
             client = RedbarkClient(key, cancel=cancelled, progress=progress)
             client.check_connection()
+            if cancelled():
+                raise RedbarkCancelled("Connection check stopped. No transactions were imported.")
+            if payload.get("setup") is False:
+                self._bank_sync_error = ""
+                return {"message": "Redbark connection checked.", "data": {"checked": True}}
             discovered = client.list_accounts()
             if cancelled():
                 raise RedbarkCancelled("Connection check stopped. No transactions were imported.")
@@ -454,8 +502,6 @@ class WorkspaceService:
                 ))
                 saved = feed_snapshot(connection)
             token = str(uuid4())
-            self._bank_connections.clear()
-            self._bank_previews.clear()
             self._bank_connections[token] = {
                 "key": key, "accounts": discovered, "configuration": configuration,
                 "feed_revision": saved["revision"],
@@ -478,7 +524,7 @@ class WorkspaceService:
                 "suggested_handover": resolve_period([], month=month).start_date.isoformat(),
                 "mappings": saved.get("mappings", []),
             }}
-        if action == "redbark_preview":
+        if action == "redbark_enable":
             session = self._bank_connections.get(payload.get("connection_token"))
             if session is None or session["configuration"] != configuration:
                 raise ValueError("Account settings changed or the connection expired. Check the connection again.")
@@ -488,24 +534,14 @@ class WorkspaceService:
                     raise ValueError("Bank connection settings changed. Check the connection again.")
                 preview = preview_connection(
                     connection, accounts, client, payload.get("mappings", []),
-                    auto_sync=bool(payload.get("auto_sync", True)),
+                    auto_sync=True,
                     cancelled=cancelled, progress=progress,
                 )
                 if preview["revision"] != session["feed_revision"]:
                     raise ValueError("Bank connection settings changed. Check the connection again.")
             if cancelled():
-                raise RedbarkCancelled("Preview stopped. No transactions were imported.")
-            token = str(uuid4())
-            self._bank_previews.clear()
-            self._bank_previews[token] = {**session, "preview": preview}
-            return {"message": "Preview ready. Confirm to enable the connection and import.", "data": {
-                "preview_token": token, "accounts": preview.get("accounts", []),
-                "mappings": preview.get("mappings", []), "auto_sync": preview.get("auto_sync", True),
-            }}
-        if action == "redbark_enable":
-            session = self._bank_previews.get(payload.get("preview_token"))
-            if session is None or session["configuration"] != configuration:
-                raise ValueError("The preview is no longer current. Preview the import again.")
+                raise RedbarkCancelled("Connection setup stopped. No transactions were imported.")
+            verify_configuration()
             previous = get_key(self.root)
             save_key(self.root, session["key"])
             try:
@@ -513,7 +549,7 @@ class WorkspaceService:
                     raise ValueError("Connection setup stopped before saving.")
                 with closing(self._connection()) as connection:
                     result = save_connection(
-                        connection, accounts, session["preview"], verify_configuration=verify_configuration,
+                        connection, accounts, preview, verify_configuration=verify_configuration,
                     )
             except Exception:
                 if previous is None:
@@ -521,8 +557,7 @@ class WorkspaceService:
                 else:
                     save_key(self.root, previous)
                 raise
-            self._bank_connections.clear()
-            self._bank_previews.clear()
+            self.release_bank_session(payload.get("connection_token"))
             self._bank_sync_error = ""
             return {"message": "Redbark connected. New transactions are ready to Process.", "data": result}
         if action == "redbark_sync":
@@ -552,9 +587,6 @@ class WorkspaceService:
                 message += f" {failed} account(s) could not sync; retry from Statements."
             return {"message": message, "data": result}
         with closing(self._connection()) as connection:
-            if action == "redbark_settings":
-                state = set_auto_sync(connection, bool(payload["auto_sync"]), payload["revision"])
-                return {"message": "Bank sync settings saved.", "data": state}
             if action == "redbark_disconnect":
                 if feed_snapshot(connection)["revision"] != payload["revision"]:
                     raise ValueError("Bank connection settings changed. Refresh before disconnecting.")
@@ -578,13 +610,11 @@ class WorkspaceService:
                             raise RuntimeError(self._bank_sync_error) from None
                     raise
                 self._bank_connections.clear()
-                self._bank_previews.clear()
                 self._bank_sync_error = ""
                 return {"message": "Redbark disconnected. Imported history is retained.", "data": state}
             if action == "redbark_resolve":
                 resolve_feed_conflict(
                     connection, payload["id"], payload["revision"], payload["action"],
-                    transaction_id=payload.get("transaction_id"),
                 )
                 return {"message": "Bank import review saved. Existing journal entries are unchanged."}
         raise ValueError("Unknown bank connection action.")
@@ -635,7 +665,7 @@ class WorkspaceService:
                 learning = learn_from_reviews(
                     connection, accounts, model=model, retry_errors=True,
                     guidance_path=self.data / "ai" / "categorisation_guidelines.md",
-                    client_factory=client_factory, progress=progress, cancelled=cancelled,
+                    client_factory=client_factory, progress=progress, cancelled=cancelled, budget=budget,
                 )
             except Exception as error:
                 from aurum.gui.background import error_message
@@ -683,6 +713,86 @@ class WorkspaceService:
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
+def _budget_review_items(report, entries, accounts, budget, opening_ids) -> list[dict]:
+    """
+    Expose unresolved cash events through the cutoff without manufacturing saved questions.
+    """
+    by_id = {str(entry.id): entry for entry in entries}
+    definitions = {account.id: account for account in accounts.accounts.values()}
+    names = {identifier: account.name for identifier, account in definitions.items()}
+    result = []
+    issues = list(report.issues)
+    for entry in entries:
+        if entry.date < report.start_date:
+            issues.extend(project_budget_entry(
+                entry, accounts, budget, opening=entry.id in opening_ids,
+            ).issues)
+    for issue in issues:
+        entry = by_id.get(str(issue.entry_id))
+        if entry is None:
+            continue
+        card = {
+            "journal_entry_id": str(entry.id), "date": entry.date.isoformat(), "status": "posted",
+            "description": next((line.description for line in entry.lines if line.description), ""),
+            "source_transactions": [str(line.transaction_id) for line in entry.lines if line.transaction_id],
+            "postings": [{**line.model_dump(mode="json", exclude_none=True),
+                          "account": names[line.account_id]} for line in entry.lines],
+        }
+        result.append({
+            **card, "issue_code": issue.code, "question": issue.message, "journal_entry": card,
+            "setup_section": "accounts" if issue.code == "liability_category" else None,
+            "account_key": next((
+                definitions[line.account_id].key for line in entry.lines
+                if definitions[line.account_id].account_type == AccountType.LIABILITY
+                and definitions[line.account_id].key not in budget.liability_categories
+            ), None) if issue.code == "liability_category" else None,
+            "amount": format(sum((line.debit for line in entry.lines), Decimal(0)), ".2f"),
+        })
+    return result
+
+
+def _add_budget_statuses(snapshot: dict, entries, accounts, budget, opening_ids, cutoff: date) -> None:
+    """
+    Classify Journal rows directly from complete events without rebuilding monthly impact previews.
+
+    Targets and retired exclusions do not determine inclusion. Internal Cash transfers receive a descriptive
+    status while their zero contribution preserves the report's existing residual Savings calculation.
+    """
+    by_id = {str(entry.id): entry for entry in entries}
+    openings = {str(identifier) for identifier in opening_ids}
+    for record in snapshot.get("entries", ()):
+        identifier = str(record.get("journal_entry_id") or "")
+        entry = by_id.get(identifier)
+        record["budget_status"] = "Unavailable"
+        record["budget_tooltip"] = "Refresh to load this entry's budget classification."
+        if entry is None:
+            continue
+        if entry.date > cutoff:
+            record["budget_status"] = "After cutoff"
+            record["budget_tooltip"] = f"Accounting date is after {cutoff.isoformat()}."
+            continue
+        try:
+            projection = project_budget_entry(entry, accounts, budget, opening=identifier in openings)
+        except ValueError as error:
+            record["budget_tooltip"] = str(error)
+            continue
+        if projection.issues:
+            record["budget_status"] = "Needs review"
+            record["budget_tooltip"] = "\n".join(issue.message for issue in projection.issues)
+        elif projection.reason == "Cash transfer":
+            record["budget_status"] = "Savings transfer"
+            record["budget_tooltip"] = "Transfer between Cash accounts; budget totals are unchanged."
+        elif projection.rows:
+            record["budget_status"] = "Included"
+            categories = dict.fromkeys(row.name for row in projection.rows if not row.residual)
+            record["budget_tooltip"] = " · ".join(categories) or projection.reason
+        else:
+            record["budget_status"] = "Excluded"
+            record["budget_tooltip"] = (
+                "Opening balance" if projection.reason == "Opening position" else projection.reason
+            )
+
+
 def _add_feed_sources(snapshot: dict, feed: dict) -> None:
     """
     Attach readable API provenance without replacing immutable bank wording or source identities.

@@ -26,12 +26,14 @@ import sqlite3
 from uuid import UUID, uuid4
 
 # Aurum imports
+from aurum.ai.skills import retired_budget_guidance
+from aurum.database.bank_feeds import feed_snapshot
 from aurum.database.journal import (
     _check_journal_sources, _ensure_source_row, _write_entry, load_journal_entries,
 )
 from aurum.database.transactions import from_sqlite_dollars, load_transactions
 from aurum.finance.accounts import AccountRegistry
-from aurum.finance.budget import BudgetSettings, budget_revision, validate_budget_labels
+from aurum.finance.budget import BudgetSettings, budget_revision, project_budget_entry, validate_budget_labels
 from aurum.finance.journal import preserve_account_investments, preserve_budget_categories
 from aurum.database.memory import remember_text
 from aurum.finance.review import Guidance, GuidanceResult, ReviewAnswer, ReviewCase, ReviewOutcome
@@ -322,7 +324,6 @@ def save_review_outcome(
     if outcome.status == "apply":
         entries = preserve_budget_categories(outcome.entries, case.entries)
         entries = preserve_account_investments(entries, case.entries)
-        validate_budget_labels(entries, accounts, budget, case.entries)
         outcome = ReviewOutcome.model_validate({**outcome.model_dump(), "entries": entries})
     if outcome.case_id != case.id:
         raise ValueError("The review outcome belongs to a different request")
@@ -334,6 +335,15 @@ def save_review_outcome(
         before = _check_case(connection, case, accounts)
         if outcome.status == "apply":
             _check_replacements(connection, case, outcome, accounts)
+            validate_budget_labels(
+                outcome.entries, accounts, budget, case.entries, transactions=load_transactions(connection),
+                transfer_evidence=feed_snapshot(connection)["provenance"],
+            )
+            if budget is not None:
+                issues = [issue for entry in outcome.entries
+                          for issue in project_budget_entry(entry, accounts, budget).issues]
+                if issues:
+                    raise ValueError(" ".join(issue.message for issue in issues))
             _replace_entries(connection, case, outcome, accounts)
             if any(remember_text(answer.human_review) for answer in case.answers):
                 outcome = outcome.model_copy(update={
@@ -752,6 +762,10 @@ def _activate_guidance(
                     (str(case.id), identifier),
                 )
     for number, item in enumerate(guidance, start=1):
+        if retired_budget_guidance(item.scope + " " + item.instruction):
+            disposition["rejected"] += 1
+            disposition["messages"].append(f"Guidance {number}: retired budget overrides are not supported.")
+            continue
         if not set(item.account_ids) <= known_accounts:
             disposition["rejected"] += 1
             disposition["messages"].append(

@@ -783,6 +783,7 @@ def build_reports(
     quotes: Mapping[UUID, PriceQuote],
     budget_settings: BudgetSettings,
     savings_allocations: Iterable[SavingsAllocation] = (),
+    opening_entry_ids: Iterable[UUID] = (),
     securities: SecurityRegistry | None = None,
     valuation_errors: Mapping[UUID, str] | None = None,
     draft_reasons: Iterable[str] = (),
@@ -871,7 +872,7 @@ def build_reports(
             draft_reasons=common_drafts,
         ),
         budget_report=build_budget_report(
-            included, accounts, budget_settings, period, allocations=savings_allocations,
+            included, accounts, budget_settings, period, opening_entry_ids=opening_entry_ids,
             draft_reasons=common_drafts,
         ),
         investment_report=investment_report,
@@ -1143,10 +1144,10 @@ def _account_investment_cost(entries: tuple[JournalEntry, ...], account_id: UUID
             if details is None or details.kind == "unclassified":
                 return None
             if details.kind == "contribution":
-                cents += _cents(line.debit)
+                cents += _cents(line.debit) - _cents(line.credit)
             elif details.kind == "opening":
                 cents += _cents(details.cost_basis)
-    return _money(cents)
+    return _money(cents) if cents >= 0 else None
 
 
 def _gain_percentage(gain: Decimal, cost: Decimal) -> Decimal | None:

@@ -10,11 +10,12 @@ their unchanged transactions, calculates one requested split remainder and valid
 This module returns validated results for the desktop workflow to save. Investment proposals preserve supplied
 facts while Python calculates units and carrying cost.
 The workflow saves these proposals before retrieving any missing market price.
-Virtual savings cases return only human-supplied pot amounts; their separate storage never changes accounting.
+Budget effects come only from the shared cash-flow projection; AI never proposes budget overrides.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
+from collections.abc import Mapping
 from decimal import Decimal
 import json
 import re
@@ -28,18 +29,22 @@ from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
 from aurum.ai.skills import Skill, explicit_memory_context, guidance_context, load_manual_skill
 from aurum.finance.accounts import AccountRegistry, AccountType
-from aurum.finance.budget import BudgetSettings, budget_catalogue, validate_budget_labels
+from aurum.finance.budget import (
+    BudgetSettings, budget_policy, project_budget_entry, validate_budget_labels,
+)
 from aurum.finance.journal import (
     AccountInvestmentDetails, InvestmentDetails, JournalEntry, JournalLine,
     preserve_account_investments, preserve_budget_categories,
 )
-from aurum.finance.investments import InvestmentInstruction, PriceQuote, calculate_investment
+from aurum.finance.investments import (
+    AccountWithdrawalInstruction, InvestmentInstruction, PriceQuote, build_account_withdrawal,
+    build_security_sale, calculate_investment, investment_cash_available,
+)
 from aurum.finance.manual import ManualCase, ManualOutcome
 from aurum.finance.reports import ReportSettings
 from aurum.finance.review import Guidance
 from aurum.finance.transaction import Transaction
 from aurum.finance.securities import SecurityRegistry
-from aurum.finance.savings import SavingsAllocation, SavingsAmount
 
 
 MAX_MANUAL_BATCH_SIZE = 20
@@ -73,7 +78,6 @@ class _Posting(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     account_key: str
-    budget_category: str | None = None
     account_investment: AccountInvestmentDetails | None = None
     source_ref: str | None
     side: Literal["debit", "credit"] | None
@@ -100,9 +104,9 @@ class _Investment(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    operation: Literal["opening", "buy"]
+    operation: Literal["opening", "buy", "sell"]
+    realised_account_key: str | None
     account_key: str
-    budget_category: str | None = None
     security_key: str
     counterpart_key: str
     source_ref: str | None
@@ -113,25 +117,19 @@ class _Investment(BaseModel):
     amount_includes_fees: bool
 
 
-class _SavingsAmount(BaseModel):
+class _Withdrawal(BaseModel):
     """
-    Copy a human-supplied amount for one existing virtual pot without producing ledger postings.
+    Copy confirmed balance-only withdrawal facts for deterministic cost and gain calculation.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    category_key: str
+    account_key: str
+    counterpart_key: str
+    realised_account_key: str
+    source_ref: str | None
     amount: str = Field(pattern=r"^[0-9]+(?:\.[0-9]{1,2})?$")
-
-
-class _Savings(BaseModel):
-    """
-    Supply the complete replacement split; an empty tuple explicitly resets this instruction.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    amounts: tuple[_SavingsAmount, ...] = Field(max_length=50)
+    confirmed_value: str = Field(pattern=r"^[0-9]+(?:\.[0-9]{1,2})?$")
 
 
 class _Proposal(BaseModel):
@@ -142,13 +140,13 @@ class _Proposal(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True, str_strip_whitespace=True)
 
     case_ref: str
-    event_kind: Literal["general", "opening", "investment", "savings"]
+    event_kind: Literal["general", "opening", "investment", "withdrawal"]
     status: Literal["apply", "needs_review", "unsupported"]
     reason: str = Field(min_length=1, max_length=400)
     question: str | None = Field(min_length=1, max_length=400)
     lines: tuple[_Posting, ...] = Field(max_length=50)
     investment: _Investment | None = None
-    savings: _Savings | None = None
+    withdrawal: _Withdrawal | None = None
 
     @model_validator(mode="after")
     def _check_state(self) -> Self:
@@ -161,13 +159,13 @@ class _Proposal(BaseModel):
             if self.event_kind == "investment":
                 if self.investment is None or self.lines:
                     raise ValueError("An investment needs facts instead of model-calculated postings.")
-            elif self.event_kind == "savings":
-                if self.savings is None or self.lines or self.investment is not None:
-                    raise ValueError("Savings needs a split, without journal or investment postings")
+            elif self.event_kind == "withdrawal":
+                if self.withdrawal is None or self.lines or self.investment is not None:
+                    raise ValueError("A withdrawal needs confirmed facts instead of model-calculated postings")
             elif len(self.lines) < 2:
                 raise ValueError("An applied proposal needs at least two lines.")
-        if self.savings is not None and (self.event_kind != "savings" or self.status != "apply"):
-            raise ValueError("Only a complete savings proposal can contain a split")
+        if self.withdrawal is not None and (self.event_kind != "withdrawal" or self.status != "apply"):
+            raise ValueError("Only a complete withdrawal proposal can contain confirmed facts")
         if self.investment is not None and (
             self.event_kind != "investment" or self.status != "apply"
         ):
@@ -198,6 +196,8 @@ def manual_batch(
     explicit_memory: list[dict] | None = None,
     securities: SecurityRegistry | None = None, budget: BudgetSettings | None = None,
     report_settings: ReportSettings | None = None,
+    transfer_evidence: Mapping[str, Mapping[str, object]] | None = None,
+    ledger_entries: list[JournalEntry] | None = None,
 ) -> tuple[dict[UUID, ManualOutcome], dict[UUID, str], dict]:
     """
     Interpret independent manual cases and validate each result without changing saved accounting.
@@ -209,7 +209,7 @@ def manual_batch(
         skill: Manual-entry instructions loaded once by the workflow, or None to load the project skill here.
         guidance: Accepted preferences supplied as context, never as automatic posting rules.
         securities: Existing instruments available for opening holdings and purchases.
-        budget: Optional permitted reporting labels; accounting accounts and amounts remain unchanged.
+        budget: Shared deterministic cash-flow roles; no model-selected budget labels are accepted.
 
     Returns:
         Valid outcomes, safe per-submission failures and reported token usage. Empty input makes no request.
@@ -226,10 +226,28 @@ def manual_batch(
         raise ValueError("Select a model before interpreting manual entries.")
     references, sources, payload = _request_context(
         cases, accounts, guidance, securities, budget, report_settings, explicit_memory,
+        transfer_evidence,
     )
+    investment_cash = {}
+    for reference, case in references.items():
+        available = {}
+        for key in budget.investment_accounts if budget is not None else ():
+            if key not in accounts.accounts or report_settings and key in report_settings.account_investments:
+                continue
+            value = investment_cash_available(
+                ledger_entries or [], accounts.accounts[key].id, case.submission.date,
+                excluding=case.entries[0].id if len(case.entries) == 1 else None,
+            )
+            if value is not None:
+                available[key] = value
+        investment_cash[reference] = available
+    for item in payload["cases"]:
+        item["verified_brokerage_cash"] = {
+            key: format(value, ".2f") for key, value in investment_cash[item["case_ref"]].items()
+        }
     skill = skill or load_manual_skill()
     response, usage = client.request(
-        instructions=skill.instructions, payload=payload,
+        instructions=skill.instructions + "\n\n" + budget_policy(budget)["rule"], payload=payload,
         output_schema=_response_schema(references, sources, accounts, securities, budget),
     )
     records = _read_response(response, references, usage)
@@ -241,55 +259,62 @@ def manual_batch(
             continue
         try:
             proposal = _Proposal.model_validate_json(json.dumps(values[0]))
-            if proposal.status == "apply" and (
-                (proposal.event_kind == "savings") != (case.savings_context is not None)
-            ):
-                raise ValueError("Virtual savings and accounting entries must use their own request context")
-            if proposal.event_kind == "savings" and proposal.status == "apply":
-                if budget is None or budget.savings is None or proposal.savings is None:
-                    raise ValueError("Configure the budget's savings pots before allocating")
-                allocation = SavingsAllocation(
-                    date=case.submission.date,
-                    amounts=tuple(SavingsAmount.model_validate(item.model_dump())
-                                  for item in proposal.savings.amounts),
-                )
-                permitted = set(budget.savings.category_keys) - {budget.savings.residual_category}
-                if any(item.category_key not in permitted for item in allocation.amounts):
-                    raise ValueError("Select a configured non-residual savings pot")
+            if proposal.event_kind == "withdrawal" and proposal.status == "apply":
+                facts = proposal.withdrawal
+                if facts is None or report_settings is None or not report_settings.unrealised_gains_account:
+                    raise _SourceClarification("Confirm the fund facts and configure its unrealised-gain account.")
+                if facts.realised_account_key not in accounts.accounts:
+                    raise _SourceClarification("Choose the configured income account for realised returns.")
+                source = sources.get(facts.source_ref) if facts.source_ref else None
+                if facts.source_ref is not None and source is None:
+                    raise ValueError("The manual proposal selected an unknown source.")
+                instruction = AccountWithdrawalInstruction.model_validate({
+                    **facts.model_dump(exclude={"source_ref"}),
+                    "transaction_id": source.transaction_id if source else None,
+                    "unrealised_account_key": report_settings.unrealised_gains_account,
+                })
                 outcomes[case.submission.id] = ManualOutcome(
-                    manual_id=case.submission.id, status="apply", event_kind="savings",
-                    savings=allocation, reason=proposal.reason, model=model, skill_version=skill.version,
+                    manual_id=case.submission.id, status="pricing", event_kind="withdrawal",
+                    withdrawal=instruction, reason=proposal.reason, model=model, skill_version=skill.version,
                 )
                 continue
             if proposal.event_kind == "investment" and proposal.status == "apply":
                 if proposal.investment is None:
                     raise ValueError("An investment proposal needs its supplied facts")
+                if proposal.investment.operation == "sell" and not proposal.investment.realised_account_key:
+                    raise _SourceClarification("Choose the configured income account for the realised return.")
                 instruction = _investment_instruction(proposal.investment, sources, accounts, securities)
                 outcomes[case.submission.id] = ManualOutcome(
                     manual_id=case.submission.id, status="pricing", event_kind="investment",
-                    investment=instruction, investment_budget_category=proposal.investment.budget_category,
+                    investment=instruction,
                     reason=proposal.reason,
                     model=model, skill_version=skill.version,
                 )
                 continue
             if proposal.status == "apply" and _replaces_investment(case, proposal, sources):
                 outcomes[case.submission.id] = ManualOutcome(
-                    manual_id=case.submission.id, status="unsupported",
-                    reason="Correct investment details with an opening-holding or purchase instruction.",
+                    manual_id=case.submission.id, status="needs_review",
+                    reason="Investment corrections must retain their units and carrying cost.",
+                    question="Supply the corrected holding, purchase, sale or withdrawal facts in Manual.",
                     model=model, skill_version=skill.version,
                 )
                 continue
-            entry = _build_entry(case, proposal, sources, accounts, budget)
+            entry = _build_entry(
+                case, proposal, sources, accounts, budget, transfer_evidence,
+                investment_cash=investment_cash[reference],
+            )
             outcomes[case.submission.id] = ManualOutcome(
-                manual_id=case.submission.id, status=proposal.status,
+                manual_id=case.submission.id,
+                status="needs_review" if proposal.status == "unsupported" else proposal.status,
                 event_kind=proposal.event_kind,
-                entry=entry, reason=proposal.reason, question=proposal.question,
+                entry=entry, reason=proposal.reason,
+                question=proposal.reason if proposal.status == "unsupported" else proposal.question,
                 model=model, skill_version=skill.version,
             )
         except _SourceClarification as error:
             outcomes[case.submission.id] = ManualOutcome(
                 manual_id=case.submission.id, status="needs_review",
-                reason="The supplied bank evidence cannot distinguish this source from an identical row.",
+                reason="This event needs additional supported accounting facts.",
                 question=str(error), model=model, skill_version=skill.version,
             )
         except (TypeError, ValueError) as error:
@@ -303,6 +328,8 @@ def manual_batch(
         )
         if outcome.investment is not None and outcome.investment.transaction_id is not None:
             selected.add(outcome.investment.transaction_id)
+        if outcome.withdrawal is not None and outcome.withdrawal.transaction_id is not None:
+            selected.add(outcome.withdrawal.transaction_id)
         selections[identifier] = selected
     competing = {identifier for identifier, selected in selections.items() if any(
         selected & other for key, other in selections.items() if key != identifier
@@ -320,7 +347,8 @@ def manual_batch(
 
 def complete_investment(
     case: ManualCase, outcome: ManualOutcome, accounts: AccountRegistry,
-    securities: SecurityRegistry, *, quote: PriceQuote | None = None, budget: BudgetSettings | None = None,
+    securities: SecurityRegistry | None, *, quote: PriceQuote | None = None,
+    budget: BudgetSettings | None = None, ledger_entries: list[JournalEntry] | None = None,
 ) -> ManualOutcome:
     """
     Turn a saved investment interpretation into a balanced event using exact Python calculations.
@@ -328,9 +356,30 @@ def complete_investment(
     Supplied bank amounts and source groups are checked by the same builder used for general manuals.
     Reference quotes remain in the result; only actual execution prices go onto investment journal lines.
     """
+    if outcome.withdrawal is not None:
+        instruction = outcome.withdrawal
+        realised = accounts.accounts.get(instruction.realised_account_key)
+        unrealised = accounts.accounts.get(instruction.unrealised_account_key)
+        if realised is None or unrealised is None:
+            raise ValueError("Restore the explicitly selected realised and unrealised return accounts")
+        entry, calculation = build_account_withdrawal(
+            instruction, ledger_entries or [], accounts, case.submission.date,
+            realised.id, unrealised.id,
+            source=next((row for row in case.available_transactions
+                         if row.transaction_id == instruction.transaction_id), None),
+            entry_id=case.entries[0].id if len(case.entries) == 1 else None,
+        )
+        _validate_completed_investment(case, entry, accounts, budget)
+        return ManualOutcome(
+            manual_id=outcome.manual_id, status="apply", event_kind="withdrawal", entry=entry,
+            withdrawal=instruction, withdrawal_calculation=calculation, reason=outcome.reason,
+            model=outcome.model, skill_version=outcome.skill_version,
+        )
     instruction = outcome.investment
     if outcome.status != "pricing" or instruction is None:
         raise ValueError("An investment needs a saved interpretation before pricing")
+    if securities is None:
+        raise ValueError("Configure the security before completing this investment")
     security = securities.securities.get(instruction.security_key)
     asset = accounts.accounts.get(instruction.account_key)
     counterpart = accounts.accounts.get(instruction.counterpart_key)
@@ -340,6 +389,20 @@ def complete_investment(
         raise ValueError("Select a non-bank asset account for the investment holding")
     sources = {row.transaction_id: row for row in case.available_transactions}
     source = sources.get(instruction.transaction_id) if instruction.transaction_id is not None else None
+    if instruction.operation == "sell":
+        if instruction.realised_account_key not in accounts.accounts:
+            raise ValueError("Choose the configured income account for the realised return")
+        entry, calculation = build_security_sale(
+            instruction, ledger_entries or [], accounts, securities, case.submission.date,
+            accounts.accounts[instruction.realised_account_key].id, source=source,
+            entry_id=case.entries[0].id if len(case.entries) == 1 else None,
+        )
+        _validate_completed_investment(case, entry, accounts, budget)
+        return ManualOutcome(
+            manual_id=outcome.manual_id, status="apply", event_kind="investment", entry=entry,
+            investment=instruction, pricing=calculation, reason=outcome.reason,
+            model=outcome.model, skill_version=outcome.skill_version,
+        )
     if instruction.transaction_id is not None and (
         source is None or source.account_id != counterpart.id or source.amount >= 0
     ):
@@ -359,7 +422,6 @@ def complete_investment(
         question=None, lines=(
             _Posting(
                 account_key=asset.key, source_ref=None, side="debit", amount=total, description=None,
-                budget_category=outcome.investment_budget_category,
             ),
             _Posting(
                 account_key=counterpart.key, source_ref="settlement" if source is not None else None,
@@ -370,6 +432,7 @@ def complete_investment(
     )
     entry = _build_entry(
         case, proposal, {"settlement": source} if source is not None else {}, accounts, budget,
+        investment_build=True,
     )
     if entry is None:
         raise ValueError("An investment needs complete debit and credit postings")
@@ -384,7 +447,6 @@ def complete_investment(
     return ManualOutcome(
         manual_id=outcome.manual_id, status="apply", event_kind="investment",
         entry=entry, investment=instruction, pricing=calculation, reason=outcome.reason,
-        investment_budget_category=outcome.investment_budget_category,
         model=outcome.model, skill_version=outcome.skill_version,
     )
 
@@ -394,6 +456,7 @@ def _request_context(
     securities: SecurityRegistry | None = None, budget: BudgetSettings | None = None,
     report_settings: ReportSettings | None = None,
     explicit_memory: list[dict] | None = None,
+    transfer_evidence: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[dict, dict, dict]:
     """
     Validate independent cases and send a compact account catalogue with short, redacted evidence references.
@@ -455,8 +518,6 @@ def _request_context(
             "instruction": _safe_text(case.submission.instruction, accounts, identifiers),
             "human_response": _safe_text(case.submission.human_response, accounts, identifiers),
             "question": _safe_text(case.question or "", accounts, identifiers) or None,
-            "savings_context": case.savings_context.model_dump(mode="json", exclude={"revision"})
-            if case.savings_context is not None else None,
             "required_source_refs": [source_refs[identifier] for identifier in case.required_sources],
             "available_source_refs": [source_refs[row.transaction_id] for row in case.available_transactions],
             "current_entries": [
@@ -469,7 +530,6 @@ def _request_context(
                             "source_ref": source_refs[line.transaction_id] if line.transaction_id else None,
                             "debit": format(line.debit, ".2f"), "credit": format(line.credit, ".2f"),
                             "description": _safe_text(line.description, accounts, identifiers),
-                            "budget_category": line.budget_category,
                             "account_investment": line.account_investment.model_dump(mode="json")
                             if line.account_investment is not None else None,
                             "investment": line.investment.model_dump(mode="json", exclude={"security_id"})
@@ -500,18 +560,7 @@ def _request_context(
             }
             for reference, row in sources.items()
         ],
-        "budget_categories": [
-            {**item, "name": _safe_text(item["name"], accounts, {})}
-            for item in budget_catalogue(budget)
-        ] if budget is not None else [],
-        "savings": {
-            "basis": "budget_income_minus_expenses",
-            "residual_category": budget.savings.residual_category,
-            "pots": [
-                {"key": key, "name": _safe_text(budget.categories[key].name, accounts, {})}
-                for key in budget.savings.category_keys
-            ],
-        } if budget is not None and budget.savings is not None else None,
+        "budget_policy": budget_policy(budget),
         "securities": [
             {
                 "key": item.key, "name": _safe_text(item.name, accounts, {}),
@@ -580,7 +629,7 @@ def _investment_instruction(
     source = sources.get(proposal.source_ref) if proposal.source_ref is not None else None
     if proposal.source_ref is not None and source is None:
         raise ValueError("The manual proposal selected an unknown source.")
-    values = proposal.model_dump(exclude={"source_ref", "budget_category"})
+    values = proposal.model_dump(exclude={"source_ref"})
     return InvestmentInstruction.model_validate({
         **values, "transaction_id": source.transaction_id if source is not None else None,
     })
@@ -604,6 +653,8 @@ def _replaces_investment(case: ManualCase, proposal: _Proposal, sources: dict) -
 def _build_entry(
     case: ManualCase, proposal: _Proposal, sources: dict[str, Transaction],
     accounts: AccountRegistry, budget: BudgetSettings | None = None,
+    transfer_evidence: Mapping[str, Mapping[str, object]] | None = None,
+    *, investment_cash: dict[str, Decimal] | None = None, investment_build: bool = False,
 ) -> JournalEntry | None:
     """
     Build one event from unchanged bank facts and exact manual amounts, preserving complete prior events.
@@ -648,7 +699,7 @@ def _build_entry(
                 debit=source.amount if source.amount > 0 else Decimal("0"),
                 credit=source.amount.copy_negate() if source.amount < 0 else Decimal("0"),
                 description=source.description, effective_date=source.effective_date,
-                budget_category=posting.budget_category, account_investment=posting.account_investment,
+                account_investment=posting.account_investment,
             ))
             continue
         if account.bank_details is not None:
@@ -670,7 +721,7 @@ def _build_entry(
                 raise ValueError("A manual event can contain only one remaining amount.")
             remaining = (
                 index, account.id, posting.side, text, effective_date,
-                posting.budget_category, posting.account_investment,
+                None, posting.account_investment,
             )
             fixed.append(None)
             continue
@@ -679,7 +730,7 @@ def _build_entry(
         amount = Decimal(posting.amount)
         fixed.append(JournalLine(
             account_id=account.id, description=text, effective_date=effective_date,
-            budget_category=posting.budget_category, account_investment=posting.account_investment,
+            account_investment=posting.account_investment,
             debit=amount if posting.side == "debit" else Decimal("0"),
             credit=amount if posting.side == "credit" else Decimal("0"),
         ))
@@ -718,8 +769,47 @@ def _build_entry(
     )
     entry = preserve_budget_categories((entry,), affected)[0]
     entry = preserve_account_investments((entry,), affected)[0]
-    validate_budget_labels((entry,), accounts, budget, affected)
+    if budget is not None and not investment_build:
+        for key in budget.investment_accounts:
+            account = accounts.accounts.get(key)
+            if account is None:
+                continue
+            outgoing = sum((line.credit for line in entry.lines if line.account_id == account.id
+                            and (line.account_investment is None
+                                 or line.account_investment.kind != "earnings")), Decimal("0"))
+            if outgoing > (investment_cash or {}).get(key, Decimal("0")):
+                raise _SourceClarification(
+                    "Supply the security sale facts or confirm the fund withdrawal value and basis. "
+                    "A later cash transfer needs evidence that the sale was already recorded."
+                )
+    validate_budget_labels(
+        (entry,), accounts, budget, affected, transactions=sources.values(),
+        transfer_evidence=transfer_evidence,
+    )
+    issues = project_budget_entry(
+        entry, accounts, budget, opening=proposal.event_kind == "opening",
+    ).issues if budget is not None else ()
+    if issues:
+        raise _SourceClarification(" ".join(issue.message for issue in issues))
     return entry
+
+
+def _validate_completed_investment(
+    case: ManualCase, entry: JournalEntry, accounts: AccountRegistry, budget: BudgetSettings | None,
+) -> None:
+    """
+    Preserve required source coverage and reject unsupported cash-flow projection after deterministic building.
+    """
+    selected = {line.transaction_id for line in entry.lines if line.transaction_id is not None}
+    if not set(case.required_sources) <= selected:
+        raise ValueError("An investment must preserve every required bank source")
+    for previous in case.available_entries:
+        sources = {line.transaction_id for line in previous.lines if line.transaction_id is not None}
+        if selected & sources and not sources <= selected:
+            raise ValueError("An investment must preserve its complete existing source group")
+    issues = project_budget_entry(entry, accounts, budget).issues if budget is not None else ()
+    if issues:
+        raise ValueError(" ".join(issue.message for issue in issues))
 
 
 def _cents(value: Decimal) -> int:
@@ -769,17 +859,15 @@ def _response_schema(
     result["properties"]["case_ref"]["enum"] = list(references)
     result["required"] = list(result["properties"])
     result["properties"]["investment"].pop("default", None)
-    result["properties"]["savings"].pop("default", None)
-    if budget is not None and budget.savings is not None:
-        pots = [
-            key for key in budget.savings.category_keys if key != budget.savings.residual_category
-        ]
-        if pots:
-            definitions["_SavingsAmount"]["properties"]["category_key"]["enum"] = pots
-        else:
-            definitions["_Savings"]["properties"]["amounts"]["maxItems"] = 0
-    else:
-        result["properties"]["savings"] = {"type": "null"}
+    result["properties"]["withdrawal"].pop("default", None)
+    withdrawal = definitions["_Withdrawal"]["properties"]
+    for key in ("account_key", "counterpart_key", "realised_account_key"):
+        withdrawal[key]["enum"] = list(accounts.accounts)
+    withdrawal["source_ref"] = (
+        {"anyOf": [{"type": "string", "enum": list(sources)}, {"type": "null"}]}
+        if sources else {"type": "null"}
+    )
+    definitions["_Withdrawal"]["required"] = list(withdrawal)
     if securities is None or not securities.securities:
         result["properties"]["investment"] = {"type": "null"}
     else:
@@ -791,20 +879,19 @@ def _response_schema(
             investment["source_ref"]["anyOf"][0]["enum"] = list(sources)
         else:
             investment["source_ref"] = {"type": "null"}
+    income_keys = [
+        key for key, account in accounts.accounts.items() if account.account_type == AccountType.INCOME
+    ]
+    if income_keys:
+        definitions["_Investment"]["properties"]["realised_account_key"]["anyOf"][0]["enum"] = income_keys
+        withdrawal["realised_account_key"]["enum"] = income_keys
+    else:
+        definitions["_Investment"]["properties"]["realised_account_key"] = {"type": "null"}
+        result["properties"]["withdrawal"] = {"type": "null"}
     posting = definitions["_Posting"]["properties"]
     posting["account_investment"].pop("default", None)
     posting["account_key"]["enum"] = list(accounts.accounts)
-    labels = (
-        [item["key"] for item in budget_catalogue(budget)] if budget is not None else
-        sorted({line.budget_category for case in references.values() for entry in case.available_entries
-                for line in entry.lines if line.budget_category is not None})
-    )
-    category = (
-        {"anyOf": [{"type": "string", "enum": labels}, {"type": "null"}]} if labels else {"type": "null"}
-    )
-    posting["budget_category"] = category
     definitions["_Posting"]["required"] = list(posting)
-    definitions["_Investment"]["properties"]["budget_category"] = category
     definitions["_Investment"]["required"] = list(definitions["_Investment"]["properties"])
     if sources:
         posting["source_ref"]["anyOf"][0]["enum"] = list(sources)

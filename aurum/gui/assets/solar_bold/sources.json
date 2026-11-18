@@ -109,10 +109,17 @@
     },
     {
       "role": "refresh",
-      "name": "Refresh",
-      "path": "icons/SVG/Bold/Arrows/Refresh.svg",
-      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows/Refresh.svg",
-      "original_sha256": "2b9202e476fbd8fb250b0c490cbc8a8e446bacd3e7e8344168203564673d7311"
+      "name": "Refresh Circle",
+      "path": "icons/SVG/Bold/Arrows/Refresh Circle.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows/Refresh%20Circle.svg",
+      "original_sha256": "0c22a9ce466971c7682bb9e80e0a80bdf47588c2c9468aa088e62fea6ca4f9c0",
+      "previous_asset": {
+        "local_path": "archive/refresh.svg",
+        "name": "Refresh",
+        "path": "icons/SVG/Bold/Arrows/Refresh.svg",
+        "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows/Refresh.svg",
+        "original_sha256": "2b9202e476fbd8fb250b0c490cbc8a8e446bacd3e7e8344168203564673d7311"
+      }
     },
     {
       "role": "folder",

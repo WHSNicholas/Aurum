@@ -178,6 +178,10 @@ class _ThemeDelegate(QStyledItemDelegate):
         count = min(5, len(palette))
         preview_width = count * 9 + max(0, count - 1) * 3
         right = option.rect.right() - 13
+        if count:
+            painter.setBrush(QColor("#ffffff"))
+            backing = QRectF(right - preview_width - 4, option.rect.center().y() - 9, preview_width + 8, 18)
+            painter.drawRoundedRect(backing, 9, 9)
         for number in range(count):
             position = round(number * (len(palette) - 1) / (count - 1)) if count > 1 else 0
             painter.setBrush(QColor(palette[position]))

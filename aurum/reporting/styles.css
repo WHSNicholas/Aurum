@@ -263,9 +263,10 @@ footer::before {
 .budget-savings .progress-track { background: var(--report-savings-track); }
 .budget-savings .progress-fill { background: var(--report-savings-fill); }
 .investment-table td { height: auto; padding: 6px 10px; font-size: 9px; }
+.investment-table tr.compact-holding td { padding-top: 4px; padding-bottom: 4px; }
 .holding-detail { display: block; color: var(--report-muted); font: 400 6.5px/1.4 Geist, sans-serif; }
 .investment-table .portfolio-total { color: var(--report-on-table-header); background: var(--report-table-header); }
 .investment-table .portfolio-total td:first-child { text-transform: uppercase; font-size: 9px; }
 .investment-table .portfolio-total td:first-child { border-radius: 8px 0 0 8px; }
 .investment-table .portfolio-total td:last-child { border-radius: 0 8px 8px 0; }
-.investment-report .allocation-chart { width: 50%; margin: 10px auto; }
+.investment-report .allocation-chart { width: 39.6%; margin: 6px auto; }

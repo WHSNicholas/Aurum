@@ -20,6 +20,7 @@ from uuid import UUID
 from aurum.ai.categorisation import Decision
 from aurum.database.journal import _check_journal_sources, _ensure_source_row, _write_entry
 from aurum.finance.accounts import AccountRegistry, AccountType
+from aurum.finance.budget import BudgetSettings, project_budget_entry
 from aurum.finance.journal import JournalEntry
 
 
@@ -79,6 +80,7 @@ def save_decisions(
 def save_categorisation_batch(
     connection: sqlite3.Connection, decisions: list[Decision],
     entries_by_transaction: dict[UUID, JournalEntry], accounts: AccountRegistry,
+    *, budget: BudgetSettings | None = None,
 ) -> None:
     """
     Save a completed AI batch's accounting entries and review questions in one atomic commit.
@@ -126,7 +128,7 @@ def save_categorisation_batch(
                 raise ValueError("Every categorisation result must have a reserved requesting source")
             if decision.status == "classified":
                 _check_classification_entry(
-                    connection, decision, entries[decision.transaction_id], accounts,
+                    connection, decision, entries[decision.transaction_id], accounts, budget=budget,
                 )
         for decision in decisions:
             if decision.status == "classified":
@@ -237,9 +239,10 @@ def _write_record(connection: sqlite3.Connection, decision: Decision) -> None:
 
 def _check_classification_entry(
     connection: sqlite3.Connection, decision: Decision, entry: JournalEntry, accounts: AccountRegistry,
+    *, budget: BudgetSettings | None = None,
 ) -> None:
     """
-    Require an ordinary classified event to use its exact source and selected income or expense account.
+    Require exact source facts and a configured counterpart supported by the shared cash-flow policy.
     """
     _check_journal_sources(connection, entry, accounts)
     sources = [line for line in entry.lines if line.transaction_id is not None]
@@ -250,9 +253,18 @@ def _check_classification_entry(
     selected = next(
         (account for account in accounts.accounts.values() if account.id == decision.account_id), None,
     )
-    expected = AccountType.INCOME if bank.debit > 0 else AccountType.EXPENSE
-    if selected is None or selected.account_type != expected or counterpart.account_id != selected.id:
-        raise ValueError("The classified entry must post to the selected income or expense account")
+    supported = selected is not None and (
+        selected.account_type in {AccountType.INCOME, AccountType.EXPENSE}
+        or budget is not None and selected.key in {
+            *budget.investment_accounts, *budget.liability_categories, budget.capital_account,
+        }
+    )
+    if not supported or selected.bank_details is not None or counterpart.account_id != selected.id:
+        raise ValueError("The classified entry must use its selected supported counterpart account")
+    if budget is not None:
+        issues = project_budget_entry(entry, accounts, budget).issues
+        if issues:
+            raise ValueError(" ".join(issue.message for issue in issues))
     source_date = connection.execute(
         "SELECT date FROM transactions WHERE transaction_id = ?", (str(decision.transaction_id),)
     ).fetchone()[0]

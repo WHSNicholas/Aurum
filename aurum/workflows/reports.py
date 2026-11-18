@@ -31,10 +31,10 @@ from aurum.database.journal import load_journal_entries
 from aurum.database.manual import load_manual_entries
 from aurum.database.prices import load_valuation_quote
 from aurum.database.reviews import load_review_answers, load_review_cases, load_review_baselines
-from aurum.database.savings import load_savings_allocations
+from aurum.database.manual import load_opening_entry_ids
 from aurum.database.transactions import load_transactions
 from aurum.finance.accounts import DEFAULT_ACCOUNTS, AccountRegistry, load_accounts
-from aurum.finance.budget import DEFAULT_BUDGET_SETTINGS, load_budget_settings, validate_budget_plan
+from aurum.finance.budget import DEFAULT_BUDGET_SETTINGS, BudgetSettings
 from aurum.finance.investments import PriceQuote, PriceUnavailable, get_quote, holdings_as_of, price_symbol
 from aurum.finance.journal import JournalEntry
 from aurum.finance.reports import (
@@ -95,7 +95,8 @@ def generate_reports(
     emit("Reading account configuration and posted journal...")
     accounts = load_accounts(accounts_path, initialise_ids=False)
     settings = load_report_settings(settings_path, accounts)
-    budget_settings = load_budget_settings(budget_path, accounts)
+    from aurum.workflows.configuration import read_configuration
+    budget_settings = BudgetSettings.model_validate(read_configuration(Path(workspace), "budget").data)
     destination = resolve_output_directory(settings, Path(workspace), output_dir)
     database = Path(database_path).resolve()
 
@@ -111,9 +112,8 @@ def generate_reports(
         if not required <= present:
             raise ValueError("Prepare the journal before reporting; required accounting tables are missing")
         entries = load_journal_entries(connection, accounts)
-        savings_allocations = tuple(load_savings_allocations(connection).values())
+        opening_ids = load_opening_entry_ids(connection)
         period = resolve_period(entries, month=month, today=today)
-        validate_budget_plan(budget_settings, period.month)
         draft_reasons = _unfinished_accounting(connection, entries, period.cutoff, accounts)
 
     # Release the snapshot lock before any cache write; no accounting connection is reopened for writing.
@@ -151,7 +151,7 @@ def generate_reports(
     reports = build_reports(
         entries, accounts, settings, period, quotes=quotes, securities=securities,
         budget_settings=budget_settings, valuation_errors=valuation_errors, draft_reasons=draft_reasons,
-        savings_allocations=savings_allocations,
+        opening_entry_ids=opening_ids,
     )
     emit(f"Rendering {period.month} balance sheet, income, budget and investment reports...")
     documents = render_reports(reports, settings)
@@ -261,7 +261,7 @@ def _unfinished_accounting(
     }
     manual_pending = 0
     for record in load_manual_entries(connection):
-        if record["status"] in {"applied", "withdrawn", "superseded"}:
+        if record.get("is_savings") or record["status"] in {"applied", "withdrawn", "superseded"}:
             continue
         dates = [record["submission"].date]
         dates.extend(

@@ -20,16 +20,20 @@ change the journal or create valuation adjustments.
 from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, localcontext
+from hashlib import sha256
+import json
 import sqlite3
 from typing import Literal, Self
-from uuid import UUID
+from uuid import UUID, uuid4
 import warnings
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Aurum imports
-from aurum.finance.journal import JournalEntry
-from aurum.finance.securities import Security, SecurityType
+from aurum.finance.accounts import AccountRegistry, AccountType
+from aurum.finance.journal import AccountInvestmentDetails, InvestmentDetails, JournalEntry, JournalLine
+from aurum.finance.securities import Security, SecurityRegistry, SecurityType
+from aurum.finance.transaction import Transaction
 
 
 # %% 1. Investment Details -----------------------------------------------------------------------------------
@@ -70,12 +74,12 @@ class InvestmentInstruction(BaseModel):
 
     amount means total spent unless amount_includes_fees is False. Missing prices and quantities remain
     None until Python calculates them. transaction_id identifies an unchanged bank settlement, not a new
-    cash posting. Only opening holdings and purchases are supported in this version.
+    cash posting. Sales require actual units and proceeds; their removed cost comes from posted history.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
-    operation: Literal["opening", "buy"]
+    operation: Literal["opening", "buy", "sell"]
     account_key: str = Field(min_length=1)
     security_key: str = Field(min_length=1)
     counterpart_key: str = Field(min_length=1)
@@ -85,6 +89,9 @@ class InvestmentInstruction(BaseModel):
     unit_price: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     fees: Decimal | None = Field(default=None, ge=0, decimal_places=2, allow_inf_nan=False)
     amount_includes_fees: bool = True
+    realised_account_key: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def _check_facts(self) -> Self:
@@ -95,12 +102,14 @@ class InvestmentInstruction(BaseModel):
             raise ValueError("Supply investment units or the total amount spent")
         if self.operation == "opening" and self.transaction_id is not None:
             raise ValueError("An opening holding cannot also consume an imported bank payment")
+        if self.operation == "sell" and (self.units is None or self.realised_account_key is None):
+            raise ValueError("A sale needs actual units and an explicitly selected realised-return account")
         return self
 
 
 class InvestmentCalculation(BaseModel):
     """
-    Explain the units and carrying cost posted for one opening holding or purchase.
+    Explain units and recorded cost added by an acquisition or released by a sale.
 
     quote records reference pricing, never an execution price. units_estimated identifies quantities
     inferred from a market quote or from an amount with unspecified fees. The total cost includes fees once.
@@ -114,6 +123,46 @@ class InvestmentCalculation(BaseModel):
     fees: Decimal | None = Field(default=None, ge=0, decimal_places=2, allow_inf_nan=False)
     quote: PriceQuote | None = None
     units_estimated: bool = False
+    proceeds: Decimal | None = Field(
+        default=None, gt=0, decimal_places=2, allow_inf_nan=False, exclude_if=lambda value: value is None,
+    )
+    realised_gain: Decimal | None = Field(
+        default=None, decimal_places=2, allow_inf_nan=False, exclude_if=lambda value: value is None,
+    )
+    cost_revision: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None,
+    )
+
+
+class AccountWithdrawalInstruction(BaseModel):
+    """
+    Retain explicit cash proceeds and a confirmed pre-withdrawal value for a balance-only investment.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
+
+    account_key: str = Field(min_length=1)
+    counterpart_key: str = Field(min_length=1)
+    realised_account_key: str = Field(min_length=1)
+    unrealised_account_key: str = Field(min_length=1)
+    transaction_id: UUID | None = None
+    amount: Decimal = Field(gt=0, decimal_places=2, allow_inf_nan=False)
+    confirmed_value: Decimal = Field(gt=0, decimal_places=2, allow_inf_nan=False)
+
+
+class AccountWithdrawalCalculation(BaseModel):
+    """
+    Explain proportional principal release and the corresponding supported unrealised-gain transfer.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
+
+    value_before: Decimal = Field(gt=0, decimal_places=2, allow_inf_nan=False)
+    cost_before: Decimal = Field(gt=0, decimal_places=2, allow_inf_nan=False)
+    proceeds: Decimal = Field(gt=0, decimal_places=2, allow_inf_nan=False)
+    released_cost: Decimal = Field(gt=0, decimal_places=2, allow_inf_nan=False)
+    realised_gain: Decimal = Field(decimal_places=2, allow_inf_nan=False)
+    cost_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class HoldingPosition(BaseModel):
@@ -154,6 +203,8 @@ def calculate_investment(
     Raises:
         ValueError: Facts conflict, a required price is absent or fees exhaust the amount invested.
     """
+    if instruction.operation == "sell":
+        raise ValueError("Use the recorded-cost sale builder for a disposal")
     fees = instruction.fees or Decimal("0")
     supplied_total = instruction.amount
     if supplied_total is not None and not instruction.amount_includes_fees:
@@ -198,7 +249,478 @@ def calculate_investment(
     )
 
 
-def holdings_as_of(entries: Iterable[JournalEntry], as_of: date) -> tuple[HoldingPosition, ...]:
+def investment_cash_available(
+    entries: Iterable[JournalEntry], account_id: UUID, when: date, *, excluding: UUID | None = None,
+) -> Decimal | None:
+    """
+    Recognise supported brokerage cash already received from a recorded sale, without calling it another gain.
+
+    A cash account has no unit or whole-account investment movements. The caller additionally excludes its
+    configured balance-only funds. Unknown account purpose and same-day ordering remain Review questions.
+    """
+    entries = tuple(entry for entry in entries if entry.id != excluding)
+    if any(
+        line.account_id == account_id and (line.investment is not None or line.account_investment is not None)
+        for entry in entries for line in entry.lines
+    ):
+        return None
+    if any(
+        entry.date == when and any(line.account_id == account_id for line in entry.lines) for entry in entries
+    ):
+        return None
+    prior = tuple(entry for entry in entries if entry.date < when)
+    proved = any(
+        any(line.account_id == account_id and line.debit > 0 for line in entry.lines)
+        and any(line.investment is not None and line.investment.units < 0 for line in entry.lines)
+        for entry in prior
+    )
+    if not proved:
+        return None
+    amount = sum((
+        line.debit - line.credit for entry in prior for line in entry.lines if line.account_id == account_id
+    ), Decimal("0"))
+    return amount if amount > 0 else None
+
+
+def validate_investment_change(
+    entry: JournalEntry, history: Iterable[JournalEntry], accounts: AccountRegistry,
+    *, replacing: Iterable[JournalEntry] = (),
+) -> None:
+    """
+    Recheck disposal economics and later dependent costs against the live ledger before any write.
+
+    This validates affected investment accounts only. Existing history is never rewritten to accommodate
+    an earlier edit, and the same-day and zero-cent boundaries remain explicit Review questions.
+    """
+    replacing = tuple(replacing)
+    removed = {entry.id, *(old.id for old in replacing)}
+    history = tuple(old for old in history if old.id not in removed)
+    combined = (*history, entry)
+    touched = {line.account_id for item in (*replacing, entry) for line in item.lines}
+    investment_accounts = {
+        line.account_id for item in combined for line in item.lines
+        if line.investment is not None or line.account_investment is not None
+    }
+    affected = touched & investment_accounts
+    for item in combined:
+        for account_id in affected:
+            security_sales = [
+                line for line in item.lines
+                if line.account_id == account_id and line.investment is not None and line.investment.units < 0
+            ]
+            principal_returns = [
+                line for line in item.lines if line.account_id == account_id
+                and line.account_investment is not None
+                and line.account_investment.kind == "contribution" and line.credit > 0
+            ]
+            if security_sales:
+                _validate_security_sale(item, combined, accounts, security_sales)
+            if principal_returns:
+                _validate_account_withdrawal(item, combined, accounts, principal_returns)
+    # A new acquisition or corrected event must not create negative units or leave cost without units.
+    for cutoff in sorted({item.date for item in combined if any(
+        line.account_id in affected and line.investment is not None for line in item.lines
+    )}):
+        holdings_as_of(combined, cutoff, account_ids=affected)
+
+
+def investment_postings_match(first: JournalEntry, second: JournalEntry) -> bool:
+    """
+    Compare calculated economics while allowing ordinary descriptions and legacy reporting labels to survive.
+    """
+    excluded = {"description", "budget_category"}
+    return first.date == second.date and [
+        line.model_dump(exclude=excluded) for line in first.lines
+    ] == [line.model_dump(exclude=excluded) for line in second.lines]
+
+
+def _validate_security_sale(
+    entry: JournalEntry, history: tuple[JournalEntry, ...], accounts: AccountRegistry,
+    sales: list[JournalLine],
+) -> None:
+    """
+    Require the exact average-cost credit and a single proceeds receipt plus the realised difference.
+    """
+    if len(sales) != 1:
+        raise ValueError("Review multi-security disposals separately before posting")
+    holding = sales[0]
+    by_id = {account.id: account for account in accounts.accounts.values()}
+    prior = _before_disposal(history, holding.account_id, entry.date, entry.id)
+    if any(
+        any(line.account_id == holding.account_id and line.investment is None for line in item.lines)
+        and any(by_id[line.account_id].account_type == AccountType.EQUITY for line in item.lines)
+        for item in prior
+    ):
+        raise ValueError("Review the holding's posted valuation before disposing of its units")
+    position = next((
+        item for item in holdings_as_of(prior, entry.date)
+        if item.account_id == holding.account_id and item.security_id == holding.investment.security_id
+    ), None)
+    units = -holding.investment.units
+    if position is None or units > position.units:
+        raise ValueError("The disposal exceeds the recorded units available before its date")
+    with localcontext() as context:
+        context.prec = 50
+        cost = position.cost_basis if units == position.units else (
+            position.cost_basis * units / position.units
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if cost <= 0 or holding.credit != cost:
+        raise ValueError("The disposal's recorded average cost changed; review the investment history")
+    others = [line for line in entry.lines if line is not holding]
+    receipts = [
+        line for line in others if by_id[line.account_id].account_type == AccountType.ASSET
+        and line.account_id != holding.account_id and line.debit > 0
+        and line.investment is None and line.account_investment is None
+    ]
+    returns = [line for line in others if by_id[line.account_id].account_type == AccountType.INCOME]
+    if len(receipts) != 1 or len(returns) > 1 or len(others) != len(receipts) + len(returns):
+        raise ValueError("A sale needs one proceeds receipt and its separate realised investment return")
+    gain = receipts[0].debit - cost
+    if sum((line.credit - line.debit for line in returns), Decimal("0")) != gain:
+        raise ValueError("Sale proceeds, released cost and realised return do not reconcile")
+    details = holding.investment
+    if details.unit_price is not None:
+        with localcontext() as context:
+            context.prec = 50
+            net = (units * details.unit_price - (details.fees or Decimal("0"))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
+        if net != receipts[0].debit:
+            raise ValueError("Sale execution figures differ from the proceeds receipt")
+
+
+def _validate_account_withdrawal(
+    entry: JournalEntry, history: tuple[JournalEntry, ...], accounts: AccountRegistry,
+    principal: list[JournalLine],
+) -> None:
+    """
+    Reconcile capital returned, carrying value and supported equity reclassification for a whole-account fund.
+    """
+    if len(principal) != 1:
+        raise ValueError("Review combined investment withdrawals separately")
+    capital = principal[0]
+    by_id = {account.id: account for account in accounts.accounts.values()}
+    receipts = [
+        line for line in entry.lines if by_id[line.account_id].account_type == AccountType.ASSET
+        and line.account_id != capital.account_id and line.debit > 0
+        and line.account_investment is None and line.investment is None
+    ]
+    equity = [line for line in entry.lines if by_id[line.account_id].account_type == AccountType.EQUITY]
+    returns = [line for line in entry.lines if by_id[line.account_id].account_type == AccountType.INCOME]
+    value_lines = [
+        line for line in entry.lines if line.account_id == capital.account_id and line is not capital
+        and line.account_investment is not None and line.account_investment.kind == "earnings"
+    ]
+    if (
+        len(receipts) != 1 or len(equity) > 1 or len(returns) > 1 or len(value_lines) > 1
+        or len(entry.lines) != 1 + len(receipts) + len(equity) + len(returns) + len(value_lines)
+    ):
+        raise ValueError("A withdrawal needs separate proceeds, principal and supported return postings")
+    prior = _before_disposal(history, capital.account_id, entry.date, entry.id)
+    if equity:
+        value, cost = _account_disposal_basis(prior, capital.account_id, equity[0].account_id)
+    else:
+        # Rounded zero gains omit the equity line; establish its history without inventing an allocation.
+        candidates = [UUID(int=0), *(item.id for item in accounts.accounts.values()
+                                    if item.account_type == AccountType.EQUITY)]
+        bases = set()
+        for identifier in candidates:
+            try:
+                bases.add(_account_disposal_basis(prior, capital.account_id, identifier))
+            except ValueError:
+                continue
+        if len(bases) != 1:
+            raise ValueError("Review the withdrawal's historical gain attribution")
+        value, cost = next(iter(bases))
+    proceeds = receipts[0].debit
+    if proceeds > value:
+        raise ValueError("The withdrawal exceeds its recorded pre-withdrawal value")
+    with localcontext() as context:
+        context.prec = 50
+        expected = cost if proceeds == value else (
+            cost * proceeds / value
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if expected <= 0 or capital.credit != expected:
+        raise ValueError("The withdrawal's proportional recorded cost changed; review its valuation")
+    gain = proceeds - expected
+    value_change = sum((line.credit - line.debit for line in value_lines), Decimal("0"))
+    realised = sum((line.credit - line.debit for line in returns), Decimal("0"))
+    released = sum((line.debit - line.credit for line in equity), Decimal("0"))
+    if (value_change, realised, released) != (gain, gain, gain):
+        raise ValueError("Withdrawal value, realised return and unrealised equity do not reconcile")
+
+
+def investment_cost_revision(
+    entries: Iterable[JournalEntry], account_id: UUID, *, excluding: UUID | None = None,
+) -> str:
+    """
+    Bind a calculation to all recorded movements of its asset, including later dependent disposals.
+    """
+    relevant = sorted((
+        entry.model_dump(mode="json") for entry in entries
+        if entry.id != excluding and any(line.account_id == account_id for line in entry.lines)
+    ), key=lambda item: (item["date"], item["id"]))
+    return sha256(json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def build_security_sale(
+    instruction: InvestmentInstruction, entries: Iterable[JournalEntry], accounts: AccountRegistry,
+    securities: SecurityRegistry, when: date, realised_account_id: UUID,
+    *, source: Transaction | None = None, entry_id: UUID | None = None,
+) -> tuple[JournalEntry, InvestmentCalculation]:
+    """
+    Sell actual units at recorded average cost, retaining the full receipt and recognising only its gain.
+
+    Same-day order, zero-cent cost and unattributed posted valuations require Review. Reference prices never
+    establish disposal proceeds. The caller must recheck the returned cost revision inside its atomic save.
+    """
+    instruction = InvestmentInstruction.model_validate(instruction)
+    if instruction.operation != "sell":
+        raise ValueError("Use a sale instruction to dispose of security units")
+    asset, counterpart, realised = _disposal_accounts(
+        accounts, instruction.account_key, instruction.counterpart_key,
+        instruction.realised_account_key, realised_account_id,
+    )
+    security = securities.securities.get(instruction.security_key)
+    if security is None:
+        raise ValueError("Choose the configured security being sold")
+    entries = tuple(entries)
+    prior = _before_disposal(entries, asset.id, when, entry_id)
+    by_id = {account.id: account for account in accounts.accounts.values()}
+    if any(
+        any(line.account_id == asset.id and line.investment is None for line in entry.lines)
+        and any(by_id[line.account_id].account_type == AccountType.EQUITY for line in entry.lines)
+        for entry in prior
+    ):
+        raise ValueError(
+            "Review the holding's posted valuation before selling; its gain attribution is unclear"
+        )
+    position = next((
+        item for item in holdings_as_of(prior, when)
+        if item.account_id == asset.id and item.security_id == security.id
+    ), None)
+    if position is None or instruction.units > position.units:
+        raise ValueError("The sale exceeds the recorded units available before this date")
+    with localcontext() as context:
+        context.prec = 50
+        released = position.cost_basis if instruction.units == position.units else (
+            position.cost_basis * instruction.units / position.units
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if released <= 0:
+        raise ValueError("Review this disposal: its recorded cost rounds to zero")
+    proceeds = _sale_proceeds(instruction, source)
+    receipt = _disposal_receipt(counterpart, source, instruction.transaction_id, proceeds)
+    gain = proceeds - released
+    lines = [JournalLine(
+        account_id=asset.id, description=f"Sale of {security.name}", credit=released,
+        investment=InvestmentDetails(
+            security_id=security.id, units=-instruction.units,
+            unit_price=instruction.unit_price, fees=instruction.fees,
+        ),
+    ), receipt]
+    if gain:
+        lines.append(_signed_line(realised.id, -gain, "Realised investment return"))
+    calculation = InvestmentCalculation(
+        units=instruction.units, total_cost=released, unit_price=instruction.unit_price,
+        fees=instruction.fees, proceeds=proceeds, realised_gain=gain,
+        cost_revision=investment_cost_revision(entries, asset.id, excluding=entry_id),
+    )
+    return JournalEntry(id=entry_id or uuid4(), date=when, lines=tuple(lines)), calculation
+
+
+def build_account_withdrawal(
+    instruction: AccountWithdrawalInstruction, entries: Iterable[JournalEntry], accounts: AccountRegistry,
+    when: date, realised_account_id: UUID, unrealised_account_id: UUID,
+    *, source: Transaction | None = None, entry_id: UUID | None = None,
+) -> tuple[JournalEntry, AccountWithdrawalCalculation]:
+    """
+    Release confirmed balance-only principal proportionally and realise only supported recorded gains.
+
+    Separate principal and value postings preserve both the remaining asset and historical cost using the
+    existing contribution and earnings metadata. No valuation or opening-equity attribution is invented.
+    """
+    instruction = AccountWithdrawalInstruction.model_validate(instruction)
+    asset, counterpart, realised = _disposal_accounts(
+        accounts, instruction.account_key, instruction.counterpart_key,
+        instruction.realised_account_key, realised_account_id,
+    )
+    unrealised = accounts.accounts.get(instruction.unrealised_account_key)
+    if unrealised is None or unrealised.id != unrealised_account_id or (
+        unrealised.account_type != AccountType.EQUITY
+    ):
+        raise ValueError("Choose the configured unrealised-gains equity account")
+    entries = tuple(entries)
+    prior = _before_disposal(entries, asset.id, when, entry_id)
+    value, cost = _account_disposal_basis(prior, asset.id, unrealised.id)
+    if instruction.confirmed_value != value:
+        raise ValueError(
+            "The confirmed pre-withdrawal value differs from the recorded value; review valuation"
+        )
+    if instruction.amount > value:
+        raise ValueError("The withdrawal exceeds the confirmed investment value")
+    with localcontext() as context:
+        context.prec = 50
+        released = cost if instruction.amount == value else (
+            cost * instruction.amount / value
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if released <= 0:
+        raise ValueError("Review this withdrawal: its proportional recorded cost rounds to zero")
+    gain = instruction.amount - released
+    lines = [
+        _disposal_receipt(counterpart, source, instruction.transaction_id, instruction.amount),
+        JournalLine(
+            account_id=asset.id, description="Investment principal returned", credit=released,
+            account_investment=AccountInvestmentDetails(kind="contribution"),
+        ),
+    ]
+    if gain:
+        lines.extend((
+            _signed_line(
+                asset.id, -gain, "Investment value withdrawn",
+                account_investment=AccountInvestmentDetails(kind="earnings"),
+            ),
+            _signed_line(unrealised.id, gain, "Unrealised return released"),
+            _signed_line(realised.id, -gain, "Realised investment return"),
+        ))
+    calculation = AccountWithdrawalCalculation(
+        value_before=value, cost_before=cost, proceeds=instruction.amount, released_cost=released,
+        realised_gain=gain, cost_revision=investment_cost_revision(entries, asset.id, excluding=entry_id),
+    )
+    return JournalEntry(id=entry_id or uuid4(), date=when, lines=tuple(lines)), calculation
+
+
+def _before_disposal(
+    entries: tuple[JournalEntry, ...], account_id: UUID, when: date, excluding: UUID | None,
+) -> tuple[JournalEntry, ...]:
+    """
+    Require an unambiguous prior-day position instead of assigning an order to same-day trades.
+    """
+    remaining = tuple(entry for entry in entries if entry.id != excluding)
+    if any(
+        entry.date == when and any(line.account_id == account_id for line in entry.lines)
+        for entry in remaining
+    ):
+        raise ValueError("Review the same-day investment movements; their order is not established")
+    return tuple(entry for entry in remaining if entry.date < when)
+
+
+def _disposal_accounts(
+    accounts: AccountRegistry, asset_key: str, counterpart_key: str,
+    realised_key: str | None, realised_id: UUID,
+) -> tuple:
+    """
+    Require separate existing asset accounts and an explicitly chosen income account for realised returns.
+    """
+    asset = accounts.accounts.get(asset_key)
+    counterpart = accounts.accounts.get(counterpart_key)
+    realised = accounts.accounts.get(realised_key)
+    if asset is None or asset.account_type != AccountType.ASSET or asset.bank_details is not None:
+        raise ValueError("Choose a non-bank investment asset")
+    if counterpart is None or counterpart.account_type != AccountType.ASSET or counterpart.id == asset.id:
+        raise ValueError("Choose the separate asset account receiving the investment proceeds")
+    if realised is None or realised.id != realised_id or realised.account_type != AccountType.INCOME:
+        raise ValueError("Choose the income account for realised investment returns")
+    return asset, counterpart, realised
+
+
+def _disposal_receipt(
+    account, source: Transaction | None, source_id: UUID | None, amount: Decimal,
+) -> JournalLine:
+    """
+    Preserve a supplied receipt exactly and require evidence for any bank counterpart.
+    """
+    if source is not None:
+        if source.transaction_id != source_id or source.account_id != account.id or source.amount != amount:
+            raise ValueError("The investment receipt must match its full original bank source")
+        if source.amount <= 0:
+            raise ValueError("An investment disposal requires an incoming receipt")
+        return JournalLine(
+            account_id=account.id, transaction_id=source.transaction_id,
+            description=source.description, effective_date=source.effective_date, debit=amount,
+        )
+    if source_id is not None or account.bank_details is not None:
+        raise ValueError("Link the original incoming bank transaction before posting investment proceeds")
+    return JournalLine(account_id=account.id, description="Investment proceeds received", debit=amount)
+
+
+def _sale_proceeds(instruction: InvestmentInstruction, source: Transaction | None) -> Decimal:
+    """
+    Reconcile actual net sale proceeds and supplied fees without estimating any disposal facts.
+    """
+    fees = instruction.fees or Decimal("0")
+    supplied = instruction.amount
+    if supplied is not None and not instruction.amount_includes_fees:
+        if instruction.fees is None:
+            raise ValueError("Supply the sale fee to convert gross proceeds to the net receipt")
+        supplied -= fees
+    proceeds = source.amount if source is not None else supplied
+    if proceeds is None or proceeds <= 0:
+        raise ValueError("Supply the actual net sale proceeds")
+    if source is not None and supplied is not None and proceeds != supplied:
+        raise ValueError("The supplied sale proceeds differ from the bank receipt")
+    if instruction.unit_price is not None:
+        with localcontext() as context:
+            context.prec = 50
+            expected = (instruction.units * instruction.unit_price - fees).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
+        if expected != proceeds:
+            raise ValueError("Sale units, execution price, fees and proceeds do not reconcile")
+    return proceeds
+
+
+def _account_disposal_basis(
+    entries: tuple[JournalEntry, ...], account_id: UUID, unrealised_id: UUID,
+) -> tuple[Decimal, Decimal]:
+    """
+    Require known invested principal and equity attribution for every remaining gain or loss.
+    """
+    value = Decimal("0")
+    cost = Decimal("0")
+    for entry in entries:
+        fund_lines = [line for line in entry.lines if line.account_id == account_id]
+        if not fund_lines:
+            continue
+        entry_gain = Decimal("0")
+        for line in fund_lines:
+            details = line.account_investment
+            if line.investment is not None or details is None or details.kind == "unclassified":
+                raise ValueError("Review the investment's historical cost and withdrawal classification")
+            movement = line.debit - line.credit
+            value += movement
+            if details.kind == "contribution":
+                cost += movement
+            elif details.kind == "opening":
+                cost += details.cost_basis
+                entry_gain += movement - details.cost_basis
+            else:
+                entry_gain += movement
+        equity_gain = sum(
+            (line.credit - line.debit for line in entry.lines if line.account_id == unrealised_id),
+            Decimal("0"),
+        )
+        if entry_gain != equity_gain:
+            raise ValueError(
+                "Review whether this fund's return was already realised or belongs to opening equity"
+            )
+    if value <= 0 or cost <= 0:
+        raise ValueError("A withdrawal needs positive confirmed value and recorded cost")
+    return value, cost
+
+
+def _signed_line(account_id: UUID, movement: Decimal, description: str, **metadata) -> JournalLine:
+    """
+    Express one nonzero signed debit movement as a positive debit or credit.
+    """
+    return JournalLine(
+        account_id=account_id, description=description,
+        debit=max(movement, Decimal("0")), credit=max(-movement, Decimal("0")), **metadata,
+    )
+
+
+def holdings_as_of(
+    entries: Iterable[JournalEntry], as_of: date, *, account_ids: set[UUID] | None = None,
+) -> tuple[HoldingPosition, ...]:
     """
     Reconstruct units and cost from investment postings dated on or before as_of.
 
@@ -215,7 +737,7 @@ def holdings_as_of(entries: Iterable[JournalEntry], as_of: date) -> tuple[Holdin
             if entry.date > as_of:
                 continue
             for line in entry.lines:
-                if line.investment is None:
+                if line.investment is None or account_ids is not None and line.account_id not in account_ids:
                     continue
                 key = (line.account_id, line.investment.security_id)
                 units, cost = totals.get(key, (Decimal("0"), Decimal("0")))
@@ -344,5 +866,6 @@ def fetch_yahoo_quote(security: Security, requested_date: date) -> PriceQuote:
             "or use Process to retry"
         ) from None
     raise PriceUnavailable(
-        "No completed AUD close is available within seven days; enter an AUD unit price in the Manual response"
+        "No completed AUD close is available within seven days; "
+        "enter an AUD unit price in the Manual response"
     )

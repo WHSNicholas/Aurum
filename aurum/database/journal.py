@@ -28,10 +28,12 @@ import sqlite3
 from uuid import UUID
 
 # Aurum imports
-from aurum.database.transactions import from_sqlite_dollars, to_sqlite_dollars
+from aurum.database.bank_feeds import feed_snapshot
+from aurum.database.transactions import from_sqlite_dollars, load_transactions, to_sqlite_dollars
 from aurum.finance.accounts import AccountRegistry, AccountType
 from aurum.finance.budget import BudgetSettings, validate_budget_labels
 from aurum.finance.journal import AccountInvestmentDetails, InvestmentDetails, JournalEntry, JournalLine
+from aurum.finance.investments import validate_investment_change
 from aurum.finance.securities import SecurityRegistry
 
 
@@ -79,12 +81,15 @@ def save_journal_entry(
     """
     entry = JournalEntry.model_validate(entry)
     _check_investment_securities(entry, securities)
-    validate_budget_labels((entry,), accounts, budget)
     if connection.in_transaction:
         raise ValueError("Finish the pending database write before saving a journal entry")
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         _check_journal_sources(connection, entry, accounts)
+        validate_budget_labels(
+            (entry,), accounts, budget, transactions=load_transactions(connection),
+            transfer_evidence=feed_snapshot(connection)["provenance"],
+        )
         _write_entry(connection, entry, accounts)
 
 
@@ -208,6 +213,7 @@ def _write_entry(
         "SELECT 1 FROM journal WHERE journal_entry_id = ?", (str(entry.id),)
     ).fetchone():
         raise sqlite3.IntegrityError("A journal entry with this UUID already exists")
+    validate_investment_change(entry, load_journal_entries(connection, accounts), accounts)
     by_id = {account.id: account for account in accounts.accounts.values()}
     for number, line in enumerate(entry.lines, start=1):
         account = by_id[line.account_id]

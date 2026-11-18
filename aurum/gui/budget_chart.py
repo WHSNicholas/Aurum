@@ -12,13 +12,14 @@ amounts while missing targets remain distinct from intentional zero targets.
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
 from decimal import Decimal, localcontext
+from html import escape
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPainterPath
 from PySide6.QtWidgets import QToolTip, QWidget
 
 # Aurum imports
-from aurum.gui.theme import BUDGET_COLOURS, gui_colour
+from aurum.gui.theme import BUDGET_COLOURS, gui_colour, monetary_font, monetary_html
 
 
 # %% 1. Allocation Chart -------------------------------------------------------------------------------------
@@ -95,28 +96,25 @@ class BudgetAllocationChart(QWidget):
                 "income": gap / 2, "expense": 0.0,
                 "savings": lengths["expense"] + gap,
             }
-            labels = {kind: f"{name} · {_money(totals[kind])}" for kind, name in (
+            labels = {kind: name for kind, name in (
                 ("income", "Income"), ("expense", "Expenses"), ("savings", "Savings"),
             )}
             painter.setPen(QColor(gui_colour(self, "text", "#425f59")))
-            alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            painter.drawText(QRectF(origins["income"], 0, width - origins["income"], 22),
-                             alignment, labels["income"])
-            metrics = painter.fontMetrics()
-            expense_label_width = metrics.horizontalAdvance(labels["expense"])
-            savings_label_width = metrics.horizontalAdvance(labels["savings"])
+            _draw_total(painter, QRectF(origins["income"], 0, width - origins["income"], 22),
+                        labels["income"], totals["income"])
+            expense_label_width = _total_width(painter, labels["expense"], totals["expense"])
+            savings_label_width = _total_width(painter, labels["savings"], totals["savings"])
             crowded = (
                 expense_label_width + 12 > origins["savings"]
                 or origins["savings"] + savings_label_width > width
             )
-            painter.drawText(QRectF(0, 72, width, 22), alignment, labels["expense"])
+            _draw_total(painter, QRectF(0, 72, width, 22), labels["expense"], totals["expense"])
             if crowded:
-                painter.drawText(QRectF(0, 72, width, 22),
-                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                                 labels["savings"])
+                _draw_total(painter, QRectF(0, 72, width, 22), labels["savings"], totals["savings"],
+                            right=True)
             else:
-                painter.drawText(QRectF(origins["savings"], 72, width - origins["savings"], 22),
-                                 alignment, labels["savings"])
+                _draw_total(painter, QRectF(origins["savings"], 72, width - origins["savings"], 22),
+                            labels["savings"], totals["savings"])
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(gui_colour(self, "panel", "#e8eeeb")))
             if not totals["income"]:
@@ -143,10 +141,11 @@ class BudgetAllocationChart(QWidget):
                     rectangle = QRectF(offset, y, segment, 36)
                     painter.setBrush(_shade(self, kind, index, len(rows)))
                     painter.drawRect(rectangle)
-                    self._regions.append((rectangle, f"{name}\n{_money(amount)}"))
+                    tooltip = escape(name) + "<br>" + monetary_html(_money(amount))
+                    self._regions.append((rectangle, tooltip))
                     region = QPainterPath()
                     region.addRect(rectangle)
-                    self._hit_regions.append((pill.intersected(region), f"{name}\n{_money(amount)}"))
+                    self._hit_regions.append((pill.intersected(region), tooltip))
                     offset += segment
                 painter.restore()
     def event(self, event) -> bool:
@@ -189,14 +188,41 @@ class BudgetAllocationChart(QWidget):
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
+def _total_width(painter: QPainter, label: str, amount: Decimal) -> float:
+    """
+    Measure a section label and its monetary total using their separate typefaces.
+    """
+    return (
+        QFontMetricsF(painter.font()).horizontalAdvance(label + " · ")
+        + QFontMetricsF(monetary_font(painter.font())).horizontalAdvance(_money(amount))
+    )
+
+
+def _draw_total(
+    painter: QPainter, rectangle: QRectF, label: str, amount: Decimal, *, right: bool = False,
+) -> None:
+    """
+    Keep chart labels in the body face and align report-style monetary totals on the same baseline.
+    """
+    painter.save()
+    body = QFontMetricsF(painter.font())
+    prefix = label + " · "
+    x = rectangle.right() - _total_width(painter, label, amount) if right else rectangle.left()
+    baseline = rectangle.center().y() + (body.ascent() - body.descent()) / 2
+    painter.drawText(QPointF(x, baseline), prefix)
+    painter.setFont(monetary_font(painter.font()))
+    painter.drawText(QPointF(x + body.horizontalAdvance(prefix), baseline), _money(amount))
+    painter.restore()
+
+
 def _shade(widget: QWidget, kind: str, index: int, count: int) -> QColor:
     """
-    Sample muted blue, red or green while retaining a visible dark-to-light progression.
+    Sample distinct blue, red or green hues with a saturated dark-to-light progression.
     """
     role = "budget_expenses" if kind == "expense" else "budget_" + kind
     base = QColor(gui_colour(widget, role, BUDGET_COLOURS[kind]))
-    first = base.darker(120)
-    last = QColor(*(round(channel + (255 - channel) * 0.42) for channel in base.getRgb()[:3]))
+    first = base
+    last = QColor(*(round(channel + (255 - channel) * 0.35) for channel in base.getRgb()[:3]))
     fraction = index / max(1, count - 1)
     return QColor(*(
         round(start + (end - start) * fraction)

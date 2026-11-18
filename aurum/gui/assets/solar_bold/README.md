@@ -19,6 +19,10 @@ Path coordinates and their 24×24 coordinate system are preserved. Month/disclos
 four thin open chevrons because Solar Bold's alternative arrows are filled triangles.
 No external images, scripts or runtime network requests are used.
 
+The refresh role uses Refresh Circle, whose even-odd arrow cutouts stay transparent under theme tinting.
+The previous Solar Refresh artwork remains in `archive/refresh.svg`; its original source and hash are
+retained in `sources.json`. Copy that file back to `refresh.svg` to restore that individual icon.
+
 ## Restore the original icons
 
 The original set remains unchanged in `../ui/`; the two legacy stylesheet SVGs in `../` are retained too.
@@ -44,7 +48,7 @@ Set it back to `"solar_bold"` to use this set. Report PDF artwork is independent
 | `vault` | Safe Square |
 | `import` | Download Minimalistic |
 | `process` | Play |
-| `refresh` | Refresh |
+| `refresh` | Refresh Circle |
 | `folder` | Folder Open |
 | `person` | User Rounded |
 | `check` | Check Circle |

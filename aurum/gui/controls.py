@@ -11,15 +11,22 @@ handle presentation, while buttons use a background change instead of the macOS 
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
-from PySide6.QtCore import QEvent, QObject, QRect, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QRegion
+from PySide6.QtCore import (
+    QDate, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
+)
+from PySide6.QtGui import (
+    QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QRegion, QTextCharFormat, QTextLayout, QTextOption,
+)
 from PySide6.QtWidgets import (
-    QAbstractButton, QAbstractItemView, QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView,
+    QAbstractButton, QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDialog, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QListView,
     QMenu, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate, QStyleFactory, QStyleOptionButton,
-    QStyleOptionViewItem, QStylePainter, QTableWidget, QVBoxLayout, QWidget,
+    QStyleOptionComboBox,
+    QStyleOptionViewItem, QStylePainter, QTableWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
+from aurum.finance.dates import parse_input_date
 from aurum.gui.icons import icon
 from aurum.gui.theme import gui_colour
 
@@ -36,6 +43,29 @@ def install_controls(application: QApplication) -> None:
     application.installEventFilter(styling)
     for widget in application.allWidgets():
         styling.prepare(widget)
+
+
+def confirm_discard(parent: QWidget, *, question: str = "Discard unsaved changes?") -> bool:
+    """
+    Ask for an explicit discard decision in one compact, centred dialog shared by every draft surface.
+    """
+    dialog = _DiscardDialog(parent, question=question)
+    try:
+        return dialog.exec() == QDialog.DialogCode.Accepted
+    finally:
+        dialog.deleteLater()
+
+
+def confirm_unsaved(parent: QWidget) -> str:
+    """
+    Return save, discard or cancel from the same centred draft decision surface.
+    """
+    dialog = _DiscardDialog(parent, question="Save changes before continuing?", allow_save=True)
+    try:
+        dialog.exec()
+        return dialog.decision
+    finally:
+        dialog.deleteLater()
 
 
 def prepare_combo_popup(combo: QComboBox) -> None:
@@ -74,14 +104,75 @@ def prepare_combo_popup(combo: QComboBox) -> None:
     popup.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
 
+class CentredComboBox(QComboBox):
+    """
+    Centre text-only choices in their field and menu while retaining native selection and keyboard controls.
+    """
+
+    def __init__(self, parent=None) -> None:
+        """
+        Opt this selector into centred popup rows without changing unrelated dropdowns.
+        """
+        super().__init__(parent)
+        self.setProperty("centredChoices", True)
+        self.setEditable(False)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._field_press = False
+
+    def paintEvent(self, event) -> None:
+        """
+        Reserve equal space beside the label so the trailing arrow cannot offset its visual centre.
+        """
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        rectangle = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, self,
+        )
+        inset = max(rectangle.left(), self.width() - rectangle.right() - 1)
+        rectangle.setLeft(inset)
+        rectangle.setRight(self.width() - inset - 1)
+        group = QPalette.ColorGroup.Active if self.isEnabled() else QPalette.ColorGroup.Disabled
+        painter.setPen(self.palette().color(group, QPalette.ColorRole.Text))
+        text = self.fontMetrics().elidedText(
+            option.currentText, Qt.TextElideMode.ElideRight, max(0, rectangle.width()),
+        )
+        painter.drawText(rectangle, Qt.AlignmentFlag.AlignCenter, text)
+
+    def mousePressEvent(self, event) -> None:
+        """
+        Start a click anywhere in the selection-only field without immediately dismissing its popup.
+        """
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self._field_press = True
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        """
+        Open choices after a complete field click while leaving native keyboard selection unchanged.
+        """
+        if event.button() == Qt.MouseButton.LeftButton and self._field_press:
+            self._field_press = False
+            if self.rect().contains(event.position().toPoint()):
+                QTimer.singleShot(0, self.showPopup)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class PageActionRow(QHBoxLayout):
     """
-    Align primary page actions optically with subtitles without moving the subtitle itself.
+    Align primary actions within the compact row beneath each page title.
     """
 
     def setGeometry(self, rectangle: QRect) -> None:
         """
-        Keep compact header actions clear of the date range and optically lift other buttons.
+        Keep primary actions at the top of their row and optically lift other buttons.
         """
         super().setGeometry(rectangle)
         top = rectangle.top() + self.contentsMargins().top()
@@ -94,19 +185,22 @@ class PageActionRow(QHBoxLayout):
 
 class HeaderActionButton(QPushButton):
     """
-    Give Process and Generate identical compact bounds and a consistently inset play icon.
+    Give Sync, Process and Generate compact bounds beneath their page titles.
     """
 
-    def __init__(self, label: str, parent=None) -> None:
+    def __init__(self, label: str, parent=None, *, icon_only: bool = False) -> None:
         """
         Keep the ordinary button signals, text and accessibility while sharing its visual dimensions.
         """
         super().__init__(label, parent)
+        self._icon_only = icon_only
         self.setProperty("headerAction", True)
         self.setProperty("primary", True)
-        self.setFixedSize(120, 30)
-        self.setIcon(icon("process", colour="#ffffff", size=18))
-        self.setIconSize(QSize(18, 18))
+        self.setFixedSize(32 if icon_only else 104, 28)
+        self.setAccessibleName(label)
+        self.setToolTip(label)
+        self.setIcon(icon("process", colour="#ffffff", size=16))
+        self.setIconSize(QSize(16, 16))
 
     def paintEvent(self, event) -> None:
         """
@@ -119,10 +213,35 @@ class HeaderActionButton(QPushButton):
         painter = QStylePainter(self)
         painter.drawControl(QStyle.ControlElement.CE_PushButton, option)
         mode = QIcon.Mode.Normal if self.isEnabled() else QIcon.Mode.Disabled
-        option.text = label
-        option.rect = QRect(31, 0, self.width() - 39, self.height())
-        painter.drawControl(QStyle.ControlElement.CE_PushButtonLabel, option)
-        symbol.paint(painter, QRect(8, 6, 18, 18), Qt.AlignmentFlag.AlignCenter, mode)
+        if not self._icon_only:
+            option.text = label
+            option.rect = QRect(28, 0, self.width() - 36, self.height())
+            painter.drawControl(QStyle.ControlElement.CE_PushButtonLabel, option)
+        left = (self.width() - 16) // 2 if self._icon_only else 8
+        symbol.paint(painter, QRect(left, (self.height() - 16) // 2, 16, 16), Qt.AlignmentFlag.AlignCenter, mode)
+
+
+def wrapped_text_layout(
+    text: str, font: QFont, width: int, alignment=Qt.AlignmentFlag.AlignLeft,
+) -> QTextLayout:
+    """
+    Measure and draw complete metadata with identical wrapping, including long unbroken filenames.
+    """
+    layout = QTextLayout(text.replace("\n", "\u2028"), font)
+    option = QTextOption(alignment & Qt.AlignmentFlag.AlignHorizontal_Mask)
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    layout.beginLayout()
+    height = 0.0
+    while True:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(max(1, width))
+        line.setPosition(QPointF(0, height))
+        height += line.height()
+    layout.endLayout()
+    return layout
 
 
 class EntryTable(QTableWidget):
@@ -167,6 +286,9 @@ class SearchField(QLineEdit):
         Inset a noninteractive icon while retaining native placeholder, cursor and clearing behaviour.
         """
         super().__init__(parent)
+        self.setProperty("searchField", True)
+        self.setFrame(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self.setClearButtonEnabled(True)
         self.setAccessibleName(prompt)
         self.setPlaceholderText(prompt)
@@ -184,6 +306,237 @@ class SearchField(QLineEdit):
         """
         super().resizeEvent(event)
         self._symbol.move(12, (self.height() - self._symbol.height()) // 2)
+
+
+class DateField(QLineEdit):
+    """
+    Keep typed accounting dates editable while offering an explicit, non-mutating calendar preview.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        """
+        Retain QLineEdit's text API and attach one accessible calendar disclosure.
+        """
+        super().__init__(text, parent)
+        self.setAccessibleName("Accounting date")
+        self.setPlaceholderText("YYYY-MM-DD or DD-MM-YYYY")
+        self.setToolTip("Accounting date · type YYYY-MM-DD or DD-MM-YYYY, or choose a day")
+        self.setTextMargins(0, 0, 28, 0)
+        self.calendar_button = QToolButton(self)
+        self.calendar_button.setObjectName("manualIconAction")
+        self.calendar_button.setFixedSize(28, 28)
+        self.calendar_button.setIcon(icon("chevron_down", size=12))
+        self.calendar_button.setIconSize(QSize(12, 12))
+        self.calendar_button.setToolTip("Choose accounting date")
+        self.calendar_button.setAccessibleName("Choose accounting date")
+        self.calendar_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.calendar_button.clicked.connect(self.show_calendar)
+        self.calendar_popup = _DatePopup(self)
+
+    def show_calendar(self) -> None:
+        """
+        Preview the entered day without changing text until a day is explicitly chosen.
+        """
+        if not self.isEnabled() or self.isReadOnly():
+            return
+        try:
+            entered = parse_input_date(self.text())
+        except ValueError:
+            entered = None
+        selected = QDate(entered.year, entered.month, entered.day) if entered else QDate.currentDate()
+        self.calendar_popup.prepare(selected)
+        position = self.mapToGlobal(QPoint(0, self.height() + 4))
+        screen = self.screen().availableGeometry()
+        width, height = self.calendar_popup.width(), self.calendar_popup.height()
+        position.setX(max(screen.left(), min(position.x(), screen.right() - width + 1)))
+        if position.y() + height > screen.bottom():
+            position.setY(self.mapToGlobal(QPoint(0, 0)).y() - height - 4)
+        position.setY(max(screen.top(), position.y()))
+        self.calendar_popup.move(position)
+        self.calendar_popup.show()
+        self.calendar_popup.calendar.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def setReadOnly(self, read_only: bool) -> None:
+        """
+        Apply the same edit guard to typed dates and calendar selection.
+        """
+        super().setReadOnly(read_only)
+        self.calendar_button.setEnabled(not read_only)
+        if read_only:
+            self.calendar_popup.hide()
+
+    def changeEvent(self, event) -> None:
+        """
+        Dismiss a calendar when the owning editor disables this field during a job.
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.EnabledChange and not self.isEnabled():
+            if hasattr(self, "calendar_popup"):
+                self.calendar_popup.hide()
+
+    def keyPressEvent(self, event) -> None:
+        """
+        Provide a keyboard calendar shortcut while retaining ordinary date editing.
+        """
+        if event.key() == Qt.Key.Key_Down and event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            self.show_calendar()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        """
+        Keep the disclosure inside the trailing inset without displacing typed dates.
+        """
+        super().resizeEvent(event)
+        self.calendar_button.move(self.width() - 32, (self.height() - 28) // 2)
+
+    def _choose_date(self, value: QDate) -> None:
+        """
+        Commit one selected date through the same signal path as deliberate typing.
+        """
+        if self.isEnabled() and not self.isReadOnly():
+            self.setText(value.toString("yyyy-MM-dd"))
+        self.calendar_popup.hide()
+        self.setFocus(Qt.FocusReason.PopupFocusReason)
+
+
+class _DatePopup(QFrame):
+    """
+    Offer a quiet month grid with a custom header and no implicit date commits.
+    """
+
+    def __init__(self, field: DateField) -> None:
+        """
+        Keep month navigation separate from the single explicit day-selection action.
+        """
+        super().__init__(field, Qt.WindowType.Popup)
+        self.setObjectName("datePopup")
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        header = QHBoxLayout()
+        self.previous = self._navigation_button("Previous month", "chevron_left")
+        header.addWidget(self.previous)
+        self.month = QLabel()
+        self.month.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(self.month, 1)
+        self.next = self._navigation_button("Next month", "chevron_right")
+        header.addWidget(self.next)
+        layout.addLayout(header)
+        self.calendar = _DateCalendar(self)
+        self.calendar.setNavigationBarVisible(False)
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        self.calendar.setHorizontalHeaderFormat(QCalendarWidget.HorizontalHeaderFormat.ShortDayNames)
+        self.calendar.setFirstDayOfWeek(Qt.DayOfWeek.Monday)
+        self.calendar.setGridVisible(False)
+        self.calendar.setDateEditEnabled(False)
+        self.calendar.setFixedSize(294, 226)
+        self.calendar.setAccessibleName("Choose accounting date")
+        self.calendar.clicked.connect(field._choose_date)
+        self.calendar.activated.connect(field._choose_date)
+        self.calendar.currentPageChanged.connect(self._show_month)
+        self.previous.clicked.connect(self.calendar.showPreviousMonth)
+        self.next.clicked.connect(self.calendar.showNextMonth)
+        layout.addWidget(self.calendar)
+        self.setFixedSize(318, 292)
+
+    def prepare(self, selected: QDate) -> None:
+        """
+        Reset the preview to the entered month and resolve the owning workspace's current palette.
+        """
+        surface = gui_colour(self, "surface", "#ffffff")
+        foreground = gui_colour(self, "text", "#243b3b")
+        muted = gui_colour(self, "muted", "#637a78")
+        self.setStyleSheet(
+            f"QFrame#datePopup {{ background: {surface}; border: none; border-radius: 12px; }}"
+            f"QFrame#datePopup QLabel {{ background: transparent; color: {foreground}; font-weight: 600; }}"
+            f"QCalendarWidget {{ background: {surface}; color: {foreground}; }}"
+            f"QCalendarWidget QAbstractItemView {{ background: {surface}; color: {muted}; "
+            "border: none; outline: none; selection-background-color: transparent; }"
+        )
+        self.month.setStyleSheet(f"background: transparent; color: {foreground}; font-weight: 600;")
+        weekday_format = QTextCharFormat()
+        weekday_format.setForeground(QColor(foreground))
+        weekday_format.setBackground(QColor(surface))
+        self.calendar.setHeaderTextFormat(weekday_format)
+        for weekday in (
+            Qt.DayOfWeek.Monday, Qt.DayOfWeek.Tuesday, Qt.DayOfWeek.Wednesday, Qt.DayOfWeek.Thursday,
+            Qt.DayOfWeek.Friday, Qt.DayOfWeek.Saturday, Qt.DayOfWeek.Sunday,
+        ):
+            self.calendar.setWeekdayTextFormat(weekday, weekday_format)
+        self.calendar.setSelectedDate(selected)
+        self.calendar.setCurrentPage(selected.year(), selected.month())
+        self._show_month(selected.year(), selected.month())
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        """
+        Paint the native popup's whole backing so translucent header and margin areas remain readable.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(gui_colour(self, "surface", "#ffffff")))
+        painter.drawRoundedRect(QRectF(self.rect()), 12, 12)
+
+    def resizeEvent(self, event) -> None:
+        """
+        Round the native popup window as well as its painted backing surface.
+        """
+        super().resizeEvent(event)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 12, 12)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def _show_month(self, year: int, month: int) -> None:
+        """
+        Update the visible month label without changing the date field.
+        """
+        self.month.setText(self.calendar.locale().toString(QDate(year, month, 1), "MMMM yyyy"))
+
+    def _navigation_button(self, label: str, symbol: str) -> QToolButton:
+        """
+        Reuse thin local chevrons with clear keyboard and assistive-technology names.
+        """
+        button = QToolButton(self)
+        button.setObjectName("manualIconAction")
+        button.setFixedSize(28, 28)
+        button.setIcon(icon(symbol, size=14))
+        button.setIconSize(QSize(14, 14))
+        button.setToolTip(label)
+        button.setAccessibleName(label)
+        button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        return button
+
+
+class _DateCalendar(QCalendarWidget):
+    """
+    Retain native calendar interaction while painting clear, rounded day selections.
+    """
+
+    def paintCell(self, painter: QPainter, rectangle: QRect, value: QDate) -> None:
+        """
+        Distinguish the chosen day and today using the owning workspace's colours.
+        """
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        selected = value == self.selectedDate()
+        current = value.month() == self.monthShown() and value.year() == self.yearShown()
+        if selected:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(gui_colour(self, "accent", "#2e6a61")))
+            painter.drawRoundedRect(QRectF(rectangle).adjusted(3, 2, -3, -2), 7, 7)
+        role = "on_accent" if selected else "text" if current else "muted"
+        painter.setPen(QColor(gui_colour(self, role, "#ffffff" if selected else "#243b3b")))
+        font = painter.font()
+        font.setBold(selected or value == QDate.currentDate())
+        painter.setFont(font)
+        painter.drawText(rectangle, Qt.AlignmentFlag.AlignCenter, str(value.day()))
+        painter.restore()
 
 
 class QuoteBlock(QWidget):
@@ -269,7 +622,8 @@ class _ControlStyle(QObject):
                 if event.type() == QEvent.Type.Show and combo.objectName() != "themePicker":
                     width = max((combo.fontMetrics().horizontalAdvance(combo.itemText(index))
                                  for index in range(combo.count())), default=0)
-                    combo.view().setMinimumWidth(max(combo.width(), min(420, width + 58)))
+                    padding = 78 if combo.property("centredChoices") else 58
+                    combo.view().setMinimumWidth(max(combo.width(), min(420, width + padding)))
                 prepare_combo_popup(combo)
                 if event.type() == QEvent.Type.Show:
                     # Qt's own show handler may reset the window mask after the event filter returns.
@@ -339,7 +693,8 @@ class _ChoiceDelegate(QStyledItemDelegate):
         """
         Reserve comfortable menu rows and enough width for the choice name and selection tick.
         """
-        return QSize(option.fontMetrics.horizontalAdvance(str(index.data() or "")) + 58, 34)
+        padding = 78 if self.combo.property("centredChoices") else 58
+        return QSize(option.fontMetrics.horizontalAdvance(str(index.data() or "")) + padding, 34)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
         """
@@ -371,15 +726,128 @@ class _ChoiceDelegate(QStyledItemDelegate):
         font.setWeight(font.Weight.DemiBold if active else font.Weight.Normal)
         painter.setFont(font)
         painter.setPen(QColor(colour))
-        text_rect = option.rect.adjusted(left, 0, -12, 0)
+        centred = bool(self.combo.property("centredChoices"))
+        text_rect = option.rect.adjusted(left, 0, -left if centred else -12, 0)
         text = painter.fontMetrics().elidedText(
             str(index.data(Qt.ItemDataRole.DisplayRole) or ""), Qt.TextElideMode.ElideRight, text_rect.width(),
         )
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+        alignment = Qt.AlignmentFlag.AlignCenter if centred else (
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        painter.drawText(text_rect, alignment, text)
         painter.restore()
 
 
 # %% 3. Helpers ----------------------------------------------------------------------------------------------
+class _DiscardDialog(QDialog):
+    """
+    Centre a short draft question and explicit decisions without native message-box icon spacing.
+    """
+
+    def __init__(
+        self, parent: QWidget, *, question: str = "Discard unsaved changes?", allow_save: bool = False,
+    ) -> None:
+        """
+        Use the owning workspace's colours and make cancellation the initial keyboard action.
+        """
+        super().__init__(parent, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("discardConfirmation")
+        self.decision = "cancel"
+        self.setWindowTitle(question)
+        self.setAccessibleName(question)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        surface = QFrame()
+        surface.setObjectName("discardSurface")
+        outer.addWidget(surface)
+        layout = QVBoxLayout(surface)
+        layout.setContentsMargins(24, 26, 24, 22)
+        layout.setSpacing(22)
+        prompt = QLabel(question)
+        prompt.setObjectName("discardQuestion")
+        prompt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        prompt.setTextFormat(Qt.TextFormat.PlainText)
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(12)
+        actions.addStretch()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("discardCancel")
+        self.cancel_button.setAccessibleName("Cancel discard")
+        self.cancel_button.setFixedSize(108, 32)
+        self.cancel_button.setAutoDefault(False)
+        self.cancel_button.setDefault(True)
+        self.cancel_button.clicked.connect(self.reject)
+        actions.addWidget(self.cancel_button)
+        self.discard_button = QPushButton("Discard")
+        self.discard_button.setObjectName("discardAccept")
+        self.discard_button.setAccessibleName("Discard unsaved changes")
+        self.discard_button.setFixedSize(108, 32)
+        self.discard_button.setAutoDefault(False)
+        self.discard_button.clicked.connect(lambda: self._choose("discard"))
+        actions.addWidget(self.discard_button)
+        if allow_save:
+            self.save_button = QPushButton("Save")
+            self.save_button.setObjectName("discardSave")
+            self.save_button.setAccessibleName("Save changes")
+            self.save_button.setFixedSize(108, 32)
+            self.save_button.setAutoDefault(False)
+            self.save_button.clicked.connect(lambda: self._choose("save"))
+            actions.addWidget(self.save_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+        colour = lambda role, fallback: gui_colour(parent, role, fallback)
+        self.setStyleSheet(
+            "QDialog#discardConfirmation { background: transparent; }"
+            "QFrame#discardSurface { background: " + colour("surface", "#ffffff")
+            + "; border: 1px solid " + colour("border", "#d3ded9") + "; border-radius: 16px; }"
+            "QLabel#discardQuestion { color: " + colour("text", "#243b3b")
+            + "; background: transparent; font-size: 14px; font-weight: 400; padding: 0; }"
+            "QPushButton#discardCancel, QPushButton#discardAccept, QPushButton#discardSave { color: "
+            + colour("text", "#243b3b")
+            + "; background: " + colour("panel", "#e3eeea")
+            + "; border: none; border-radius: 8px; padding: 0; font-size: 13px; font-weight: 400; }"
+            "QPushButton#discardCancel:focus, QPushButton#discardAccept:focus, "
+            "QPushButton#discardSave:focus { background: "
+            + colour("focus", "#d6e6df") + "; }"
+            "QPushButton#discardCancel:hover, QPushButton#discardAccept:hover, "
+            "QPushButton#discardSave:hover { background: "
+            + colour("hover", "#eaf2ee") + "; }"
+            "QPushButton#discardCancel:pressed, QPushButton#discardAccept:pressed, "
+            "QPushButton#discardSave:pressed { background: "
+            + colour("selected", "#d6e6df") + "; }"
+        )
+        self.setFixedSize(420 if allow_save else 360, self.sizeHint().height())
+
+    def _choose(self, decision: str) -> None:
+        """
+        Acknowledge only the clicked explicit action; closing and Escape remain cancellation.
+        """
+        self.decision = decision
+        self.accept()
+
+    def showEvent(self, event) -> None:
+        """
+        Centre the native window over its parent while keeping it within that screen's available area.
+        """
+        super().showEvent(event)
+        parent = self.parentWidget()
+        if parent is not None:
+            centre = parent.mapToGlobal(parent.rect().center())
+            position = centre - QPoint(self.width() // 2, self.height() // 2)
+            screen = parent.screen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                position.setX(max(available.left(), min(position.x(), available.right() - self.width() + 1)))
+                position.setY(max(available.top(), min(position.y(), available.bottom() - self.height() + 1)))
+            self.move(position)
+        self.cancel_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+
 def _round_menu(menu: QMenu) -> None:
     """
     Clip the native action-menu window to its rounded stylesheet surface without changing its actions.

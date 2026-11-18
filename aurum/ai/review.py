@@ -15,6 +15,7 @@ none, or safe validation errors. Database saving and desktop workflow coordinati
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 import json
@@ -27,13 +28,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 # Aurum imports
 from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
-from aurum.ai.skills import Skill, explicit_memory_context, guidance_context, load_categorisation_skill
+from aurum.ai.skills import (
+    Skill, explicit_memory_context, guidance_context, load_categorisation_skill, retired_budget_guidance,
+)
 from aurum.finance.accounts import AccountRegistry, AccountType
-from aurum.finance.budget import BudgetSettings, budget_catalogue, validate_budget_labels
+from aurum.finance.budget import (
+    BudgetSettings, budget_policy, project_budget_entry, validate_budget_labels,
+)
 from aurum.finance.journal import (
     AccountInvestmentDetails, JournalEntry, JournalLine,
     preserve_account_investments, preserve_budget_categories,
 )
+from aurum.finance.investments import investment_cash_available
 from aurum.finance.reports import ReportSettings
 from aurum.finance.review import Guidance, GuidanceResult, ReviewCase, ReviewOutcome
 from aurum.finance.transaction import Transaction
@@ -56,6 +62,12 @@ class ReviewBatchError(ValueError):
         self.usage = dict(usage)
 
 
+class _AccountingClarification(ValueError):
+    """
+    Keep unsupported or incomplete cash-flow accounting in the Review queue.
+    """
+
+
 class _Posting(BaseModel):
     """
     Accept an account-key posting plan, with an optional reference to an unchanged imported source.
@@ -64,7 +76,6 @@ class _Posting(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     account_key: str
-    budget_category: str | None = None
     account_investment: AccountInvestmentDetails | None = None
     source_ref: str | None
     debit: str = Field(pattern=r"^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$")
@@ -130,6 +141,8 @@ def review_batch(
     explicit_memory: list[dict] | None = None,
     budget: BudgetSettings | None = None,
     report_settings: ReportSettings | None = None,
+    transfer_evidence: Mapping[str, Mapping[str, object]] | None = None,
+    ledger_entries: list[JournalEntry] | None = None,
 ) -> tuple[list[ReviewOutcome], dict[UUID, str], dict]:
     """
     Request complete accounting plans for answered review cases without writing any database records.
@@ -141,7 +154,7 @@ def review_batch(
         guidance: Previously inferred private guidance, used as context rather than automatic rules.
         skill: Accounting instructions loaded once by the command, or None to load the project skill here.
         questions: Current saved review questions, used to interpret brief answers without changing them.
-        budget: Optional permitted reporting labels for explicit human exceptions to ordinary account mapping.
+        budget: Shared deterministic cash-flow roles; model-selected budget exceptions are not accepted.
 
     Returns:
         Valid outcomes in input order, safe failure messages keyed by case UUID, and provider-reported usage.
@@ -161,10 +174,10 @@ def review_batch(
     skill = skill or load_categorisation_skill()
     references, sources, guidance_refs, payload = _request_context(
         cases, accounts, guidance, questions=questions, budget=budget, report_settings=report_settings,
-        explicit_memory=explicit_memory,
+        explicit_memory=explicit_memory, transfer_evidence=transfer_evidence,
     )
     response, usage = client.request(
-        instructions=skill.instructions, payload=payload,
+        instructions=skill.instructions + "\n\n" + budget_policy(budget)["rule"], payload=payload,
         output_schema=_response_schema(references, sources, accounts, guidance_refs, budget),
     )
     grouped = _read_response(response, references, usage)
@@ -180,7 +193,10 @@ def review_batch(
             continue
         try:
             result, extra = _read_case(records[0])
-            entries = _build_entries(case, result, sources, accounts, budget)
+            entries = _build_entries(
+                case, result, sources, accounts, budget, transfer_evidence,
+                ledger_entries=ledger_entries, report_settings=report_settings,
+            )
             inferred = (
                 _read_guidance(extra, accounts, guidance_refs) if entries
                 else GuidanceResult(reason="Accounting review is unresolved.")
@@ -189,6 +205,12 @@ def review_batch(
                 case_id=case.id, status=result.status, entries=entries, reason=result.reason,
                 question=result.question, guidance=inferred.guidance, guidance_reason=inferred.reason,
                 guidance_errors=inferred.errors,
+                model=model, skill_version=skill.version, updated_at=datetime.now(UTC),
+            ))
+        except _AccountingClarification as error:
+            outcomes.append(ReviewOutcome(
+                case_id=case.id, status="needs_review", entries=(),
+                reason="This movement needs additional supported accounting facts.", question=str(error),
                 model=model, skill_version=skill.version, updated_at=datetime.now(UTC),
             ))
         except (TypeError, ValueError) as error:
@@ -200,7 +222,8 @@ def review_batch(
 def learn_guidance_batch(
     client: ChatGPTConnection, cases: list[ReviewCase], accounts: AccountRegistry,
     *, guidance: list[Guidance] | None = None, skill: Skill | None = None,
-    explicit_memory: list[dict] | None = None,
+    explicit_memory: list[dict] | None = None, budget: BudgetSettings | None = None,
+    transfer_evidence: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[dict[UUID, GuidanceResult], dict[UUID, str], dict]:
     """
     Assess reusable preferences from accepted reviews without asking for replacement accounting.
@@ -226,7 +249,8 @@ def learn_guidance_batch(
     if not client.model:
         raise ValueError("Select a model before learning guidance")
     references, _, guidance_refs, payload = _request_context(
-        cases, accounts, guidance, explicit_memory=explicit_memory,
+        cases, accounts, guidance, explicit_memory=explicit_memory, budget=budget,
+        transfer_evidence=transfer_evidence,
     )
     for case in references.values():
         linked = {line.transaction_id for entry in case.entries for line in entry.lines
@@ -248,7 +272,10 @@ def learn_guidance_batch(
         }},
         "required": ["outcomes"],
     }
-    response, usage = client.request(instructions=skill.instructions, payload=payload, output_schema=schema)
+    response, usage = client.request(
+        instructions=skill.instructions + "\n\n" + budget_policy(budget)["rule"],
+        payload=payload, output_schema=schema,
+    )
     grouped = _read_response(response, references, usage)
     assessments, failures = {}, {}
     for reference, case in references.items():
@@ -268,6 +295,7 @@ def _request_context(
     *, questions: dict[UUID, str | None] | None = None, budget: BudgetSettings | None = None,
     report_settings: ReportSettings | None = None,
     explicit_memory: list[dict] | None = None,
+    transfer_evidence: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[dict, dict, dict, dict]:
     """
     Validate distinct review groups and prepare the same redacted evidence for accounting and guidance.
@@ -292,6 +320,7 @@ def _request_context(
     )
     learned, guidance_refs = guidance_context(guidance, accounts, context)
     payload = _review_payload(references, source_refs, accounts, learned, questions=questions, budget=budget)
+    payload["budget_policy"] = budget_policy(budget)
     payload["explicit_memory"] = explicit_memory_context(explicit_memory, accounts)
     payload["unrealised_gains_account"] = (
         report_settings.unrealised_gains_account if report_settings else None
@@ -347,7 +376,6 @@ def _review_payload(
                             "source_ref": source_refs.get(line.transaction_id),
                             "debit": format(line.debit, ".2f"), "credit": format(line.credit, ".2f"),
                             "description": redact_bank_details(line.description, accounts),
-                            "budget_category": line.budget_category,
                             "account_investment": line.account_investment.model_dump(mode="json")
                             if line.account_investment is not None else None,
                         }
@@ -369,14 +397,10 @@ def _review_payload(
         })
     return {
         "mode": "review", "currency": "AUD", "cases": cases, "guidance": guidance,
-        "budget_categories": [
-            {**item, "name": redact_bank_details(item["name"], accounts)}
-            for item in budget_catalogue(budget)
-        ] if budget is not None else [],
         "accounts": [
             {
                 "key": key, "name": redact_bank_details(account.name, accounts),
-                "type": account.account_type.value,
+                "type": account.account_type.value, "is_bank": account.bank_details is not None,
                 "purpose": redact_bank_details(account.notes or "", accounts),
             }
             for key, account in accounts.accounts.items()
@@ -494,6 +518,8 @@ def _validation_message(error: TypeError | ValueError) -> str:
 def _build_entries(
     case: ReviewCase, result: _Review, sources: dict[str, Transaction],
     accounts: AccountRegistry, budget: BudgetSettings | None = None,
+    transfer_evidence: Mapping[str, Mapping[str, object]] | None = None,
+    *, ledger_entries: list[JournalEntry] | None = None, report_settings: ReportSettings | None = None,
 ) -> tuple[JournalEntry, ...]:
     """
     Reconstruct every source exactly once and validate complete events with Python-owned persistent UUIDs.
@@ -526,7 +552,7 @@ def _build_entries(
                     raise ValueError("A counterpart posting needs a description")
                 lines.append(JournalLine(
                     account_id=account.id, debit=debit, credit=credit, description=text,
-                    effective_date=effective_date, budget_category=posting.budget_category,
+                    effective_date=effective_date,
                     account_investment=posting.account_investment,
                 ))
                 continue
@@ -544,7 +570,7 @@ def _build_entries(
                 account_id=source.account_id, transaction_id=source.transaction_id,
                 debit=debit, credit=credit,
                 description=source.description, effective_date=source.effective_date,
-                budget_category=posting.budget_category, account_investment=posting.account_investment,
+                account_investment=posting.account_investment,
             ))
         source_ids = {line.transaction_id for line in lines if line.transaction_id is not None}
         if not source_ids:
@@ -563,7 +589,32 @@ def _build_entries(
         raise ValueError("A resolved review must preserve every supplied source transaction")
     entries = preserve_budget_categories(tuple(entries), case.entries)
     entries = preserve_account_investments(entries, case.entries)
-    validate_budget_labels(entries, accounts, budget, case.entries)
+    validate_budget_labels(
+        entries, accounts, budget, case.entries, transactions=sources.values(),
+        transfer_evidence=transfer_evidence,
+    )
+    if budget is not None:
+        issues = [issue for entry in entries for issue in project_budget_entry(entry, accounts, budget).issues]
+        if issues:
+            raise _AccountingClarification(" ".join(issue.message for issue in issues))
+        for entry in entries:
+            for key in budget.investment_accounts:
+                if key not in accounts.accounts:
+                    continue
+                identifier = accounts.accounts[key].id
+                outgoing = sum((line.credit for line in entry.lines if line.account_id == identifier
+                                and (line.account_investment is None
+                                     or line.account_investment.kind != "earnings")), Decimal("0"))
+                if not outgoing:
+                    continue
+                available = None if report_settings and key in report_settings.account_investments else (
+                    investment_cash_available(ledger_entries or [], identifier, entry.date, excluding=entry.id)
+                )
+                if available is None or outgoing > available:
+                    raise _AccountingClarification(
+                        "Use Manual to confirm the sale units, or the withdrawal's value and cost basis. "
+                        "A later cash transfer needs evidence that the sale was already recorded."
+                    )
     return entries
 
 
@@ -595,6 +646,9 @@ def _read_guidance(record: dict, accounts: AccountRegistry, references: dict) ->
                 continue
             if any(not isinstance(reference, str) or reference not in references for reference in replaced):
                 errors.append(prefix + "contains an unknown guidance reference.")
+                continue
+            if retired_budget_guidance(str(value["scope"]) + " " + str(value["instruction"])):
+                errors.append(prefix + "retired budget overrides cannot become active guidance.")
                 continue
             retained.append(Guidance(
                 scope=value["scope"], instruction=value["instruction"],
@@ -632,14 +686,6 @@ def _response_schema(
     posting = definitions["_Posting"]["properties"]
     posting["account_investment"].pop("default", None)
     posting["account_key"]["enum"] = list(accounts.accounts)
-    labels = (
-        [item["key"] for item in budget_catalogue(budget)] if budget is not None else
-        sorted({line.budget_category for case in cases.values() for entry in case.entries
-                for line in entry.lines if line.budget_category is not None})
-    )
-    posting["budget_category"] = (
-        {"anyOf": [{"type": "string", "enum": labels}, {"type": "null"}]} if labels else {"type": "null"}
-    )
     definitions["_Posting"]["required"] = list(posting)
     posting["source_ref"]["anyOf"][0]["enum"] = list(sources)
     fields = _guidance_fields(accounts, guidance)

@@ -33,7 +33,7 @@ from ruamel.yaml.error import YAMLError
 from aurum.database.database import open_database
 from aurum.finance.accounts import Account, AccountRegistry
 from aurum.finance.budget import (
-    BudgetSettings, _validate_settings as validate_budget_settings, validate_budget_plan,
+    BudgetSettings, _validate_settings as validate_budget_settings, normalise_budget_data,
 )
 from aurum.finance.dates import reporting_month
 from aurum.finance.reports import ReportSettings, _validate_settings as validate_report_settings
@@ -74,6 +74,11 @@ def read_configuration(workspace: Path, kind: str) -> ConfigurationDocument:
     expected = list if kind in {"accounts", "securities"} else dict
     if not isinstance(data, expected):
         raise ValueError(f"{kind.title()} configuration must contain a {expected.__name__}.")
+    if kind == "budget":
+        definitions = _definitions(originals)
+        definitions["budget"] = data
+        accounts = AccountRegistry([Account.model_validate(item) for item in definitions["accounts"]])
+        data = _normalised_budget(definitions, accounts, workspace)
     return ConfigurationDocument(workspace, kind, data, originals)
 
 
@@ -91,27 +96,82 @@ def save_configuration(document: ConfigurationDocument, data: Any) -> Configurat
     New accounts and securities receive UUIDs only in the successful saved configuration. An external edit to
     any configuration invalidates the form's snapshot so dependencies cannot silently change underneath it.
     """
-    _check_originals(document.workspace, document.originals)
-    if any(content is None for content in document.originals.values()):
+    return save_configurations({document.kind: document}, {document.kind: data})[document.kind]
+
+
+def save_configurations(
+    documents: dict[str, ConfigurationDocument], changes: dict[str, Any],
+) -> dict[str, ConfigurationDocument]:
+    """
+    Validate related form changes together and restore earlier writes if the coordinated save fails.
+
+    Every supplied document must belong to the same workspace revision. Account and budget edits can then
+    change their cross-file references in one save without an invalid intermediate validation. Rollback uses
+    the exact bytes written by this operation, so a concurrent external edit is never overwritten.
+    """
+    if not changes:
+        return {}
+    if set(changes) - set(documents) or set(changes) - set(CONFIGURATION_MODELS):
+        raise ValueError("Every changed configuration needs its original document.")
+    first = documents[next(iter(changes))]
+    workspace, originals = first.workspace, first.originals
+    if any(
+        kind != document.kind or document.workspace != workspace or document.originals != originals
+        for kind, document in documents.items()
+    ):
+        raise ValueError("Configuration forms use different revisions. Reload before saving your changes.")
+    _check_originals(workspace, originals)
+    if any(content is None for content in originals.values()):
         raise ValueError("Create the missing workspace files before saving configuration.")
-    proposed = _definitions(document.originals)
-    proposed[document.kind] = deepcopy(data)
+    proposed = _definitions(originals)
+    proposed.update(deepcopy(changes))
     prepared, models = _validate(proposed)
-    if document.kind == "budget":
-        validate_budget_plan(models["budget"])
-    _protect_identities(document, prepared)
-    _protect_equity_roles(document, prepared)
+    contents = {}
+    for kind in CONFIGURATION_MODELS:
+        if kind not in changes:
+            continue
+        document = documents[kind]
+        _protect_identities(document, prepared)
+        _protect_equity_roles(document, prepared)
+        try:
+            _protect_history(workspace, kind, document.data, prepared[kind], models)
+        except sqlite3.Error as error:
+            raise ValueError(f"Could not check saved accounting history: {error}") from None
+        original = document.data
+        if kind == "budget":
+            original = _yaml().load(originals[kind].decode("utf-8"))
+        updated = _merge_yaml(deepcopy(original), prepared[kind])
+        stream = io.StringIO()
+        _yaml().dump(updated, stream)
+        contents[kind] = stream.getvalue().encode("utf-8")
+    expected, written = dict(originals), []
     try:
-        _protect_history(document.workspace, document.kind, document.data, prepared[document.kind], models)
-    except sqlite3.Error as error:
-        raise ValueError(f"Could not check saved accounting history: {error}") from None
-    updated = _merge_yaml(deepcopy(document.data), prepared[document.kind])
-    stream = io.StringIO()
-    _yaml().dump(updated, stream)
-    path = document.workspace / "config" / f"{document.kind}.yaml"
-    _check_originals(document.workspace, document.originals)
-    _replace(path, stream.getvalue().encode("utf-8"), document.originals[document.kind])
-    return read_configuration(document.workspace, document.kind)
+        for kind, content in contents.items():
+            _check_originals(workspace, expected)
+            if content == originals[kind]:
+                continue
+            _replace(workspace / "config" / f"{kind}.yaml", content, expected[kind])
+            expected[kind] = content
+            written.append(kind)
+        _check_originals(workspace, expected)
+        result = {kind: read_configuration(workspace, kind) for kind in changes}
+        if any(document.originals != expected for document in result.values()):
+            raise ValueError("Configuration changed while saving. Reload it and try again.")
+        _check_originals(workspace, expected)
+        return result
+    except Exception as error:
+        unrestored = []
+        for kind in reversed(written):
+            try:
+                _replace(workspace / "config" / f"{kind}.yaml", originals[kind], contents[kind])
+            except (OSError, ValueError):
+                unrestored.append(kind)
+        if unrestored:
+            raise ValueError(
+                "Configuration save did not finish. Could not restore " + ", ".join(unrestored)
+                + "; reload and inspect these settings before continuing. " + str(error)
+            ) from error
+        raise
 
 
 def initialise_workspace(workspace: Path) -> None:
@@ -246,12 +306,43 @@ def _validate(definitions: dict, *, check_references: bool = True) -> tuple[dict
     ]
     if len(bank_ids) != len(set(bank_ids)):
         raise ValueError("Multiple accounts use the same bank identifiers")
-    budget = BudgetSettings.model_validate(prepared["budget"])
     reports = ReportSettings.model_validate(prepared["reports"])
+    prepared["budget"] = _normalised_budget(prepared, accounts)
+    budget = BudgetSettings.model_validate(prepared["budget"])
     if check_references:
         validate_budget_settings(budget, accounts)
         validate_report_settings(reports, accounts)
     return prepared, {"accounts": accounts, "securities": securities, "budget": budget, "reports": reports}
+
+
+def _normalised_budget(definitions: dict, accounts: AccountRegistry, workspace: Path | None = None) -> dict:
+    """
+    Translate retired plans in memory and seed roles only from explicit investment evidence.
+
+    Existing role selections, including empty lists, always win. Reading never rewrites configuration
+    or saved journal labels; those labels are retained solely as historical data.
+    """
+    reports = definitions.get("reports") or {}
+    investments = set((reports.get("account_investments") or {}).keys())
+    if workspace is not None:
+        database = workspace / "data" / "aurum.sqlite3"
+        if database.exists():
+            with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
+                present = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'journal'"
+                ).fetchone()
+                if present:
+                    holders = {row[0] for row in connection.execute(
+                        "SELECT DISTINCT account_id FROM journal WHERE status = 'posted' "
+                        "AND security_id IS NOT NULL"
+                    )}
+                    investments.update(account.key for account in accounts.accounts.values()
+                                       if str(account.id) in holders)
+    return normalise_budget_data(
+        definitions.get("budget") or {}, accounts, investment_account_keys=investments,
+        capital_account=reports.get("capital_account", "capital"),
+        unrealised_gains_account=reports.get("unrealised_gains_account", "unrealised_capital_gains"),
+    )
 
 
 def _protect_identities(document: ConfigurationDocument, proposed: dict) -> None:
@@ -300,7 +391,7 @@ def _protect_equity_roles(document: ConfigurationDocument, proposed: dict) -> No
 
 def _protect_history(workspace: Path, kind: str, previous: Any, proposed: Any, models: dict) -> None:
     """
-    Retain definitions referenced by posted data, saved requests, guidance and quote history.
+    Protect live references while retaining completed processing snapshots as historical evidence.
     """
     path = workspace / "data" / "aurum.sqlite3"
     if not path.exists():
@@ -308,15 +399,25 @@ def _protect_history(workspace: Path, kind: str, previous: Any, proposed: Any, m
     connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     try:
         references = set()
+        live_references = set()
         tables = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         table_names = {row[0] for row in tables}
         for (table,) in tables:
             quoted = '"' + table.replace('"', '""') + '"'
-            for row in connection.execute(f"SELECT * FROM {quoted}"):
+            cursor = connection.execute(f"SELECT * FROM {quoted}")
+            columns = [column[0] for column in cursor.description]
+            for row in cursor:
+                completed = (
+                    table in {"manual_entries", "review_actions"} and "status" in columns
+                    and row[columns.index("status")] in {"applied", "superseded", "withdrawn"}
+                )
                 for value in row:
                     _collect_references(value, references)
+                    if not completed:
+                        _collect_references(value, live_references)
         if kind in {"accounts", "securities"}:
             new = {str(item["id"]): item for item in proposed}
+            old = {str(item.get("id", "")): item for item in previous}
             identity_column = "account_id" if kind == "accounts" else "security_id"
             identity_tables = (
                 {"transactions", "journal", "bank_feed_accounts"} if kind == "accounts" else {"journal"}
@@ -325,7 +426,18 @@ def _protect_history(workspace: Path, kind: str, previous: Any, proposed: Any, m
                 stored = connection.execute(
                     f'SELECT DISTINCT {identity_column} FROM "{table}" WHERE {identity_column} IS NOT NULL'
                 )
-                if any(identifier not in new for (identifier,) in stored):
+                missing = {str(identifier) for (identifier,) in stored} - new.keys()
+                removed = sorted(missing & old.keys(), key=lambda identifier: old[identifier]["name"])
+                if removed:
+                    names = ", ".join(old[identifier]["name"] for identifier in removed)
+                    guidance = (
+                        "Set its closing date instead to retain its accounting history."
+                        if kind == "accounts" and len(removed) == 1 else
+                        "Set their closing dates instead to retain their accounting history."
+                        if kind == "accounts" else "Keep the original security definitions to retain history."
+                    )
+                    raise ValueError(f"Cannot delete {names}: used by saved accounting. {guidance}")
+                if missing:
                     raise ValueError(
                         f"Saved accounting refers to missing {kind} UUIDs. Restore the original definitions "
                         "and IDs before saving; replacing their identities would break history."
@@ -338,44 +450,16 @@ def _protect_history(workspace: Path, kind: str, previous: Any, proposed: Any, m
                 if identifier not in references:
                     continue
                 if identifier not in new:
-                    raise ValueError(f"{item['name']} is used by saved history and cannot be removed.")
+                    if identifier in live_references:
+                        raise ValueError(
+                            f"{item['name']} is used by saved work and cannot be removed. "
+                            "Resolve that work or retain the definition."
+                        )
+                    continue
                 for field in protected:
                     if item.get(field) != new[identifier].get(field):
                         label = field.replace("_", " ")
                         raise ValueError(f"{item['name']}: {label} is used by saved history.")
-        if kind == "budget":
-            old_categories = previous.get("categories", {})
-            new_categories = proposed.get("categories", {})
-            for key in old_categories:
-                if key not in references:
-                    continue
-                if key not in new_categories:
-                    raise ValueError(f"Budget category {key!r} is used by saved history; keep this category.")
-                if old_categories[key]["kind"] != new_categories[key]["kind"]:
-                    raise ValueError(f"Budget category {key!r} cannot change its accounting kind.")
-            if {"journal", "journal_budget"} <= table_names:
-                by_id = {str(account.id): account for account in models["accounts"].accounts.values()}
-                labelled = connection.execute(
-                    "SELECT j.account_id, b.budget_category FROM journal AS j "
-                    "JOIN journal_budget AS b ON b.journal_row_id = j.id WHERE j.status = 'posted'"
-                )
-                for account_id, category_key in labelled:
-                    if category_key in {"exclude", "default"}:
-                        continue
-                    category = models["budget"].categories[category_key]
-                    account_key = by_id[account_id].key
-                    if category.accounts and account_key not in category.accounts:
-                        raise ValueError(f"Category {category_key!r} is already used by {account_key!r}.")
-            allocations = connection.execute("SELECT allocation FROM savings_allocations") if (
-                "savings_allocations" in table_names
-            ) else ()
-            for (payload,) in allocations:
-                allocation = json.loads(payload)
-                pots = (proposed.get("savings") or {}).get("category_keys", [])
-                residual = (proposed.get("savings") or {}).get("residual_category")
-                for item in allocation.get("amounts", []):
-                    if item["category_key"] not in pots or item["category_key"] == residual:
-                        raise ValueError("A pot with saved allocations must remain a named savings pot.")
         if kind == "reports" and any(row[0] == "journal" for row in tables):
             for key in models["reports"].account_investments:
                 account = models["accounts"].accounts[key]

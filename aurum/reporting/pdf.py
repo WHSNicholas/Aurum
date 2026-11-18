@@ -385,7 +385,7 @@ def _document(
         if draft_reasons:
             draft = (
                 '<div class="draft"><strong>Draft - incomplete information.</strong> '
-                'See the report command output for details.</div>'
+                'See report details in Aurum.</div>'
             )
         first_content = summary if index == 0 else ""
         left_content = left[index] if index < len(left) else ""
@@ -665,7 +665,7 @@ def _budget_report_html(report: BudgetReport, settings: ReportSettings, generate
     cards = _cards((
         ("income", "Income", report.total_income, _budget_target(report.income_target)),
         ("expenses", "Expenses", report.total_expenses, _budget_target(report.expense_target)),
-        ("net_income", "Savings", report.total_savings, _budget_target(report.savings_target)),
+        ("net_income", "Total Savings", report.total_savings, _budget_target(report.savings_target)),
     ))
     first_capacity = 19 if report.draft_reasons else 20
     left = _budget_pages((
@@ -823,8 +823,8 @@ def _investment_pages(
             lines = len(wrap(row.account_name, width=18)) if show_account else 0
             if row.security_key is None:
                 lines += max(0, len(wrap(row.symbol or row.account_name, width=18)) - 1)
-            lines = max(lines, int(row.price_date is not None))
-            cost = max(1, (26 + lines * 10 + 31) // 32)
+            height = 26 if "crypto" in row.asset_class.casefold() else 22
+            cost = max(1, (height + lines * 10 + 31) // 32)
             capacity = first_capacity if len(bodies) == 1 else 25
             heading_needed = index == 0 or not bodies[-1]
             # Reserve one row for a final total, avoiding a separate totals-only page.
@@ -888,18 +888,15 @@ def _investment_row(row: InvestmentRow, *, show_account: bool = False) -> str:
     Show security holdings and whole-account investments using only their supplied values.
     """
     detail = f'<span class="holding-detail">{escape(row.account_name)}</span>' if show_account else ""
-    price_date = (
-        f'<span class="holding-detail">{row.price_date.day} {row.price_date:%b %Y}</span>'
-        if row.price_date is not None else ""
-    )
+    row_class = "indent" if "crypto" in row.asset_class.casefold() else "indent compact-holding"
     gain_style = ""
     if row.unrealised_gain is not None and row.unrealised_gain != 0:
         gain_style = " positive" if row.unrealised_gain > 0 else " negative"
     return (
-        f'<tr class="indent"><td>{escape(row.symbol or row.account_name)}{detail}</td>'
+        f'<tr class="{row_class}"><td>{escape(row.symbol or row.account_name)}{detail}</td>'
         f'<td class="numeric">{_quantity(row.units)}</td>'
         f'<td class="numeric">{_quantity(row.average_cost, money=True)}</td>'
-        f'<td class="numeric">{_quantity(row.price, money=True)}{price_date}</td>'
+        f'<td class="numeric">{_quantity(row.price, money=True)}</td>'
         f'<td class="numeric">{_money(row.cost_basis, missing="-")}</td>'
         f'<td class="numeric">{_money(row.value, missing="-")}</td>'
         f'<td class="numeric{gain_style}">{_signed_money(row.unrealised_gain)}</td>'

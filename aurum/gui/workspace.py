@@ -15,16 +15,16 @@ from datetime import datetime
 from pathlib import Path
 import stat
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListView,
-    QPushButton, QScrollArea, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
-from aurum.gui.controls import HeaderActionButton, PageActionRow, QuoteBlock
+from aurum.gui.controls import HeaderActionButton, PageActionRow, QuoteBlock, confirm_discard
 from aurum.gui.icons import icon
 from aurum.gui.theme import gui_colour
 
@@ -32,7 +32,7 @@ from aurum.gui.theme import gui_colour
 # %% 1. Monthly Overview -------------------------------------------------------------------------------------
 class OverviewPage(QWidget):
     """
-    Present posted finances and saved monthly progress, leaving navigation in the sidebar.
+    Present posted finances and let each workflow stage open its corresponding page.
     """
 
     navigate = Signal(str)
@@ -68,14 +68,6 @@ class OverviewPage(QWidget):
         heading.addStretch()
         header.addLayout(heading)
 
-        identity = QHBoxLayout()
-        identity.setContentsMargins(0, 0, 0, 0)
-        self.owner = QLabel("Your finances at a glance")
-        self.owner.setTextFormat(Qt.TextFormat.PlainText)
-        self.owner.setObjectName("workspacePageSubtitle")
-        identity.addWidget(self.owner)
-        identity.addStretch()
-        header.addLayout(identity)
         layout.insertLayout(0, header)
 
         self.financials = QFrame()
@@ -96,7 +88,7 @@ class OverviewPage(QWidget):
             ("net_worth", "Net Worth", "wallet", "Assets less liabilities"),
             ("income", "Income", "income", "—"),
             ("expenses", "Expenses", "expenses", "—"),
-            ("savings", "Savings", "savings", "Income less expenses"),
+            ("savings", "Total savings", "savings", "Income less expenses"),
         ):
             frame = QFrame()
             position = key == "net_worth"
@@ -153,19 +145,8 @@ class OverviewPage(QWidget):
         process = QFrame()
         process.setObjectName("overviewProcess")
         process_layout = QVBoxLayout(process)
-        process_layout.setContentsMargins(20, 20, 20, 20)
+        process_layout.setContentsMargins(24, 20, 24, 20)
         process_layout.setSpacing(16)
-        process_heading = QHBoxLayout()
-        label = QLabel("Workflow")
-        label.setObjectName("overviewSection")
-        process_heading.addWidget(label)
-        process_heading.addStretch()
-        self.process_status = QLabel("Waiting for workspace")
-        self.process_status.setObjectName("overviewCaption")
-        self.process_status.setWordWrap(True)
-        self.process_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        process_heading.addWidget(self.process_status)
-        process_layout.addLayout(process_heading)
         flow = QHBoxLayout()
         flow.setSpacing(8)
         self.stages = {}
@@ -175,10 +156,12 @@ class OverviewPage(QWidget):
         ), 1):
             if number > 1:
                 flow.addWidget(self._symbol("right", 16))
-            frame = QFrame()
+            frame = _WorkflowStage()
             frame.setObjectName("overviewStage")
+            destination = "Statements" if key == "sources" else name
+            frame.clicked.connect(lambda checked=False, page=destination: self.navigate.emit(page))
             stage = QVBoxLayout(frame)
-            stage.setContentsMargins(12, 12, 12, 12)
+            stage.setContentsMargins(16, 16, 16, 16)
             stage.setSpacing(6)
             top = QHBoxLayout()
             emblem = self._symbol(symbol, 23)
@@ -190,6 +173,7 @@ class OverviewPage(QWidget):
             state.hide()
             top.addWidget(state)
             stage.addLayout(top)
+            stage.addSpacing(4)
             title = QLabel(f"{number} · {name}")
             title.setObjectName("overviewStageTitle")
             title.setWordWrap(True)
@@ -198,47 +182,20 @@ class OverviewPage(QWidget):
             value.setObjectName("overviewStageValue")
             value.setWordWrap(True)
             stage.addWidget(value)
-            detail = QLabel("Awaiting saved activity")
-            detail.setObjectName("overviewCaption")
-            detail.setWordWrap(True)
-            stage.addWidget(detail)
             stage.addStretch()
+            for child in frame.findChildren(QLabel):
+                child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             flow.addWidget(frame, 1)
-            self.stages[key] = frame, state, value, detail, emblem, symbol
+            self.stages[key] = frame, state, value, emblem, symbol
         process_layout.addLayout(flow)
-        self.scope = QLabel()
-        self.scope.setObjectName("overviewCaption")
-        self.scope.setWordWrap(True)
-        self.scope.hide()
-        process_layout.addWidget(self.scope)
-        self.next_panel = QFrame()
-        self.next_panel.setObjectName("overviewNext")
-        hero_layout = QHBoxLayout(self.next_panel)
-        hero_layout.setContentsMargins(16, 16, 16, 12)
-        hero_layout.setSpacing(14)
-        self.next_icon = self._symbol("clock", 22)
-        hero_layout.addWidget(self.next_icon, 0, Qt.AlignmentFlag.AlignTop)
-        text = QVBoxLayout()
-        text.setSpacing(6)
-        self.next_title = QLabel("Your month at a glance")
-        self.next_title.setObjectName("overviewNextTitle")
-        self.next_title.setWordWrap(True)
-        text.addWidget(self.next_title)
-        self.next_detail = QLabel("Saved activity will appear here.")
-        self.next_detail.setObjectName("overviewNextDetail")
-        self.next_detail.setWordWrap(True)
-        self.next_detail.setTextFormat(Qt.TextFormat.PlainText)
-        text.addWidget(self.next_detail)
-        hero_layout.addLayout(text, 1)
-        process_layout.addWidget(self.next_panel)
         body.addWidget(process)
+        self.error = QLabel()
+        self.error.setObjectName("workspaceError")
+        self.error.setTextFormat(Qt.TextFormat.PlainText)
+        self.error.setWordWrap(True)
+        self.error.hide()
+        body.addWidget(self.error)
 
-        self.other_work = QLabel("")
-        self.other_work.setObjectName("overviewCaption")
-        self.other_work.setTextFormat(Qt.TextFormat.PlainText)
-        self.other_work.setWordWrap(True)
-        self.other_work.hide()
-        body.addWidget(self.other_work)
         body.addStretch(1)
         quote = QuoteBlock(
             "It is not the man who has too little, but the man who craves more, that is poor.",
@@ -265,23 +222,17 @@ class OverviewPage(QWidget):
             value.setToolTip("")
         for key in self.stages:
             self._set_stage(key, "waiting", "—", "—", "Updating saved activity")
-        self.process_status.setText("Updating…")
-        self._show_completion(False)
         self.captions["net_worth"].setText("—")
         self.captions["net_worth"].setToolTip("")
-        self.next_title.setText("Your month at a glance")
-        self.next_detail.setText("Updating saved figures and progress.")
-        self.other_work.hide()
-        self.scope.hide()
+        self.error.clear()
+        self.error.hide()
 
     def refresh(self, snapshot: dict) -> None:
         """
         Infer workflow completion from saved work and the selected month's report files.
         """
-        self.owner.setText("Your finances at a glance")
-        self.other_work.hide()
-        self.scope.hide()
-        self._show_completion(False)
+        self.error.clear()
+        self.error.hide()
         self.captions["net_worth"].setToolTip("")
         for key in ("income", "expenses"):
             self.captions[key].setText("—")
@@ -291,14 +242,12 @@ class OverviewPage(QWidget):
                 value.setToolTip("")
             self.captions["net_worth"].setText("—")
             missing = bool(snapshot.get("missing_files"))
-            self.process_status.setText("Setup needed" if missing else "Refresh needed")
             for key in self.stages:
                 self._set_stage(key, "waiting", "WAITING", "—", "Workspace not ready")
-            self.next_title.setText("Finish setting up Aurum" if missing else "Check your workspace")
-            guidance = "Configure your workspace in Setup to start recording this month." if missing else (
-                "Refresh the workspace to try again."
+            self.error.setText(
+                snapshot.get("error") or ("Add accounts in Setup." if missing else "Refresh the workspace."),
             )
-            self.next_detail.setText(snapshot.get("error") or guidance)
+            self.error.show()
             return
 
         financials = snapshot.get("financials", {})
@@ -313,6 +262,14 @@ class OverviewPage(QWidget):
             if count is not None:
                 number = f"{count:,}".replace(",", "\u202f")
                 self.captions[key].setText(f"{number} transaction" + ("" if count == 1 else "s"))
+        for key in ("income", "expenses", "savings"):
+            if key == "savings":
+                self.captions[key].setText("Income less expenses")
+            if snapshot.get("budget_provisional"):
+                self.captions[key].setText(self.captions[key].text() + " · Review")
+                self.values[key].setToolTip(
+                    "Known cash flows only. Resolve the budget items in Review to complete these totals."
+                )
         cutoff = snapshot.get("cutoff", snapshot.get("period_end", ""))
         try:
             cutoff = datetime.fromisoformat(cutoff).strftime("%d %b %Y").lstrip("0")
@@ -342,7 +299,7 @@ class OverviewPage(QWidget):
         work = _overview_work(snapshot)
         queued = work["bank_queued"] + work["manual_queued"]
         failed = work["bank_failed"] + work["manual_failed"]
-        questions = work["bank_attention"] + work["manual_attention"]
+        questions = work["bank_attention"] + work["manual_attention"] + len(snapshot.get("budget_reviews", []))
         feed_state = snapshot.get("bank_feed", {})
         feed_conflicts = len(feed_state.get("review_conflicts", feed_state.get("conflicts", [])))
         attention = questions + failed + work["investment"] + feed_conflicts
@@ -360,19 +317,38 @@ class OverviewPage(QWidget):
         saved = sum(Path(path).is_file() for path in report_paths)
         previous_steps_complete = activity and not (queued or attention or investment_error)
         reports_complete = previous_steps_complete and len(report_paths) == 4 and saved == 4
+        completion = snapshot.get("statement_completion", {})
+        source_details = [_overview_count(manuals, "manual instruction")]
+        outside = snapshot.get("counts", {}).get("linked_outside_month", 0)
+        if outside:
+            source_details.append(
+                f"Includes {_overview_count(outside, 'linked transaction')} outside this month."
+            )
+        if completion.get("message"):
+            source_details.append(completion["message"])
+        if not activity:
+            source_details.append("Import statements or add a manual entry.")
         self._set_stage(
             "sources", "done" if activity else "active", "ADDED" if activity else "START HERE",
-            f"{imported} imported", _overview_count(manuals, "manual instruction"),
+            f"{imported} imported", "\n".join(source_details),
         )
+        journal_detail = (
+            _overview_count(queued + failed, "item to process", "items to process") if queued or failed
+            else _overview_count(questions, "answer needed", "answers needed") if questions
+            else "No work queued"
+        )
+        auth = snapshot.get("auth", {})
+        if (queued or failed) and (
+            auth.get("error") or not auth.get("signed_in") or not auth.get("model")
+        ):
+            journal_detail += "\nCheck your ChatGPT connection and saved model in Setup before processing."
         self._set_stage(
             "journal", "attention" if failed else "active" if queued or questions
             else "done" if activity else "waiting",
             "WAITING" if queued or failed or questions
             else "PREPARED" if activity else "WAITING",
             _overview_count(posted, "posted event"),
-            _overview_count(queued + failed, "item to process", "items to process") if queued or failed
-            else _overview_count(questions, "answer needed", "answers needed") if questions
-            else "No work queued",
+            journal_detail,
         )
         self._set_stage(
             "review", "attention" if investment_error or questions or work["investment"] or feed_conflicts
@@ -383,102 +359,26 @@ class OverviewPage(QWidget):
             or not activity else "CLEAR",
             "—" if investment_error else
             _overview_count(questions + work["investment"] + feed_conflicts, "item to check", "items to check"),
-            _overview_count(questions, "known question") + " · Investment unavailable"
+            _overview_count(questions, "known question") + "\nInvestment review could not load: " + investment_error
             if investment_error and questions else
-            "Investment review could not load" if investment_error else
+            "Investment review could not load: " + investment_error if investment_error else
             _overview_count(feed_conflicts, "bank import issue") if feed_conflicts else
             _overview_count(questions, "question") + f" · {work['investment']} investment"
             if questions or work["investment"] else "Check again after processing" if queued or failed
             else "No outstanding questions",
         )
+        report_detail = "Complete earlier steps" if not previous_steps_complete else "Ready to generate"
+        if reports_complete:
+            report_detail = (
+                completion.get("message") or "Final statement awaited."
+                if completion.get("pending") else "All done. All four reports are saved."
+            )
+        if investment_error:
+            report_detail = "Investment review unavailable"
         self._set_stage(
             "reports", "done" if reports_complete else "active" if previous_steps_complete else "waiting",
-            "COMPLETE" if reports_complete else "WAITING", f"{saved} of 4 PDFs",
-            "Investment review unavailable" if investment_error else
-            "All four reports available" if reports_complete else "Complete earlier steps"
-            if not previous_steps_complete else "Ready to generate",
+            "COMPLETE" if reports_complete else "WAITING", f"{saved} of 4 PDFs", report_detail,
         )
-        self.process_status.setText(
-            "Investment review unavailable" if investment_error else
-            _overview_count(attention, "item needs attention", "items need attention") if attention else
-            _overview_count(queued, "item waiting", "items waiting") if queued else
-            "No pending work found" if activity else "Ready to begin"
-        )
-        outside = snapshot.get("counts", {}).get("linked_outside_month", 0)
-        self.scope.setText(
-            f"Includes {_overview_count(outside, 'linked transaction')} outside this month."
-        )
-        self.scope.setVisible(bool(outside))
-        auth = snapshot.get("auth", {})
-        connection_needed = bool(queued or failed) and (
-            bool(auth.get("error")) or not auth.get("signed_in") or not auth.get("model")
-        )
-        tasks = [
-            ("Review bank imports", "Check possible duplicates or changed bank facts in Review before "
-             "finishing this month.", feed_conflicts),
-            ("Check investment review",
-             "Investment review could not load. Refresh the workspace, then check Review. "
-             + investment_error,
-             bool(investment_error)),
-            ("Check your manual entries",
-             f"{_overview_count(work['manual_attention'], 'manual entry', 'manual entries')} "
-             f"{'needs' if work['manual_attention'] == 1 else 'need'} a response in Review. "
-             "Save the answers before processing again.",
-             work["manual_attention"]),
-            ("Review bank transactions",
-             f"{_overview_count(work['bank_attention'], 'bank transaction')} "
-             f"{'needs' if work['bank_attention'] == 1 else 'need'} attention. "
-             "Check the details in Review, including any linked manual instructions.",
-             work["bank_attention"]),
-            ("Connect ChatGPT before processing",
-             "Check your sign-in and saved model in ChatGPT. Your posted figures remain available.",
-             connection_needed),
-            ("Process month",
-             f"{_overview_count(queued + failed, 'item')} ready to process. "
-             "Choose Process month in Review to apply saved instructions and answers, "
-             "including any interrupted work.", queued or failed),
-            ("Classify investment movements",
-             f"{_overview_count(work['investment'], 'investment movement')} "
-             f"{'needs' if work['investment'] == 1 else 'need'} a treatment in Review, "
-             "including earlier movements affecting this month.",
-             work["investment"]),
-        ]
-        active = [task for task in tasks if task[2]]
-        if active:
-            title, detail, _ = active[0]
-            self.next_title.setText(title)
-            self.next_detail.setText(detail)
-            self.other_work.setText("Also waiting: " + " · ".join(task[0] for task in active[1:]))
-            self.other_work.setVisible(len(active) > 1)
-        elif reports_complete and snapshot.get("statement_completion", {}).get("pending"):
-            completion = snapshot["statement_completion"]
-            title, status = {
-                "unavailable": ("Check statement PDFs", "Source PDFs unavailable"),
-                "unimported": ("Import updated statement", "Updated source awaiting import"),
-                "feed_attention": ("Check bank syncing", "Bank sync needs attention"),
-                "feed_current": ("Up to date", "Bank activity synced"),
-            }.get(completion.get("status"), ("Up to date", "Final statement awaited"))
-            self.next_title.setText(title)
-            self.next_detail.setText(completion["message"])
-            self.process_status.setText(status)
-        elif reports_complete:
-            self._show_completion(True)
-            self.next_title.setText("All done")
-            self.next_detail.setText("Your workflow is complete and all four reports are saved.")
-            self.process_status.setText("Complete")
-        elif not activity:
-            self.next_title.setText("Start this month's journal")
-            self.next_detail.setText(
-                "Add your statements and any manual instructions using the sidebar. "
-                "Your progress will appear here as work is saved."
-            )
-        else:
-            self.next_title.setText("Ready to generate reports")
-            self.next_detail.setText(
-                "No pending monthly journal work was found. Generate all four PDFs in Reports to check "
-                "valuations and any remaining draft reasons."
-                + (f" {saved} saved PDFs are already available." if saved else "")
-            )
 
     def action_failed(self, action: str, message: str) -> None:
         """
@@ -518,18 +418,16 @@ class OverviewPage(QWidget):
 
     def _set_stage(self, key: str, tone: str, state: str, value: str, detail: str) -> None:
         """
-        Keep each stage's icon, highlighting completion with its background and a separate tick.
+        Show each stage's title and count, retaining supporting details in its tooltip and accessibility text.
         """
-        frame, badge, number, caption, emblem, symbol = self.stages[key]
+        frame, badge, number, emblem, symbol = self.stages[key]
         frame.setProperty("tone", tone)
         for widget in (frame, *frame.findChildren(QLabel)):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
         number.setText(value)
-        caption.setText(detail)
-        role = "sidebar_text" if tone == "done" else (
-            "warning_text" if tone == "attention" else "icon" if tone == "active" else "muted"
-        )
+        frame.setToolTip(detail)
+        role = "sidebar_text" if tone == "done" else "icon"
         colour = gui_colour(self, role, "#ffffff" if tone == "done" else "#2e6a61")
         emblem.setProperty("aurumIconRole", role)
         badge.setProperty("aurumIconRole", role)
@@ -540,22 +438,9 @@ class OverviewPage(QWidget):
         badge.setVisible(tone in {"done", "attention"})
         badge.setToolTip(state.capitalize())
         badge.setAccessibleName(state.capitalize())
-        frame.setAccessibleName(f"{key}: {state.lower()}. {value}. {detail}")
-
-    def _show_completion(self, complete: bool) -> None:
-        """
-        Confirm completion when the earlier steps are complete and all report files are present.
-        """
-        self.next_panel.setProperty("complete", complete)
-        for widget in (self.next_panel, *self.next_panel.findChildren(QLabel)):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
-        role = "sidebar_text" if complete else "icon"
-        colour = gui_colour(self, role, "#ffffff" if complete else "#2e6a61")
-        self.next_icon.setProperty("aurumIconRole", role)
-        self.next_icon.setPixmap(
-            icon("check" if complete else "clock", colour, 22).pixmap(22, 22)
-        )
+        destination = "Statements" if key == "sources" else key.capitalize()
+        frame.setAccessibleName(f"Open {destination}. {state.lower()}. {value}.")
+        frame.setAccessibleDescription(detail)
 
     @staticmethod
     def _symbol(name: str, size: int) -> QLabel:
@@ -570,126 +455,135 @@ class OverviewPage(QWidget):
         return label
 
 
+class _WorkflowStage(QPushButton):
+    """
+    Make the whole stage a keyboard-accessible link with a quiet hover and focus cue.
+    """
+
+    def __init__(self) -> None:
+        """
+        Retain ordinary button activation while drawing content through the stage's child layout.
+        """
+        super().__init__()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAutoDefault(False)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self._hovered = False
+
+    def sizeHint(self) -> QSize:
+        """
+        Size the card to its full child layout instead of an empty native button label.
+        """
+        return self.layout().sizeHint() if self.layout() is not None else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        """
+        Keep the stage's icon and both text rows visible at compact window sizes.
+        """
+        return self.layout().minimumSize() if self.layout() is not None else super().minimumSizeHint()
+
+    def event(self, event: QEvent) -> bool:
+        """
+        Emphasize the title on hover or keyboard focus without introducing another status colour.
+        """
+        result = super().event(event)
+        kind = event.type()
+        if kind in {QEvent.Type.Enter, QEvent.Type.Leave, QEvent.Type.FocusIn, QEvent.Type.FocusOut}:
+            if kind in {QEvent.Type.Enter, QEvent.Type.Leave}:
+                self._hovered = kind == QEvent.Type.Enter
+            title = self.findChild(QLabel, "overviewStageTitle")
+            if title is not None:
+                title.setProperty("emphasized", self._hovered or self.hasFocus())
+                title.style().unpolish(title)
+                title.style().polish(title)
+                title.update()
+        return result
+
+
 # %% 2. ChatGPT Setup ----------------------------------------------------------------------------------------
 class ChatGPTPage(QWidget):
     """
-    Keep workspace sign-in and the saved processing model separate from monthly accounting.
+    Keep ChatGPT connection actions and an independently saved model inline in Accounts.
     """
 
     action_requested = Signal(str, object)
+    cancel_requested = Signal()
     changed = Signal()
 
-    def __init__(self, parent=None, *, embedded: bool = False) -> None:
+    def __init__(self, parent=None) -> None:
         """
-        Keep explicit connection actions and model saving compact enough for the Setup section.
+        Preserve connection and model drafts across ordinary Setup form reloads.
         """
         super().__init__(parent)
         self._auth = {}
         self._busy = False
         self._saved_model = None
         self._models_loaded = False
+        self._available_models = []
         self._checked_online = False
         self._active_action = ""
-        self._feedback_success = False
+        self._error = ""
+        self._submitted_model = None
         self._reported_selection = None
+        self.setObjectName("setupConnectionRow")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
-        if not embedded:
-            header = QVBoxLayout()
-            header.setContentsMargins(0, 0, 0, 20)
-            header.setSpacing(0)
-            title = QLabel("ChatGPT")
-            title.setObjectName("workspacePageTitle")
-            header.addWidget(title)
-            subtitle = QLabel("Connect your account and choose a model.")
-            subtitle.setObjectName("workspacePageSubtitle")
-            header.addWidget(subtitle)
-            layout.addLayout(header)
-        connection = QFrame()
-        connection.setObjectName("workspacePanel")
-        connection_layout = QVBoxLayout(connection)
-        connection_layout.setContentsMargins(16, 14, 16, 14)
-        connection_layout.setSpacing(8)
-        heading = QHBoxLayout()
-        title = QLabel("Connection")
-        title.setObjectName("workspaceSection")
-        heading.addWidget(title)
-        heading.addStretch()
-        self.connect_button = QPushButton()
-        self.connect_button.setFixedHeight(36)
-        self.connect_button.setProperty("primary", True)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        identity = QWidget()
+        identity.setObjectName("connectionIdentity")
+        identity.setFixedWidth(128)
+        identity_layout = QVBoxLayout(identity)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.setSpacing(2)
+        title = QLabel("ChatGPT")
+        title.setObjectName("setupConnectionTitle")
+        identity_layout.addWidget(title)
+        self.status = QLabel()
+        self.status.setObjectName("connectionStatus")
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
+        identity_layout.addWidget(self.status)
+        row.addWidget(identity)
+        self.models = QComboBox()
+        self.models.setObjectName("connectionControl")
+        self.models.setFixedHeight(34)
+        self.models.setView(QListView(self.models))
+        self.models.setAccessibleName("Processing model")
+        self.models.setMinimumWidth(200)
+        self.models.setMaximumWidth(300)
+        self.models.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.models.setMinimumContentsLength(20)
+        self.models.setPlaceholderText("Choose a model")
+        self.models.currentIndexChanged.connect(self._update_controls)
+        row.addWidget(self.models, 1)
+        self.connect_button = self._icon_button("refresh", "Check connection", primary=True)
         self.connect_button.clicked.connect(lambda: self.action_requested.emit("connect_chatgpt", {}))
-        heading.addWidget(self.connect_button)
         self.reconnect = self._icon_button(
             "login", "Sign in again to renew access or change your ChatGPT account",
         )
         self.reconnect.clicked.connect(
             lambda: self.action_requested.emit("connect_chatgpt", {"force_sign_in": True})
         )
-        heading.addWidget(self.reconnect)
-        connection_layout.addLayout(heading)
-        self.status = QLabel()
-        self.status.setObjectName("workspaceStatus")
-        self.status.setWordWrap(True)
-        self.status.setTextFormat(Qt.TextFormat.PlainText)
-        connection_layout.addWidget(self.status)
-        self.connection_detail = QLabel()
-        self.connection_detail.setObjectName("workspaceHint")
-        self.connection_detail.setWordWrap(True)
-        self.connection_detail.setTextFormat(Qt.TextFormat.PlainText)
-        connection_layout.addWidget(self.connection_detail)
+        self.save = self._icon_button("save", "Save model", primary=True)
+        self.save.clicked.connect(self.save_changes)
+        row.addWidget(self.save)
+        self.cancel = self._icon_button("close", "Discard model change")
+        self.cancel.clicked.connect(self._cancel)
+        row.addWidget(self.cancel)
+        row.addStretch()
+        row.addWidget(self.connect_button)
+        row.addWidget(self.reconnect)
+        layout.addLayout(row)
         self.feedback = QLabel()
         self.feedback.setObjectName("workspaceError")
         self.feedback.setWordWrap(True)
         self.feedback.setTextFormat(Qt.TextFormat.PlainText)
         self.feedback.hide()
-        connection_layout.addWidget(self.feedback)
-        layout.addWidget(connection)
-
-        model = QFrame()
-        model.setObjectName("workspacePanel")
-        model_layout = QVBoxLayout(model)
-        model_layout.setContentsMargins(16, 14, 16, 14)
-        model_layout.setSpacing(8)
-        heading = QLabel("Processing model")
-        heading.setObjectName("workspaceSection")
-        model_layout.addWidget(heading)
-        self.saved_model = QLabel()
-        self.saved_model.setObjectName("workspaceHint")
-        self.saved_model.setWordWrap(True)
-        self.saved_model.setTextFormat(Qt.TextFormat.PlainText)
-        model_layout.addWidget(self.saved_model)
-        selection = QHBoxLayout()
-        selection.setSpacing(10)
-        self.models = QComboBox()
-        self.models.setObjectName("workspaceSelect")
-        self.models.setView(QListView(self.models))
-        self.models.setAccessibleName("Processing model")
-        self.models.setMinimumWidth(220)
-        self.models.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.models.setMinimumContentsLength(20)
-        self.models.setPlaceholderText("Check connection to load models")
-        arrow = (Path(__file__).parent / "assets" / "chevron_down.svg").as_posix()
-        self.models.setStyleSheet(
-            'QComboBox { padding-right: 28px; } '
-            f'QComboBox::down-arrow {{ image: url("{arrow}"); width: 10px; height: 6px; }} '
-            'QComboBox:disabled { background: #edf2ef; color: #9baaa6; border-color: #dde5e2; }'
-        )
-        self.models.currentIndexChanged.connect(self._update_controls)
-        selection.addWidget(self.models, 1)
-        self.save = self._icon_button("save", "Save processing model", primary=True)
-        self.save.clicked.connect(self.save_changes)
-        selection.addWidget(self.save)
-        model_layout.addLayout(selection)
-        self.selection_status = QLabel()
-        self.selection_status.setObjectName("workspaceHint")
-        self.selection_status.setWordWrap(True)
-        self.selection_status.setTextFormat(Qt.TextFormat.PlainText)
-        model_layout.addWidget(self.selection_status)
-        layout.addWidget(model)
-        layout.addStretch()
-        self._update_controls()
+        layout.addWidget(self.feedback)
+        self.refresh({})
 
     def refresh(self, snapshot: dict) -> None:
         """
@@ -697,19 +591,12 @@ class ChatGPTPage(QWidget):
         """
         staged = self.models.currentData() if self.has_unsaved_changes() else None
         self._auth = dict(snapshot.get("auth", {}))
-        if self._feedback_success and (
-            self._auth.get("error") or not self._auth.get("signed_in")
-            or self._auth.get("model") != self._saved_model
-        ):
-            self.feedback.clear()
-            self.feedback.hide()
-            self._feedback_success = False
         self._saved_model = self._auth.get("model")
         if self._auth.get("error") or not self._auth.get("signed_in"):
             self._checked_online = False
             self._models_loaded = False
-        if staged is None:
-            self.models.setCurrentIndex(self.models.findData(self._saved_model))
+            self._available_models = []
+        self._populate_models(staged or self._saved_model)
         self._update_controls()
 
     def set_busy(self, busy: bool) -> None:
@@ -718,6 +605,24 @@ class ChatGPTPage(QWidget):
         """
         self._busy = busy
         self._update_controls()
+
+    def guard_close(self) -> bool:
+        """
+        Guard leaving Accounts without saving a connection or unrelated Setup settings implicitly.
+        """
+        if self._busy:
+            return not self.has_unsaved_changes() and not self._active_action
+        if self.has_unsaved_changes():
+            if not confirm_discard(self, question="Discard model change?"):
+                return False
+            self.discard_changes()
+        return True
+
+    def _cancel(self) -> None:
+        """
+        Explicitly discard a model draft without checking access or writing saved configuration.
+        """
+        self.guard_close()
 
     def has_unsaved_changes(self) -> bool:
         """
@@ -730,15 +635,23 @@ class ChatGPTPage(QWidget):
         """
         Restore the saved selection without changing the workspace or checking access online.
         """
-        self.models.setCurrentIndex(self.models.findData(self._saved_model))
+        self._error = ""
+        self._populate_models(self._saved_model)
         self._update_controls()
 
     def save_changes(self) -> None:
         """
         Submit only an available changed model for the shared connection and save workflow.
         """
-        if not self._busy and self._models_loaded and self.has_unsaved_changes():
-            self.action_requested.emit("save_model", {"model": self.models.currentData()})
+        if self._busy or not self.has_unsaved_changes():
+            return
+        if not self._models_loaded:
+            self._error = "Check the connection before saving your model."
+        elif self.models.currentData() in {item["slug"] for item in self._available_models}:
+            self._submitted_model = self.models.currentData()
+            self.action_requested.emit("save_model", {"model": self._submitted_model})
+            return
+        self._update_controls()
 
     def action_started(self, action: str, payload: dict) -> None:
         """
@@ -747,9 +660,8 @@ class ChatGPTPage(QWidget):
         if action not in {"connect_chatgpt", "save_model"}:
             return
         self._active_action = "sign_in" if payload.get("force_sign_in") else action
-        self._feedback_success = False
-        self.feedback.clear()
-        self.feedback.hide()
+        self._checked_online = False
+        self._error = ""
         self._update_controls()
 
     def action_failed(self, action: str, message: str) -> None:
@@ -759,10 +671,9 @@ class ChatGPTPage(QWidget):
         if action not in {"connect_chatgpt", "save_model"}:
             return
         self._active_action = ""
+        self._submitted_model = None
         self._checked_online = False
-        self._feedback_success = False
-        self.feedback.setText(message)
-        self.feedback.show()
+        self._error = message
         self._update_controls()
 
     def action_completed(self, action: str, result=None) -> None:
@@ -776,33 +687,26 @@ class ChatGPTPage(QWidget):
         models = data.get("models") if isinstance(data, dict) else None
         if not models:
             self._checked_online = False
-            self._feedback_success = False
-            self.feedback.setText((result or {}).get("message") or "Connection check did not complete.")
-            self.feedback.show()
+            self._submitted_model = None
+            self._error = (result or {}).get("message") or "Connection check did not complete."
             self._update_controls()
             return
-        staged = (
-            self.models.currentData() if self.has_unsaved_changes() and action != "save_model" else None
+        acknowledged = action == "save_model" and self._submitted_model is not None and (
+            data.get("model") == self._submitted_model
         )
-        self._saved_model = data.get("model")
+        staged = self.models.currentData() if self.has_unsaved_changes() and not acknowledged else None
+        if action != "save_model" or acknowledged:
+            self._saved_model = data.get("model")
         self._auth = {"signed_in": True, "model": self._saved_model, "expired": False}
         self._checked_online = True
         self._models_loaded = True
-        self._feedback_success = True
-        self.models.blockSignals(True)
-        self.models.clear()
-        for model in models:
-            self.models.addItem(self._model_label(model["slug"]), model["slug"])
-            self.models.setItemData(self.models.count() - 1, model["slug"], Qt.ItemDataRole.ToolTipRole)
-        self.models.setCurrentIndex(self.models.findData(staged or self._saved_model))
-        self.models.setPlaceholderText("Choose a model")
-        self.models.blockSignals(False)
-        if staged and self.models.findData(staged) < 0:
-            self._feedback_success = False
-            self.feedback.setText("Your previous selection is no longer available. Choose another model.")
-        else:
-            self.feedback.clear()
-        self.feedback.setVisible(bool(self.feedback.text()))
+        self._available_models = models
+        self._error = (
+            "The model was not saved. Check your selection and try again."
+            if action == "save_model" and not acknowledged else ""
+        )
+        self._submitted_model = None
+        self._populate_models(staged or self._saved_model)
         self._update_controls()
 
     def state_info(self) -> dict:
@@ -822,58 +726,75 @@ class ChatGPTPage(QWidget):
         """
         signed_in = bool(self._auth.get("signed_in"))
         if self._active_action:
-            signing_in = self._active_action == "sign_in" or not signed_in
-            message = "Signing in…" if signing_in else "Checking connection…"
-            self.status.setText("Saving model…" if self._active_action == "save_model" else message)
-            self.connection_detail.setText(
-                "Follow the sign-in instructions if your browser opens." if signing_in
-                else "Confirming access with ChatGPT."
-            )
-        elif self._auth.get("error"):
-            self.status.setText("Check your connection settings")
-            self.connection_detail.setText(str(self._auth["error"]))
+            self.status.clear()
+        elif self._auth.get("error") or self._error:
+            self.status.setText("Needs attention")
         elif self._checked_online:
-            self.status.setText("Connected · checked this session")
-            self.connection_detail.setText("Your available models are ready to choose below.")
+            self.status.setText("Connected")
         elif signed_in:
-            self.status.setText("Sign-in saved on this device")
-            self.connection_detail.setText(
-                "Check the connection to confirm access and load models."
-                + (" Saved access will renew when checked." if self._auth.get("expired") else "")
-            )
+            self.status.setText("Not checked")
         else:
-            self.status.setText("Not signed in")
-            self.connection_detail.setText("Sign in with your ChatGPT account through your browser.")
-        self.connect_button.setText("" if signed_in else "Sign in with ChatGPT")
-        self.connect_button.setIcon(icon("refresh" if signed_in else "chat", "#ffffff", 18))
+            self.status.setText("Not connected")
+        self.status.setToolTip(
+            "Access verified during this session." if self._checked_online else
+            "Saved access needs renewal; check the connection." if self._auth.get("expired") else
+            "Saved sign-in has not been checked during this session." if signed_in else
+            "Sign in with ChatGPT to load available models."
+        )
+        self.connect_button.setIcon(icon("refresh" if signed_in else "chat", "#ffffff", 16))
         self.connect_button.setAccessibleName("Check connection" if signed_in else "Sign in with ChatGPT")
         self.connect_button.setToolTip(self.connect_button.accessibleName())
-        self.connect_button.setMinimumWidth(36 if signed_in else 0)
-        self.connect_button.setMaximumWidth(36 if signed_in else 16777215)
-        self.connect_button.setStyleSheet("padding: 0;" if signed_in else "")
         self.connect_button.setEnabled(not self._busy)
-        self.reconnect.setVisible(signed_in)
+        self.reconnect.setVisible(True)
         self.reconnect.setEnabled(not self._busy)
         self.models.setEnabled(self._models_loaded and not self._busy)
         dirty = self.has_unsaved_changes()
-        self.save.setEnabled(self._models_loaded and not self._busy and dirty)
+        self.save.setEnabled(dirty and not self._busy)
+        self.save.setVisible(dirty)
+        self.cancel.setEnabled(not self._busy)
+        self.cancel.setVisible(dirty)
         name = self._model_label(self._saved_model) if self._saved_model else ""
-        self.saved_model.setText(f"Current model: {name}" if name else "No model saved yet.")
-        self.saved_model.setVisible(not self._models_loaded)
-        if not self._models_loaded:
-            message = ""
-        elif dirty:
-            message = "Unsaved selection" + (f" · Current model: {name}" if name else "")
-        elif not self.models.currentData():
-            message = "Choose an available model, then save your selection."
-        else:
-            message = ""
-        self.selection_status.setText(message)
-        self.selection_status.setVisible(bool(message))
+        self.models.setToolTip(
+            (f"Saved model: {name}." if name else "No model saved.")
+            + (" Save applies only this model." if self._models_loaded
+               else " Check the connection to choose a model.")
+        )
+        selected = self.models.currentData()
+        saved_display = bool(selected) and not self._models_loaded
+        if self.models.property("savedDisplay") != saved_display:
+            self.models.setProperty("savedDisplay", saved_display)
+            self.models.style().unpolish(self.models)
+            self.models.style().polish(self.models)
+        unavailable = self._models_loaded and selected and selected not in {
+            item["slug"] for item in self._available_models
+        }
+        message = self._error or str(self._auth.get("error") or "")
+        if not message and unavailable:
+            message = ("Selected" if dirty else "Saved") + " model is unavailable. Choose another model."
+        self.feedback.setText(message)
+        self.feedback.setVisible(bool(message))
         selection = (self.models.currentData(), self._saved_model, dirty)
         if selection != self._reported_selection:
             self._reported_selection = selection
             self.changed.emit()
+
+    def _populate_models(self, selected: str | None) -> None:
+        """
+        Keep saved and staged model names visible without silently replacing an unavailable choice.
+        """
+        self.models.blockSignals(True)
+        self.models.clear()
+        for model in self._available_models:
+            self.models.addItem(self._model_label(model["slug"]), model["slug"])
+            self.models.setItemData(self.models.count() - 1, model["slug"], Qt.ItemDataRole.ToolTipRole)
+        if selected and self.models.findData(selected) < 0:
+            self.models.insertItem(0, self._model_label(selected), selected)
+            self.models.setItemData(0, selected, Qt.ItemDataRole.ToolTipRole)
+            if self._models_loaded:
+                item = self.models.model().item(0)
+                item.setEnabled(False)
+        self.models.setCurrentIndex(self.models.findData(selected) if selected else -1)
+        self.models.blockSignals(False)
 
     def _icon_button(self, symbol: str, label: str, *, primary: bool = False) -> QPushButton:
         """
@@ -881,9 +802,10 @@ class ChatGPTPage(QWidget):
         """
         button = QPushButton()
         button.setObjectName("chatGPTIconButton")
-        button.setFixedSize(36, 36)
+        button.setFixedSize(32, 32)
         button.setProperty("primary", primary)
-        button.setIcon(icon(symbol, "#ffffff" if primary else "#355653", 18))
+        button.setIcon(icon(symbol, "#ffffff" if primary else "#355653", 16))
+        button.setIconSize(QSize(16, 16))
         button.setStyleSheet("QPushButton#chatGPTIconButton { padding: 0; }")
         button.setToolTip(label)
         button.setAccessibleName(label)
@@ -929,7 +851,7 @@ class ReportsPage(QWidget):
         layout.setSpacing(12)
         heading_row = QHBoxLayout()
         title_block = QVBoxLayout()
-        title_block.setContentsMargins(0, 0, 0, 24)
+        title_block.setContentsMargins(0, 0, 0, 16)
         title_block.setSpacing(0)
         heading = QLabel("Reports")
         heading.setObjectName("workspacePageTitle")
@@ -937,18 +859,17 @@ class ReportsPage(QWidget):
         self.title_row.addWidget(heading)
         self.title_row.addStretch()
         title_block.addLayout(self.title_row)
-        subtitle = QLabel("Preview and save your monthly financial reports.")
-        subtitle.setObjectName("workspacePageSubtitle")
-        subtitle.setWordWrap(False)
+        heading.setAccessibleDescription("Preview and save your monthly financial reports.")
         subtitle_row = PageActionRow()
-        subtitle_row.setContentsMargins(0, 0, 14, 0)
-        subtitle_row.addWidget(subtitle, 1, Qt.AlignmentFlag.AlignTop)
+        subtitle_row.setContentsMargins(0, 0, 0, 0)
+        subtitle_row.addStrut(28)
+        subtitle_row.addStretch(1)
         title_block.addLayout(subtitle_row)
         heading_row.addLayout(title_block, 1)
-        self.generate = HeaderActionButton("Generate")
+        self.generate = HeaderActionButton("Generate", icon_only=True)
         self.generate.setToolTip("Save all four PDFs for the selected reporting month.")
         self.generate.clicked.connect(lambda: self.action_requested.emit("generate_reports", {}))
-        subtitle_row.addWidget(self.generate, 0, Qt.AlignmentFlag.AlignTop)
+        subtitle_row.insertWidget(0, self.generate, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(heading_row)
         self.notice = QLabel(self._generation_notice)
         self.notice.setObjectName("workspaceMessage")
@@ -1005,6 +926,7 @@ class ReportsPage(QWidget):
         self.preview_stack.addWidget(self.empty_preview)
         preview_layout.addWidget(self.preview_stack, 1)
         self._show_pdf()
+        QWidget.setTabOrder(self.generate, self.kind)
 
     def refresh(self, snapshot: dict) -> None:
         """
@@ -1034,10 +956,10 @@ class ReportsPage(QWidget):
 
     def action_started(self, action: str, payload: dict) -> None:
         """
-        Show generation progress without changing the currently saved snapshot.
+        Clear an earlier generation notice while the shared activity spinner runs.
         """
         if action == "generate_reports":
-            self._show_notice("Generating reports…")
+            self._show_notice("")
 
     def action_completed(self, action: str, result=None) -> None:
         """
@@ -1111,7 +1033,7 @@ class ReportsPage(QWidget):
 
     def _show_notice(self, message: str) -> None:
         """
-        Reserve page space only for current progress, stale output or an actionable problem.
+        Reserve page space for stale output or an actionable problem.
         """
         self.notice.setText(message)
         self.notice.setVisible(bool(message))
@@ -1164,7 +1086,7 @@ class ReportsPage(QWidget):
         self.loaded = None
         self.document.close()
         self.loaded = signature
-        self._preview_message("Loading saved PDF…")
+        self._preview_message("")
         error = self.document.load(str(path))
         if error != QPdfDocument.Error.None_:
             self._preview_message(
@@ -1275,6 +1197,8 @@ def _overview_work(snapshot: dict) -> dict[str, int]:
             continue
         work[f"bank_{group}"] += 1
     for row in snapshot.get("manuals", []):
+        if row.get("retired") or row.get("is_savings"):
+            continue
         status = row.get("status")
         if status == "pending":
             work["manual_queued"] += 1
