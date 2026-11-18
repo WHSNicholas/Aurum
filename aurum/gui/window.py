@@ -16,10 +16,10 @@ from datetime import date
 from pathlib import Path
 import sqlite3
 
-from PySide6.QtCore import QDate, QEvent, QRect, QSize, QThreadPool, QTimer, Qt
+from PySide6.QtCore import QDate, QEvent, QRect, QSize, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget,
     QStyledItemDelegate, QStyleOptionViewItem, QToolButton, QVBoxLayout, QWidget,
 )
@@ -27,16 +27,17 @@ from PySide6.QtWidgets import (
 # Aurum imports
 from aurum.gui.activity import JournalPage, ReviewPage, StatementsPage
 from aurum.gui.background import Job, error_message
-from aurum.gui.controls import QuoteBlock
+from aurum.gui.controls import QuoteBlock, confirm_unsaved
 from aurum.gui.editor import JournalEditor
-from aurum.gui.icons import RefreshButton, Spinner, icon
+from aurum.gui.icons import RefreshButton, icon
 from aurum.gui.manual import ManualPage
 from aurum.gui.manual_editor import ManualEditor
 from aurum.gui.services import WorkspaceService
 from aurum.gui.setup import SetupPage
 from aurum.gui.theme import apply_gui_theme, gui_colour
 from aurum.gui.workspace import OverviewPage, ReportsPage
-from aurum.finance.reports import resolve_period
+from aurum.finance.reports import ReportSettings, resolve_period
+from aurum.workflows.configuration import read_configuration
 
 
 # %% 1. Desktop Window ---------------------------------------------------------------------------------------
@@ -60,6 +61,8 @@ class MainWindow(QMainWindow):
         self.job = None
         self.snapshot = {}
         self._active_action = ""
+        self._busy = False
+        self._owner_document = None
         self._result = None
         self._failed = False
         self._status_error = False
@@ -67,7 +70,6 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._selected_page = 0
         self._selected_navigation_row = -1
-        self._new_window = None
         self.editor = None
         self._last_message = "Workspace ready."
         self._startup_sync_pending = True
@@ -120,9 +122,9 @@ class MainWindow(QMainWindow):
             if name == "Setup":
                 for kind, symbol in (
                     ("accounts", "wallet"), ("securities", "chart"),
-                    ("budget", "savings"), ("reports", "document"), ("chatgpt", "chat"),
+                    ("budget", "savings"), ("reports", "document"),
                 ):
-                    label = "ChatGPT" if kind == "chatgpt" else kind.title()
+                    label = kind.title()
                     child = QListWidgetItem(icon(symbol, colour="#aac9bd", size=16), label)
                     child.setData(Qt.ItemDataRole.UserRole, "Setup")
                     child.setData(Qt.ItemDataRole.UserRole + 1, kind)
@@ -130,8 +132,7 @@ class MainWindow(QMainWindow):
                     child.setSizeHint(QSize(0, 32))
                     self._setup_rows[kind] = self.navigation.count()
                     self.navigation.addItem(child)
-                    if kind == "chatgpt":
-                        self._navigation_rows["ChatGPT"] = self._setup_rows[kind]
+        self._navigation_rows["ChatGPT"] = self._setup_rows["accounts"]
         side.addWidget(self.navigation)
         side.addSpacing(12)
         side.addStretch(1)
@@ -141,33 +142,21 @@ class MainWindow(QMainWindow):
         ))
         side.addStretch(1)
         side.addSpacing(12)
+        footer_divider = QFrame()
+        footer_divider.setObjectName("sidebarFooterDivider")
+        footer_divider.setFixedHeight(1)
+        side.addWidget(footer_divider)
         workspace_footer = QHBoxLayout()
-        workspace_names = QVBoxLayout()
-        workspace_names.setSpacing(2)
-        self.owner_label = QLabel()
-        self.owner_label.setObjectName("ownerLabel")
-        self.owner_label.setWordWrap(True)
-        self.owner_label.setMaximumHeight(40)
-        self.owner_label.hide()
-        workspace_names.addWidget(self.owner_label)
-        self.workspace_label = QLabel(workspace.name)
-        self.workspace_label.setObjectName("workspaceLabel")
-        self.workspace_label.setToolTip(str(workspace))
-        self.workspace_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        workspace_names.addWidget(self.workspace_label)
-        workspace_footer.addLayout(workspace_names, 1)
+        workspace_footer.setContentsMargins(0, 0, 0, 0)
+        workspace_footer.setSpacing(8)
+        self.owner_label = _SidebarName()
+        self.owner_label.edit_requested.connect(self._begin_owner_edit)
+        self.owner_label.save_requested.connect(self._save_owner_name)
+        self.owner_label.edit_cancelled.connect(self._cancel_owner_edit)
+        workspace_footer.addWidget(self.owner_label, 1, Qt.AlignmentFlag.AlignVCenter)
         self.refresh_button = RefreshButton(colour="#cfe1da")
         self.refresh_button.clicked.connect(self.refresh)
-        workspace_footer.addWidget(self.refresh_button)
-        self.open_workspace = QToolButton()
-        self.open_workspace.setObjectName("openWorkspace")
-        self.open_workspace.setIcon(icon("folder", colour="#cfe1da", size=18))
-        self.open_workspace.setIconSize(QSize(18, 18))
-        self.open_workspace.setFixedSize(32, 32)
-        self.open_workspace.setToolTip("Open another workspace")
-        self.open_workspace.setAccessibleName("Open another workspace")
-        self.open_workspace.clicked.connect(self._choose_workspace)
-        workspace_footer.addWidget(self.open_workspace)
+        workspace_footer.addWidget(self.refresh_button, 0, Qt.AlignmentFlag.AlignVCenter)
         side.addLayout(workspace_footer)
         layout.addWidget(sidebar)
         body = QVBoxLayout()
@@ -225,10 +214,10 @@ class MainWindow(QMainWindow):
         self.pages["ChatGPT"] = self.pages["Setup"].chatgpt
         self.pages["Statements"].set_statement_folder(str(self.service.data / "bank_statements"))
         self.pages["ChatGPT"].action_requested.connect(self._action)
+        self.pages["ChatGPT"].cancel_requested.connect(self._stop)
         self.pages["Setup"].bank_connection.action_requested.connect(self._action)
         self.pages["Setup"].bank_connection.cancel_requested.connect(self._stop)
         self.pages["Setup"].leave_guard = self._guard_changes
-        self.pages["Setup"].continue_save = self._continue_setup_save
         self.pages["Setup"].changed.connect(self._configuration_saved)
         self.pages["Setup"].section_changed.connect(self._sync_setup_section)
         self.pages["Setup"].section_labels_changed.connect(self._setup_section_labels)
@@ -240,13 +229,20 @@ class MainWindow(QMainWindow):
         self.status_bar = QWidget()
         status = QHBoxLayout(self.status_bar)
         status.setContentsMargins(0, 0, 0, 0)
-        self.busy_spinner = Spinner(size=22, label="Workspace operation in progress")
-        self.busy_spinner.hide()
-        status.addWidget(self.busy_spinner)
         self.status = QLabel("")
+        self.status.setObjectName("workspaceActivityStatus")
         self.status.setWordWrap(True)
         status.addWidget(self.status, 1)
-        self.stop_button = QPushButton("Stop after current step")
+        status.addWidget(self.pages["Setup"].footer, 1)
+        self.pages["Setup"].footer.hide()
+        self.stop_button = QToolButton()
+        self.stop_button.setObjectName("jobStop")
+        self.stop_button.setIcon(icon("stop", size=18))
+        self.stop_button.setIconSize(QSize(18, 18))
+        self.stop_button.setFixedSize(32, 32)
+        self.stop_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.stop_button.setToolTip("Stop after current step")
+        self.stop_button.setAccessibleName("Stop after current step")
         self.stop_button.clicked.connect(self._stop)
         self.stop_button.hide()
         status.addWidget(self.stop_button)
@@ -259,7 +255,7 @@ class MainWindow(QMainWindow):
         self.details_button.setToolTip("Show activity details")
         self.details_button.setAccessibleName("Activity details")
         self.details_button.setCheckable(True)
-        status.addWidget(self.details_button)
+        status.addWidget(self.details_button, 0, Qt.AlignmentFlag.AlignRight)
         body.addWidget(self.status_bar)
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
@@ -304,6 +300,45 @@ class MainWindow(QMainWindow):
         self.pages["Reports"].mark_stale("Settings changed. Regenerate reports to include them.")
         QTimer.singleShot(0, self.refresh)
 
+    def _begin_owner_edit(self) -> None:
+        """
+        Capture a saved configuration revision before entering the isolated sidebar name edit.
+        """
+        if self.job is not None:
+            return
+        try:
+            document = read_configuration(self.service.root, "reports")
+            name = ReportSettings(name=document.data.get("name", "Aurum")).owner_name
+        except (OSError, ValueError, TypeError) as error:
+            self._status_error = True
+            self._progress(error_message(error))
+            return
+        self._owner_document = document
+        self.owner_label.set_saved_name(name)
+        self.owner_label.begin_edit()
+
+    def _save_owner_name(self, value: str) -> None:
+        """
+        Save the name on Enter without committing another Setup draft or ignoring stale settings.
+        """
+        if self._owner_document is None or self.job is not None:
+            return
+        try:
+            name = self.pages["Setup"].save_owner_name(self._owner_document, value)
+        except (OSError, ValueError, TypeError) as error:
+            self._status_error = True
+            self._progress(error_message(error))
+            return
+        self._owner_document = None
+        self.owner_label.finish_edit(name)
+        self.snapshot["owner_name"] = name
+
+    def _cancel_owner_edit(self) -> None:
+        """
+        Release the edit snapshot when Escape or focus loss cancels an unsaved name.
+        """
+        self._owner_document = None
+
     def closeEvent(self, event) -> None:
         """
         Let the current atomic step finish before closing, and protect unsaved responses.
@@ -326,6 +361,10 @@ class MainWindow(QMainWindow):
             if self.editor is not None:
                 event.ignore()
                 return
+        setup = self.pages["Setup"]
+        if not setup.guard_connection_changes():
+            event.ignore()
+            return
         if not self._guard_changes(self.close):
             event.ignore()
             return
@@ -363,6 +402,8 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.pages[name])
         self.pages[name].title_row.addWidget(self.month_bar, 0, Qt.AlignmentFlag.AlignVCenter)
         self.month_bar.show()
+        if hasattr(self, "status_bar"):
+            self._update_status_visibility()
 
     def _sync_setup_section(self, kind: str) -> None:
         """
@@ -394,7 +435,7 @@ class MainWindow(QMainWindow):
         """
         Show the accepted month and disable navigation outside available reporting periods.
         """
-        busy = self.job is not None if busy is None else busy
+        busy = self._busy if busy is None else busy
         year, month = map(int, self.month.split("-"))
         selected = QDate(year, month, 1)
         self.month_label.setAccessibleName(selected.toString("MMMM yyyy"))
@@ -440,7 +481,7 @@ class MainWindow(QMainWindow):
         """
         symbols = {
             "accounts": "wallet", "securities": "chart", "budget": "savings",
-            "reports": "document", "chatgpt": "chat",
+            "reports": "document",
         }
         for row in range(self.navigation.count()):
             item = self.navigation.item(row)
@@ -464,6 +505,7 @@ class MainWindow(QMainWindow):
                 raise ValueError("Choose an available reporting month")
             resolve_period([], month=requested)
         except ValueError as error:
+            self._status_error = True
             self._progress(str(error))
             return
         if not self._guard_changes(lambda: self._month_changed(value)):
@@ -480,54 +522,35 @@ class MainWindow(QMainWindow):
         if self._continuation is not None:
             return False
         page = self.stack.currentWidget()
+        if isinstance(page, SetupPage) and not page.guard_connection_changes():
+            return False
+        if hasattr(page, "guard_opening_changes") and not page.guard_opening_changes():
+            return False
         if not hasattr(page, "has_unsaved_changes") or not page.has_unsaved_changes():
             return True
-        answer = QMessageBox.question(
-            self, "Unsaved changes", "Save your changes before continuing?",
-            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save,
-        )
-        if answer == QMessageBox.StandardButton.Discard:
+        answer = confirm_unsaved(self)
+        if answer == "discard":
             page.discard_changes()
             return True
-        if answer == QMessageBox.StandardButton.Save:
+        if answer == "save":
             if isinstance(page, SetupPage):
-                if not page.save_changes():
-                    return False
-                pending = next((item for item in (page.chatgpt, page.bank_connection)
-                                if item.has_unsaved_changes()), None)
-                if pending is None:
-                    return True
-                self._continuation = lambda: self._continue_setup_save(continuation)
-                pending.save_changes()
-                if self.job is None:
-                    self._continuation = None
-                return False
+                return page.save_changes()
             self._continuation = continuation
             page.save_changes()
             if self.job is None:
                 self._continuation = None
         return False
 
-    def _continue_setup_save(self, continuation=None) -> None:
-        """
-        Save remaining explicit Setup drafts before resuming a requested navigation.
-        """
-        page = self.pages["Setup"]
-        pending = next((item for item in (page.chatgpt, page.bank_connection)
-                        if item.has_unsaved_changes()), None)
-        if pending is not None:
-            self._continuation = lambda: self._continue_setup_save(continuation)
-            pending.save_changes()
-            if self.job is None:
-                self._continuation = None
-        elif continuation is not None:
-            continuation()
-
     def _action(self, action: str, payload: dict) -> None:
         """
         Route page intent to navigation or one background operation.
         """
+        if action == "redbark_release_session":
+            self.service.release_bank_session(payload.get("connection_token"))
+            return
+        if action == "open_manual_review":
+            self._open_record("Review", f"manual:{payload['manual_entry_id']}")
+            return
         if action in {"open_manual", "open_review"}:
             name = "Manual entries" if action == "open_manual" else "Review"
             key = "manual_entry_id" if action == "open_manual" else "transaction_id"
@@ -544,19 +567,27 @@ class MainWindow(QMainWindow):
         if action == "open_report_settings":
             self._open_report_settings()
             return
-        if action == "open_bank_settings":
+        if action in {"open_bank_settings", "open_account_settings", "open_budget_settings"}:
             if self._guard_changes(lambda: self._action(action, payload)):
                 self.navigate("Setup")
-                self.pages["Setup"].select_section("accounts")
+                setup = self.pages["Setup"]
+                section = "budget" if action == "open_budget_settings" else "accounts"
+                if setup.select_section(section) and section == "accounts" and payload.get("account_key"):
+                    form = setup.forms.get("accounts")
+                    if form is not None:
+                        state = form.view_state()
+                        state["selection"] = {"key": payload["account_key"]}
+                        form.restore_view_state(state)
             return
         if self.job is not None:
             return
         if action not in {
-            "save_review", "save_reviews", "save_manual", "discard_review", "apply_journal_edit",
+            "save_review", "save_reviews", "save_manual", "save_bank_opening", "discard_review",
+            "apply_journal_edit",
             "reload_entry_editor",
             "reload_manual_editor",
             "connect_chatgpt", "save_model",
-            "redbark_check", "redbark_preview", "redbark_enable", "redbark_settings",
+            "redbark_check", "redbark_enable",
             "redbark_disconnect",
         }:
             continuation_payload = payload
@@ -602,7 +633,9 @@ class MainWindow(QMainWindow):
         self.navigate(name)
         if self.stack.currentWidget() is self.pages[name]:
             if not self.pages[name].select_record(identifier):
-                item = "manual instruction" if name == "Manual entries" else "transaction"
+                item = "manual instruction" if name == "Manual entries" or identifier.startswith(
+                    "manual:"
+                ) else "transaction"
                 QMessageBox.information(
                     self, "Linked item unavailable",
                     f"The linked {item} is not available in this month's saved list. "
@@ -630,8 +663,7 @@ class MainWindow(QMainWindow):
             self.pages["Overview"].show_loading()
         self._active_action = action
         self._failed = False
-        if action != "refresh":
-            self._status_error = False
+        self._status_error = False
         self._result = None
         self.job = Job(operation)
         self.job.signals.progress.connect(self._progress)
@@ -639,23 +671,24 @@ class MainWindow(QMainWindow):
         self.job.signals.failed.connect(self._failure)
         self.job.signals.finished.connect(self._finished)
         self._set_busy(True)
-        if action != "refresh":
-            self._progress("Working…")
+        self._progress("Refreshing…" if action == "refresh" else "Working…")
         self.pool.start(self.job)
 
-    def _set_busy(self, busy: bool) -> None:
+    def _set_busy(self, busy: bool, *, keep_activity: bool = False) -> None:
         """
         Prevent overlapping writes while leaving screen navigation and report reading available.
         """
-        refreshing = busy and self._active_action == "refresh"
-        self.refresh_button.set_loading(refreshing)
-        self.busy_spinner.set_running(busy and not refreshing)
-        self.busy_spinner.setVisible(busy and not refreshing)
+        self._busy = busy
+        activity = {
+            "refresh": "Refreshing workspace", "redbark_sync": "Syncing bank accounts",
+            "process_journal": "Processing entries", "generate_reports": "Generating reports",
+        }.get(self._active_action, "Workspace operation in progress")
+        self.refresh_button.set_loading(busy or keep_activity, activity=activity)
         self.stop_button.setVisible(busy and self._active_action != "refresh")
         self.stop_button.setEnabled(busy)
         self._update_month_controls(busy)
-        for widget in (self.refresh_button, self.open_workspace):
-            widget.setEnabled(not busy)
+        self.refresh_button.setEnabled(not busy)
+        self.owner_label.setEnabled(not busy)
         for page in self.pages.values():
             if hasattr(page, "set_busy"):
                 page.set_busy(busy)
@@ -665,14 +698,17 @@ class MainWindow(QMainWindow):
 
     def _update_status_visibility(self) -> None:
         """
-        Keep read-only refresh quiet while leaving errors and explicitly opened details visible.
+        Keep activity in the log and spinner, reserving visible messages for errors.
         """
-        refreshing = self.job is not None and self._active_action == "refresh"
-        show_message = bool(self.status.text()) and (not refreshing or self._status_error)
+        has_details = not self.details.document().isEmpty()
+        show_setup = self.stack.currentWidget() is self.pages["Setup"]
+        self.pages["Setup"].footer.setVisible(show_setup)
+        show_message = bool(self.status.text()) and self._status_error
         self.status.setVisible(show_message)
+        self.details_button.setVisible(has_details)
         self.status_bar.setVisible(
-            show_message or not self.busy_spinner.isHidden() or not self.stop_button.isHidden()
-            or self.details_button.isChecked()
+            show_setup or show_message or not self.stop_button.isHidden()
+            or has_details or self.details_button.isChecked()
         )
 
     def _toggle_details(self, visible: bool) -> None:
@@ -685,7 +721,7 @@ class MainWindow(QMainWindow):
 
     def _progress(self, message: str) -> None:
         """
-        Show one current action and retain a short, inspectable history.
+        Retain an inspectable activity history without narrating routine work on the page.
         """
         self.status.setText(message)
         self.details.appendPlainText(message)
@@ -705,12 +741,11 @@ class MainWindow(QMainWindow):
         self._status_error = True
         self._continuation = None
         self._progress(message)
-        self.details_button.setChecked(True)
         if self._active_action == "refresh":
             self.pages["Overview"].refresh({"ready": False, "error": message})
         if self._active_action.startswith("redbark_"):
             self.pages["Setup"].bank_connection.deliver_error(self._active_action, message)
-            if self._active_action == "redbark_disconnect":
+            if self._active_action in {"redbark_sync", "redbark_disconnect"}:
                 self._last_message = message
         for page in self.pages.values():
             if hasattr(page, "action_failed"):
@@ -722,13 +757,14 @@ class MainWindow(QMainWindow):
 
     def _finished(self) -> None:
         """
-        Release controls, apply worker results, then schedule any deferred navigation or refresh.
+        Apply worker results and keep one activity indicator through deferred follow-up work.
         """
         action, result = self._active_action, self._result
+        next_step = None
+        resume_controls = False
         self.job = None
         if self._closing:
             self.pages["Statements"].defer_preparation()
-        self._set_busy(False)
         if not self._failed and result is not None:
             if action == "refresh":
                 self.snapshot = result
@@ -736,9 +772,7 @@ class MainWindow(QMainWindow):
                 if theme and theme != self.property("aurumGuiTheme"):
                     apply_gui_theme(self, theme)
                 owner = str(result.get("owner_name") or "").strip()
-                self.owner_label.setText(owner)
-                self.owner_label.setToolTip(owner)
-                self.owner_label.setVisible(bool(owner))
+                self.owner_label.set_saved_name(owner)
                 for name, page in self.pages.items():
                     if name == "Setup":
                         page.set_reporting_month(self.month)
@@ -746,6 +780,7 @@ class MainWindow(QMainWindow):
                     else:
                         page.refresh(result)
                 self.pages["Setup"].bank_connection.set_snapshot(result)
+                self.pages["Setup"].set_bank_openings(result.get("bank_openings", {}))
                 if theme:
                     # Setup can rebuild controls during refresh; tint those after they exist as well.
                     apply_gui_theme(self, theme)
@@ -764,24 +799,17 @@ class MainWindow(QMainWindow):
                 if not self._closing and result.get("editor"):
                     if action == "reload_manual_editor" and isinstance(self.editor, ManualEditor):
                         self.editor.reload_context(result["editor"])
-                        QTimer.singleShot(0, self, self.refresh)
+                        next_step = self.refresh
                     else:
                         self._show_editor(result["editor"])
-                    self._progress(
-                        "Save an instruction for processing, or post journal lines directly."
-                        if result["editor"].get("manual_composer") else
-                        "Edit the complete entry, then save to apply it without AI."
-                    )
                 elif not self._closing:
                     self._progress(result.get("message", "Stopped before opening the editor."))
             else:
                 if action.startswith("redbark_"):
                     self.pages["Setup"].bank_connection.deliver_result(action, result)
-                if action == "save_model" and not result.get("data", {}).get("models"):
-                    self._continuation = None
                 saved_identity = {
                     "save_review": "transaction_id", "discard_review": "transaction_id",
-                    "save_reviews": "transaction_ids",
+                    "save_reviews": "review_ids",
                     "save_manual": "manual_entry_id",
                 }.get(action)
                 if saved_identity and not result.get(saved_identity):
@@ -802,24 +830,68 @@ class MainWindow(QMainWindow):
                             "import_statements", "stage_statements",
                         } else result
                         page.action_completed(action, data)
-                self._last_message = result.get("message", "Saved.")
-                self._progress(self._last_message)
-                if not self._closing and action not in {"redbark_check", "redbark_preview"}:
-                    QTimer.singleShot(0, self.refresh)
+                if action == "redbark_sync":
+                    self._show_sync_result(result)
+                else:
+                    self._last_message = result.get("message", "Saved.")
+                    self._progress(self._last_message)
+                if not self._closing and action != "redbark_check":
+                    next_step = self.refresh
         if action == "refresh" and self._continuation and not self._failed:
             continuation, self._continuation = self._continuation, None
-            QTimer.singleShot(0, continuation)
+            next_step = continuation
+            resume_controls = True
         elif action == "refresh" and not self._failed and not self._closing:
-            QTimer.singleShot(0, self._startup_bank_sync)
-        if action in {"redbark_sync", "redbark_disconnect"} and self._failed and not self._closing:
-            QTimer.singleShot(0, self.refresh)
+            next_step = self._startup_bank_sync
+        if (
+            action in {"redbark_sync", "redbark_disconnect", "save_bank_opening"}
+            and self._failed and not self._closing
+        ):
+            next_step = self.refresh
         if self._closing:
             self._closing = False
+            self._set_busy(False)
             QTimer.singleShot(0, self.close)
+        elif next_step is not None:
+            QTimer.singleShot(0, self, lambda: self._continue_work(next_step, resume_controls=resume_controls))
+        else:
+            self._set_busy(False)
+
+    def _continue_work(self, operation, *, resume_controls: bool = False) -> None:
+        """
+        Hand off without flashing idle, releasing forms before deferred navigation or another explicit save.
+        """
+        if resume_controls:
+            self._set_busy(False, keep_activity=True)
+        try:
+            operation()
+        finally:
+            if self.job is None:
+                self._set_busy(False)
+
+    def _show_sync_result(self, result: dict) -> None:
+        """
+        Keep routine sync counts in the information log while leaving interrupted work and issues visible.
+        """
+        self.details.appendPlainText(str(result.get("message") or "Bank sync finished."))
+        data = result.get("data") or {}
+        failed = sum(item.get("status") == "failed" for item in data.get("results", []))
+        conflicts = len(data.get("conflicts", []))
+        messages = ["Sync stopped."] if data.get("cancelled") else []
+        if failed:
+            messages.append(
+                f"{failed} {'account' if failed == 1 else 'accounts'} could not sync. Retry from Statements."
+            )
+        if conflicts:
+            messages.append(f"{conflicts} bank import {'issue' if conflicts == 1 else 'issues'} in Review.")
+        self._last_message = " ".join(messages)
+        self._status_error = bool(failed or conflicts)
+        self.status.setText(self._last_message)
+        self._update_status_visibility()
 
     def _startup_bank_sync(self) -> None:
         """
-        Run one previously authorised bank sync after the initial workspace has become visible.
+        Sync a connected workspace once after its initial read, ignoring the retired auto-sync preference.
         """
         if not self._startup_sync_pending or self.job is not None or self._closing:
             return
@@ -827,7 +899,7 @@ class MainWindow(QMainWindow):
             return
         self._startup_sync_pending = False
         feed = self.snapshot.get("bank_feed", {})
-        if feed.get("configured") and feed.get("auto_sync"):
+        if feed.get("configured"):
             month = self.month
             self._start("redbark_sync", lambda progress, cancelled: self.service.run(
                 "redbark_sync", {}, month, progress, cancelled,
@@ -877,20 +949,105 @@ class MainWindow(QMainWindow):
             self.stop_button.setEnabled(False)
             self._progress("Stopping after the current safe step. Completed work remains saved.")
 
-    def _choose_workspace(self) -> None:
-        """
-        Open another local workspace without moving or resetting the current one.
-        """
-        if not self._guard_changes(self._choose_workspace):
-            return
-        folder = QFileDialog.getExistingDirectory(self, "Open Aurum workspace", str(self.service.root))
-        if folder and Path(folder).resolve() != self.service.root:
-            self._new_window = MainWindow(Path(folder))
-            self._new_window.show()
-            self.close()
-
-
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
+class _SidebarName(QLineEdit):
+    """
+    Present the owner's name as quiet text, with an explicit Enter-to-save edit mode.
+    """
+
+    edit_requested = Signal()
+    save_requested = Signal(str)
+    edit_cancelled = Signal()
+
+    def __init__(self, parent=None) -> None:
+        """
+        Keep the footer editable by double-click or keyboard without an input-box background.
+        """
+        super().__init__(parent)
+        self._editing = False
+        self._saved_text = ""
+        self.setObjectName("sidebarOwner")
+        self.setFrame(False)
+        self.setReadOnly(True)
+        self.setMinimumWidth(0)
+        self.setFixedHeight(28)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setTextMargins(0, 0, 0, 0)
+        self.setPlaceholderText("Your name")
+        self.setAccessibleName("Personal name")
+        self.setAccessibleDescription("Double-click or press F2 to edit. Enter saves; Escape cancels.")
+        self.set_saved_name("")
+
+    def set_saved_name(self, name: str) -> None:
+        """
+        Refresh the saved value without overwriting text currently being edited.
+        """
+        self._saved_text = name
+        self.setToolTip((name + "\n" if name else "") + self.accessibleDescription())
+        if not self._editing:
+            self.setText(name)
+            self.setCursorPosition(0)
+
+    def begin_edit(self) -> None:
+        """
+        Reveal the captured name as an editable value only after its revision has been read.
+        """
+        self._editing = True
+        self.setReadOnly(False)
+        self.setText(self._saved_text)
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.selectAll()
+
+    def finish_edit(self, name: str) -> None:
+        """
+        Return to plain display after a successful explicit save.
+        """
+        self._editing = False
+        self.setReadOnly(True)
+        self.set_saved_name(name)
+        self.deselect()
+
+    def cancel_edit(self) -> None:
+        """
+        Restore the saved display without persisting a partial name.
+        """
+        if self._editing:
+            self.finish_edit(self._saved_text)
+            self.edit_cancelled.emit()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """
+        Start editing from a deliberate double-click, retaining normal word selection while editing.
+        """
+        if not self._editing and event.button() == Qt.MouseButton.LeftButton:
+            self.edit_requested.emit()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        """
+        Support F2, explicit Enter-to-save and Escape-to-cancel without a silent focus-loss save.
+        """
+        if event.key() == Qt.Key.Key_F2 and not self._editing:
+            self.edit_requested.emit()
+        elif self._editing and event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            self.save_requested.emit(self.text())
+        elif self._editing and event.key() == Qt.Key.Key_Escape:
+            self.cancel_edit()
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
+    def focusOutEvent(self, event) -> None:
+        """
+        Cancel unfinished name edits when focus moves elsewhere.
+        """
+        self.cancel_edit()
+        super().focusOutEvent(event)
+
+
 class _MonthLayout(QGridLayout):
     """
     Raise the two month labels without changing the navigation or primary-action layout.

@@ -82,6 +82,7 @@ def guidance_context(
     words = set(re.findall(r"[a-z0-9]{3,}", context.casefold()))
     candidates = [
         item for item in (guidance or []) if all(identifier in keys for identifier in item.account_ids)
+        and not retired_budget_guidance(item.scope + " " + item.instruction)
     ]
     ranked = sorted(
         candidates,
@@ -113,6 +114,8 @@ def explicit_memory_context(memory: list[dict] | None, accounts: AccountRegistry
     payload = []
     seen = set()
     for item in memory or []:
+        if retired_budget_guidance(item["text"]):
+            continue
         note = redact_bank_details(item["text"], accounts)
         note = re.sub(
             r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b", "[local record]", note,
@@ -127,6 +130,20 @@ def explicit_memory_context(memory: list[dict] | None, accounts: AccountRegistry
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
+def retired_budget_guidance(text: str) -> bool:
+    """
+    Keep retired pot allocation and budget overrides out of active inference while preserving stored notes.
+    """
+    return bool(re.search(
+        r"\bbudget_category\b|\bsavings?\s+pots?\b|\bvirtual\s+savings\b|"
+        r"\b(?:allocat\w*|split\w*)\b.{0,70}\b(?:savings|surplus|pots?)\b|"
+        r"\b(?:savings|surplus|pots?)\b.{0,70}\b(?:allocat\w*|split\w*)\b|"
+        r"\b(?:exclud\w*|includ\w*|suppress\w*|override\w*)\b.{0,70}\bbudget\b|"
+        r"\bbudget\b.{0,70}\b(?:exclud\w*|includ\w*|suppress\w*|override\w*)\b",
+        text, flags=re.IGNORECASE | re.DOTALL,
+    ))
+
+
 def _load_skill(path: Path | str, name: str) -> Skill:
     """
     Validate a named skill's discovery fields and version its exact contents, returning only its body.

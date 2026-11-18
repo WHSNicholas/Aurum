@@ -17,7 +17,7 @@ identities and imported transaction links.
 
 Investment lines also record which security moved and how many units changed hands. Their debit or credit
 records carrying cost in AUD; a trade price and fees explain that cost rather than adding another balance.
-Holdings are reconstructed from these movements; sales and disposal-cost calculations remain future work.
+Holdings are reconstructed from these movements; shared disposal calculations release recorded average cost.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -73,7 +73,8 @@ class AccountInvestmentDetails(BaseModel):
     """
     Distinguish contributed money from earnings in an investment tracked as one account.
 
-    Contributions use the net debit posted to the account. Earnings change its value without changing cost.
+    Contributions use the signed debit less credit: credits return invested principal. Earnings change value
+    without changing cost.
     An opening position needs an explicit historical cost, which may differ from its recorded value.
     Unclassified deliberately leaves cost unknown rather than silently treating a movement as earnings.
     """
@@ -171,8 +172,8 @@ class JournalLine(BaseModel):
         if self.account_investment is not None:
             if self.transaction_id is not None or self.investment is not None:
                 raise ValueError("Whole-account investment treatment belongs on an unlinked asset line")
-            if self.account_investment.kind in {"contribution", "opening"} and self.debit <= 0:
-                raise ValueError("Contributions and opening investment positions require an asset debit")
+            if self.account_investment.kind == "opening" and self.debit <= 0:
+                raise ValueError("Opening investment positions require an asset debit")
         return self
 
 

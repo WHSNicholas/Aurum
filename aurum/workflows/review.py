@@ -27,6 +27,7 @@ from typing import Callable
 from uuid import UUID, uuid4
 
 # Aurum imports
+from aurum.database.bank_feeds import feed_snapshot
 from aurum.ai.chatgpt import ChatGPTConnection, ChatGPTError, record_usage
 from aurum.ai.review import MAX_REVIEW_BATCH_SIZE, ReviewBatchError, learn_guidance_batch, review_batch
 from aurum.ai.skills import Skill
@@ -227,6 +228,8 @@ def process_reviews(
                 client, batch, accounts, skill=skill, guidance=load_active_guidance(connection),
                 explicit_memory=load_explicit_memory(connection),
                 questions=questions, budget=budget, report_settings=report_settings,
+                transfer_evidence=feed_snapshot(connection)["provenance"],
+                ledger_entries=load_journal_entries(connection, accounts),
             )
             valid_ids = {item.case_id for item in outcomes}
             if (
@@ -279,6 +282,7 @@ def process_guidance(
     retry_errors: bool = False,
     progress: Callable[[str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    budget: BudgetSettings | None = None,
 ) -> None:
     """
     Learn from accepted answers without submitting reviews again or changing their journal postings.
@@ -325,7 +329,8 @@ def process_guidance(
             counts["requests"] += 1
             results, failures, usage = learn_guidance_batch(
                 client, batch, accounts, guidance=load_active_guidance(connection), skill=skill,
-                explicit_memory=load_explicit_memory(connection),
+                explicit_memory=load_explicit_memory(connection), budget=budget,
+                transfer_evidence=feed_snapshot(connection)["provenance"],
             )
             if results.keys() & failures.keys() or results.keys() | failures.keys() != {c.id for c in batch}:
                 raise ValueError("The guidance response does not cover its reserved cases.")

@@ -14,16 +14,16 @@ and only the existing configuration workflow writes it to disk.
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QListView, QListWidget, QMessageBox, QPushButton,
-    QSizePolicy, QTableWidget, QTableWidgetItem,
-    QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QAbstractItemDelegate, QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
+    QInputDialog, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMessageBox,
+    QSizePolicy, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
 from aurum.finance.reports import DEFAULT_THEMES, ReportSettings, ReportTheme
+from aurum.gui.controls import CentredComboBox
 from aurum.gui.icons import icon
 
 
@@ -73,11 +73,10 @@ class ReportForm(QWidget):
         choose.clicked.connect(self._pick_directory)
         directory_row.addWidget(choose, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(directory_row)
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("reportSettingsTabs")
-        self.tabs.addTab(self._build_groups(), "Asset groups")
-        self.tabs.addTab(self._build_investments(), "Account-based investments")
-        layout.addWidget(self.tabs)
+        layout.addWidget(self._build_groups())
+        layout.addSpacing(10)
+        layout.addWidget(self._build_investments())
+        layout.addStretch()
 
     def value(self) -> dict:
         """
@@ -165,7 +164,6 @@ class ReportForm(QWidget):
         group = next((name for name, keys in self.groups if key in keys), None)
         investment = self.investments.currentRow()
         return {
-            "tab": self.tabs.currentIndex(),
             "group_account": key, "group": group,
             "investment": self._investment_keys[investment] if investment >= 0 else None,
             "investments_scroll": self.investments.verticalScrollBar().value(),
@@ -175,7 +173,6 @@ class ReportForm(QWidget):
         """
         Restore navigation without altering values or emitting a configuration change.
         """
-        self.tabs.setCurrentIndex(max(0, min(1, state.get("tab", 0))))
         key = state.get("group_account")
         if key not in self._group_account_keys:
             key = next((keys[0] for name, keys in self.groups if name == state.get("group") and keys), None)
@@ -255,19 +252,21 @@ class ReportForm(QWidget):
         """
         page = QWidget()
         self.group_page = page
+        page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         page.installEventFilter(self)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.group_panel = QWidget()
         self.group_panel.setObjectName("reportAssetGroupPanel")
         panel_layout = QVBoxLayout(self.group_panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(10)
         controls = QHBoxLayout()
+        title = QLabel("Asset Groups")
+        title.setObjectName("setupGroupTitle")
+        controls.addWidget(title)
         controls.addStretch()
-        self.manage_groups = QPushButton("Manage groups")
-        self.manage_groups.setObjectName("reportManageGroups")
-        self.manage_groups.setToolTip("Add, rename, reorder or remove report groups.")
+        self.manage_groups = _action_button("Manage report groups", "settings")
         self.manage_groups.clicked.connect(self._manage_groups)
         controls.addWidget(self.manage_groups)
         panel_layout.addLayout(controls)
@@ -275,7 +274,8 @@ class ReportForm(QWidget):
         self.group_accounts.setObjectName("reportAssetGroupTable")
         self.group_accounts.setAccessibleName("Asset report groups")
         self.group_accounts.setShowGrid(False)
-        self.group_accounts.setHorizontalHeaderLabels(["Account", "Report group"])
+        self.group_accounts.setHorizontalHeaderLabels(["Account", "Report Group"])
+        self.group_accounts.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         self.group_accounts.horizontalHeaderItem(1).setToolTip(
             "Other Assets leaves the account ungrouped. Choosing a group moves the account there."
         )
@@ -291,7 +291,6 @@ class ReportForm(QWidget):
         self.group_accounts.horizontalHeader().installEventFilter(self)
         panel_layout.addWidget(self.group_accounts)
         layout.addWidget(self.group_panel, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addStretch()
         self._refresh_groups()
         return page
 
@@ -303,10 +302,11 @@ class ReportForm(QWidget):
         for row, key in enumerate(self._group_account_keys):
             name = self._group_account_names[key]
             item = QTableWidgetItem(name)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setData(Qt.ItemDataRole.UserRole, key)
             item.setToolTip(key)
             self.group_accounts.setItem(row, 0, item)
-            choice = QComboBox()
+            choice = CentredComboBox()
             choice.setView(QListView(choice))
             choice.setProperty("groupAccountKey", key)
             choice.setAccessibleName(f"{name}: report group")
@@ -387,9 +387,10 @@ class ReportForm(QWidget):
         """
         page = QWidget()
         self.investment_page = page
+        page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         page.installEventFilter(self)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.investment_panel = QWidget()
         self.investment_panel.setObjectName("reportInvestmentPanel")
         self.investment_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -397,6 +398,9 @@ class ReportForm(QWidget):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(10)
         controls = QHBoxLayout()
+        title = QLabel("Account-based Investments")
+        title.setObjectName("setupGroupTitle")
+        controls.addWidget(title)
         controls.addStretch()
         add = _action_button("Add investment account", "add")
         add.setToolTip(
@@ -412,7 +416,8 @@ class ReportForm(QWidget):
         self.investments = QTableWidget(0, 3)
         self.investments.setObjectName("reportInvestmentTable")
         self.investments.setShowGrid(False)
-        self.investments.setHorizontalHeaderLabels(["Account", "Investment group", "Report label"])
+        self.investments.setHorizontalHeaderLabels(["Account", "Investment Group", "Report Label"])
+        self.investments.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         self.investments.horizontalHeaderItem(0).setToolTip(
             "Whole-account investment balances, such as Superannuation. "
             "Accounts with security holdings cannot also be included."
@@ -437,7 +442,6 @@ class ReportForm(QWidget):
         )
         panel_layout.addWidget(self.investments)
         layout.addWidget(self.investment_panel, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addStretch()
         self._refresh_investments()
         return page
 
@@ -484,11 +488,13 @@ class ReportForm(QWidget):
         for row, key in enumerate(self._investment_keys):
             name = accounts.get(key, key)
             item = QTableWidgetItem(name)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setToolTip(name)
             self.investments.setItem(row, 0, item)
             for column, value, field in ((1, groups[key], "account_investments"),
                                          (2, labels.get(key, ""), "investment_symbols")):
                 editor = QLineEdit(value)
+                editor.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 editor.setProperty("investmentKey", key)
                 editor.setAccessibleName(f"{name}: {'investment group' if column == 1 else 'report label'}")
                 editor.setPlaceholderText("e.g. Superannuation" if column == 1 else name)
@@ -571,15 +577,26 @@ class _GroupDialog(QDialog):
         self.resize(440, 380)
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
+        title = QLabel("Report Groups")
+        title.setProperty("headingLevel", 2)
+        layout.addWidget(title)
         self.listing = QListWidget()
         self.listing.setObjectName("reportGroupList")
         self.listing.setAccessibleName("Report groups in display order")
+        self.listing.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        self.listing.installEventFilter(self)
+        self.names = _GroupNameDelegate(self.listing)
+        self.listing.setItemDelegate(self.names)
+        self.names.cancelled.connect(self._cancel_name)
         self.listing.currentRowChanged.connect(self._select)
+        self.listing.itemChanged.connect(lambda item: self.error.hide())
         layout.addWidget(self.listing, 1)
         controls = QHBoxLayout()
-        add = _action_button("Add report group", "add")
-        add.clicked.connect(self._add)
-        controls.addWidget(add)
+        self.add = _action_button("Add report group", "add")
+        self.add.clicked.connect(self._add)
+        controls.addWidget(self.add)
         self.remove = _action_button("Remove report group", "remove")
         self.remove.setToolTip("Remove this group. Its accounts move to Other Assets.")
         self.remove.clicked.connect(self._remove)
@@ -591,112 +608,192 @@ class _GroupDialog(QDialog):
             controls.addWidget(button)
             self.moves[direction] = button
         controls.addStretch()
-        layout.addLayout(controls)
-        layout.addWidget(QLabel("Group name"))
-        self.name = QLineEdit()
-        self.name.setAccessibleName("Report group name")
-        self.name.textChanged.connect(self._rename)
-        layout.addWidget(self.name)
+        self.cancel = _action_button("Cancel group changes", "close")
+        self.cancel.clicked.connect(self.reject)
+        controls.addWidget(self.cancel)
+        self.save = _action_button("Save group changes to Setup", "save")
+        self.save.clicked.connect(self.accept)
+        controls.addWidget(self.save)
         self.error = QLabel()
         self.error.setObjectName("reportGroupError")
         self.error.setWordWrap(True)
         self.error.hide()
         layout.addWidget(self.error)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Apply")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self._refresh(0)
-
-    def _refresh(self, row: int) -> None:
-        """
-        Retain the selected group while refreshing names and order within the dialog.
-        """
-        self.listing.blockSignals(True)
-        self.listing.clear()
-        self.listing.addItems([name or "Unnamed group" for name, _ in self.groups])
-        self.listing.setCurrentRow(min(row, len(self.groups) - 1))
-        self.listing.blockSignals(False)
+        layout.addLayout(controls)
+        for name, keys in self.groups:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            item.setData(Qt.ItemDataRole.UserRole, list(keys))
+            item.setToolTip("Double-click or press F2 to rename")
+            self.listing.addItem(item)
+        self.listing.setCurrentRow(0)
         self._select(self.listing.currentRow())
+
+    def eventFilter(self, watched, event) -> bool:
+        """
+        Offer F2 rename on macOS as well as the platform's ordinary row-editing shortcut.
+        """
+        if (watched is self.listing and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_F2):
+            item = self.listing.currentItem()
+            if item is not None:
+                self.listing.editItem(item)
+            return True
+        return super().eventFilter(watched, event)
 
     def _select(self, row: int) -> None:
         """
-        Show the selected name and disable unavailable removal or movement.
+        Disable unavailable removal or movement without disturbing an active name editor.
         """
-        selected = 0 <= row < len(self.groups)
+        selected = 0 <= row < self.listing.count()
         self.remove.setEnabled(selected)
-        self.name.setEnabled(selected)
         for direction, button in self.moves.items():
-            button.setEnabled(selected and 0 <= row + direction < len(self.groups))
-        self.name.blockSignals(True)
-        self.name.setText(self.groups[row][0] if selected else "")
-        self.name.blockSignals(False)
-
-    def _rename(self, name: str) -> None:
-        """
-        Keep all members when the local group's display name changes.
-        """
-        row = self.listing.currentRow()
-        if row >= 0:
-            self.groups[row] = (name, self.groups[row][1])
-            self.listing.item(row).setText(name or "Unnamed group")
-            self.error.hide()
+            button.setEnabled(selected and 0 <= row + direction < self.listing.count())
 
     def _add(self) -> None:
         """
-        Append a named group to the dialog's private draft.
+        Append a blank private row and begin naming it in place.
         """
-        name, accepted = QInputDialog.getText(self, "Add report group", "Group name")
-        if not accepted or not name.strip():
-            return
-        name = name.strip()
-        if name in [existing.strip() for existing, _ in self.groups]:
-            self.error.setText("Choose a unique group name.")
-            self.error.show()
-            return
-        self.groups.append((name, []))
+        self.names.finish()
+        item = QListWidgetItem("")
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+        item.setData(Qt.ItemDataRole.UserRole, [])
+        item.setData(Qt.ItemDataRole.UserRole + 1, True)
+        item.setToolTip("Double-click or press F2 to rename")
+        self.listing.addItem(item)
+        self.listing.setCurrentItem(item)
+        self._select(self.listing.currentRow())
         self.error.hide()
-        self._refresh(len(self.groups) - 1)
-        self.name.setFocus()
-        self.name.selectAll()
+        self.listing.editItem(item)
+
+    def _cancel_name(self, index: QPersistentModelIndex) -> None:
+        """
+        Abandon a new unnamed row on Escape while preserving existing group names and members.
+        """
+        item = self.listing.itemFromIndex(QModelIndex(index))
+        if item is not None and item.data(Qt.ItemDataRole.UserRole + 1) and not item.text().strip():
+            self.listing.takeItem(self.listing.row(item))
+            self._select(self.listing.currentRow())
 
     def _remove(self) -> None:
         """
         Remove the local group; applying the dialog will leave its accounts ungrouped.
         """
+        self.names.finish()
         row = self.listing.currentRow()
         if row >= 0:
-            self.groups.pop(row)
+            self.listing.takeItem(row)
             self.error.hide()
-            self._refresh(row)
+            self.listing.setCurrentRow(min(row, self.listing.count() - 1))
+            self._select(self.listing.currentRow())
 
     def _move(self, direction: int) -> None:
         """
         Reorder a whole group without changing the order of its members.
         """
+        self.names.finish()
         row = self.listing.currentRow()
         target = row + direction
-        if 0 <= row < len(self.groups) and 0 <= target < len(self.groups):
-            self.groups[row], self.groups[target] = self.groups[target], self.groups[row]
-            self._refresh(target)
+        if 0 <= row < self.listing.count() and 0 <= target < self.listing.count():
+            item = self.listing.takeItem(row)
+            self.listing.insertItem(target, item)
+            self.listing.setCurrentRow(target)
 
     def accept(self) -> None:
         """
         Require nonblank, unique names before handing the accepted group copy back to Setup.
         """
-        if self.groups == self._original_groups:
+        self.names.finish()
+        groups = [
+            (self.listing.item(row).text(), self.listing.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(self.listing.count())
+        ]
+        if groups == self._original_groups:
             super().accept()
             return
-        names = [name.strip() for name, _ in self.groups]
+        names = [name.strip() for name, _ in groups]
         if any(not name for name in names) or len(names) != len(set(names)):
             self.error.setText("Give every group a unique, nonblank name.")
             self.error.show()
             return
-        self.groups = [(name, keys) for name, (_, keys) in zip(names, self.groups)]
+        self.groups = [(name, list(keys)) for name, (_, keys) in zip(names, groups)]
         super().accept()
+
+
+class _GroupNameDelegate(QStyledItemDelegate):
+    """
+    Finish inline group edits before dialog actions and keep Escape local to the active name.
+    """
+
+    cancelled = Signal(object)
+
+    def __init__(self, parent: QWidget) -> None:
+        """
+        Track the single active editor without retaining a deleted Qt widget.
+        """
+        super().__init__(parent)
+        self.editor = None
+        self.index = QPersistentModelIndex()
+        self.closeEditor.connect(self._closed)
+
+    def createEditor(self, parent: QWidget, option, index) -> QLineEdit:
+        """
+        Use the shared text-field styling with a clear accessible purpose for an unnamed row.
+        """
+        editor = QLineEdit(parent)
+        editor.setAccessibleName("Report group name")
+        editor.setPlaceholderText("Group name")
+        editor.setStyleSheet("QLineEdit { padding: 2px 9px; }")
+        self.editor = editor
+        self.index = QPersistentModelIndex(index)
+        return editor
+
+    def updateEditorGeometry(self, editor: QWidget, option, index) -> None:
+        """
+        Fit the rounded field inside the complete row, rather than Qt's smaller text-only rectangle.
+        """
+        editor.setGeometry(option.rect.adjusted(6, 2, -6, -2))
+
+    def finish(self, commit: bool = True) -> None:
+        """
+        Settle the active text before a save, list mutation or Escape can remove its row.
+        """
+        editor = self.editor
+        if editor is None:
+            return
+        if commit:
+            self.commitData.emit(editor)
+        self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+
+    def eventFilter(self, watched, event) -> bool:
+        """
+        Commit Enter and cancel Escape in the row instead of accepting or closing the whole dialog.
+        """
+        if watched is self.editor and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                index = self.index
+                self.finish(False)
+                self.cancelled.emit(index)
+                return True
+            if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+                self.finish()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _closed(self, editor, hint) -> None:
+        """
+        Clear the live pointer as soon as the view closes an editor, including focus-driven commits.
+        """
+        if editor is self.editor:
+            self.editor = None
+            self.index = QPersistentModelIndex()
+
+    def destroyEditor(self, editor: QWidget, index) -> None:
+        """
+        Release a tracked editor if the view disposes of it while the dialog is closing.
+        """
+        self._closed(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+        super().destroyEditor(editor, index)
 
 
 # %% 3. Helpers ----------------------------------------------------------------------------------------------

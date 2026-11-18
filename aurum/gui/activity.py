@@ -14,19 +14,25 @@ requests to the application controller; these widgets never open the database, c
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
+from math import ceil
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFontMetrics, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QFileDialog, QFrame,
+    QAbstractItemView, QComboBox, QFileDialog, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem,
     QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QToolButton,
-    QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
+    QTableWidgetItem, QToolButton,
+    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
-from aurum.gui.controls import EntryTable, HeaderActionButton, PageActionRow, SearchField
+from aurum.gui.controls import (
+    EntryTable, HeaderActionButton, PageActionRow, SearchField, confirm_discard, wrapped_text_layout,
+)
 from aurum.gui.icons import icon
+from aurum.gui.theme import gui_colour, monetary_font, monetary_text
 from aurum.gui.viewers import DETAIL_SECTION_GAP, DETAIL_TEXT_INSET, JournalDetails, TransactionDetails, _aud
 
 # %% 1. Activity Tables --------------------------------------------------------------------------------------
@@ -56,22 +62,21 @@ class ActivityPage(QWidget):
         self.heading_block = QWidget()
         self.heading_block.setObjectName("activityHeading")
         heading_layout = QVBoxLayout(self.heading_block)
-        heading_layout.setContentsMargins(0, 0, 0, 24)
+        heading_layout.setContentsMargins(0, 0, 0, 16)
         heading_layout.setSpacing(0)
         self.heading = QLabel(title)
         self.heading.setObjectName("workspacePageTitle")
+        self.heading.setToolTip(explanation)
+        self.heading.setAccessibleDescription(explanation)
         self.title_row = QHBoxLayout()
         self.title_row.setContentsMargins(0, 0, 0, 0)
         self.title_row.addWidget(self.heading)
         self.title_row.addStretch()
         heading_layout.addLayout(self.title_row)
-        self.subtitle = QLabel(explanation)
-        self.subtitle.setWordWrap(False)
-        self.subtitle.setToolTip(explanation)
-        self.subtitle.setObjectName("workspacePageSubtitle")
         self.subtitle_row = PageActionRow()
         self.subtitle_row.setContentsMargins(0, 0, 0, 0)
-        self.subtitle_row.addWidget(self.subtitle, 1, Qt.AlignmentFlag.AlignTop)
+        self.subtitle_row.addStrut(28)
+        self.subtitle_row.addStretch(1)
         heading_layout.addLayout(self.subtitle_row)
         self.layout.addWidget(self.heading_block)
         self.toolbar = QHBoxLayout()
@@ -80,12 +85,14 @@ class ActivityPage(QWidget):
         self.layout.addLayout(self.toolbar)
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         self.table = EntryTable(0, len(columns))
+        self.table.setProperty("ledgerTable", True)
+        self.table.setShowGrid(False)
         self.table.setHorizontalHeaderLabels([label for _, label in columns])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().hide()
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.splitter.addWidget(self.table)
@@ -178,9 +185,15 @@ class ActivityPage(QWidget):
                 value = record.get(field, "")
                 if field in {"status", "review_status"}:
                     value = _status_text(value)
-                item = QTableWidgetItem(_text(value))
-                item.setToolTip(_text(value))
-                if field in {"amount", "debit", "credit", "total_debit", "total_credit"}:
+                display = _text(value).upper() if field in {"description", "summary"} else _text(value)
+                monetary = field in {"amount", "display_amount", "debit", "credit", "total_debit",
+                                     "total_credit"}
+                if monetary:
+                    display = monetary_text(value)
+                item = QTableWidgetItem(display)
+                item.setToolTip(display if monetary else _text(value))
+                if monetary:
+                    item.setFont(monetary_font(self.table.font()))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_index, column_index, item)
         self.table.resizeColumnsToContents()
@@ -252,12 +265,7 @@ class ActivityPage(QWidget):
         """
         if not self.has_unsaved_changes():
             return True
-        answer = QMessageBox.question(
-            self, "Unsaved changes", "Discard these unsaved edits? You can cancel and save them first.",
-            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        return answer == QMessageBox.StandardButton.Discard
+        return confirm_discard(self)
 
     def _show_record(self, record: dict | None) -> None:
         """
@@ -291,10 +299,13 @@ class PostingTable(QTableWidget):
         fields = ("account", "debit", "credit", "description", "budget_category", "effective_date")
         for index, line in enumerate(postings):
             for column, field in enumerate(fields):
-                value = _text(line.get(field))
-                item = QTableWidgetItem(value)
+                value = monetary_text(line.get(field)) if field in {"debit", "credit"} else (
+                    _text(line.get(field))
+                )
+                item = QTableWidgetItem(value.upper() if field == "description" else value)
                 item.setToolTip(value)
                 if field in {"debit", "credit"}:
+                    item.setFont(monetary_font(self.font()))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.setItem(index, column, item)
         for column in (0, 1, 2, 4, 5):
@@ -303,6 +314,63 @@ class PostingTable(QTableWidget):
 
 
 # %% 2. Statement Imports ------------------------------------------------------------------------------------
+class _StatementDelegate(QStyledItemDelegate):
+    """
+    Wrap statement metadata while keeping the description as a compact, elided preview.
+    """
+
+    def initStyleOption(self, option, index) -> None:
+        """
+        Use the native table rendering with wrapping enabled for every field except Description.
+        """
+        super().initStyleOption(option, index)
+        if index.column() == 2:
+            option.features &= ~QStyleOptionViewItem.ViewItemFeature.WrapText
+            option.textElideMode = Qt.TextElideMode.ElideRight
+        else:
+            option.features |= QStyleOptionViewItem.ViewItemFeature.WrapText
+            option.textElideMode = Qt.TextElideMode.ElideNone
+
+    def sizeHint(self, option, index) -> QSize:
+        """
+        Measure account and source text using the same wrap layout used for painting.
+        """
+        size = super().sizeHint(option, index)
+        if index.column() in {1, 4}:
+            styled = QStyleOptionViewItem(option)
+            self.initStyleOption(styled, index)
+            width = self.parent().columnWidth(index.column()) - 25
+            text = wrapped_text_layout(styled.text, styled.font, width, styled.displayAlignment)
+            size.setHeight(max(36, ceil(text.boundingRect().height()) + 16))
+        return size
+
+    def paint(self, painter, option, index) -> None:
+        """
+        Preserve native selection fills while drawing every character of account and source metadata.
+        """
+        if index.column() not in {1, 4}:
+            super().paint(painter, option, index)
+            return
+        styled = QStyleOptionViewItem(option)
+        self.initStyleOption(styled, index)
+        text = wrapped_text_layout(
+            styled.text, styled.font, styled.rect.width() - 24, styled.displayAlignment,
+        )
+        styled.text = ""
+        self.parent().style().drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, styled, painter, self.parent(),
+        )
+        painter.save()
+        painter.setClipRect(styled.rect)
+        role = QPalette.ColorRole.HighlightedText if styled.state & QStyle.StateFlag.State_Selected else (
+            QPalette.ColorRole.Text
+        )
+        painter.setPen(styled.palette.color(role))
+        top = styled.rect.top() + (styled.rect.height() - text.boundingRect().height()) / 2
+        text.draw(painter, QPointF(styled.rect.left() + 12, top))
+        painter.restore()
+
+
 class StatementsPage(ActivityPage):
     """
     Collect local PDF files for import and show the immutable statement lines already stored.
@@ -335,26 +403,23 @@ class StatementsPage(ActivityPage):
         self.layout.removeWidget(self.splitter)
         self.layout.removeWidget(self.empty)
 
-        bank_row = QHBoxLayout()
-        bank_row.setContentsMargins(4, 0, 12, 4)
-        bank_row.setSpacing(10)
-        self.bank_sync = QPushButton("Connect bank")
-        self.bank_sync.setIcon(icon("refresh", size=18))
-        self.bank_sync.setIconSize(QSize(18, 18))
+        self.bank_sync = HeaderActionButton("Connect", icon_only=True)
+        self.bank_sync.setIcon(icon("refresh", colour="#ffffff", size=16))
         self.bank_sync.setAccessibleName("Connect or sync bank accounts")
         self.bank_sync.clicked.connect(lambda: self.action_requested.emit(
             "redbark_sync" if self.snapshot.get("bank_feed", {}).get("configured")
             else "open_bank_settings", {},
         ))
-        bank_row.addWidget(self.bank_sync)
-        self.bank_status = QLabel("Connect Redbark in Setup → Accounts.")
+        self.subtitle_row.insertWidget(0, self.bank_sync, 0, Qt.AlignmentFlag.AlignLeft)
+        self.bank_status = QLabel()
         self.bank_status.setObjectName("workspaceHint")
         self.bank_status.setTextFormat(Qt.TextFormat.PlainText)
         self.bank_status.setWordWrap(True)
-        bank_row.addWidget(self.bank_status, 1)
-        self.layout.addLayout(bank_row)
+        self.bank_status.hide()
+        self.layout.addWidget(self.bank_status)
 
         queue = QFrame()
+        self.pdf_panel = queue
         queue.setObjectName("statementImportPanel")
         queue.setToolTip("Choose PDFs or drop them here. Preparation keeps a copy in this workspace.")
         queue_layout = QVBoxLayout(queue)
@@ -390,6 +455,7 @@ class StatementsPage(ActivityPage):
         queue_layout.addLayout(queue_actions)
         self.import_feedback = QLabel()
         self.import_feedback.setObjectName("workspaceHint")
+        self.import_feedback.setTextFormat(Qt.TextFormat.PlainText)
         self.import_feedback.setWordWrap(True)
         self.import_feedback.hide()
         feedback_row = QHBoxLayout()
@@ -398,60 +464,28 @@ class StatementsPage(ActivityPage):
         feedback_row.addWidget(self.import_feedback)
         queue_layout.addLayout(feedback_row)
         self.layout.addWidget(queue)
+        queue.hide()
 
         self.search.setPlaceholderText("Search transactions")
         self.search.setObjectName("statementSearch")
         self.search.setAccessibleName("Search transactions, accounts and statements")
-        self.history_button = self._icon_button("Show import history", "clock")
-        self.history_button.setFixedSize(36, 36)
-        self.history_button.clicked.connect(self._show_imports)
-        self.toolbar.addWidget(self.history_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.pdf_toggle = self._icon_button("Choose PDFs", "document")
+        self.pdf_toggle.setFixedSize(36, 36)
+        self.pdf_toggle.clicked.connect(self._choose_files)
+        self.toolbar.addWidget(self.pdf_toggle, 0, Qt.AlignmentFlag.AlignVCenter)
         self.layout.addLayout(self.toolbar)
-
-        self.history_dialog = QDialog(self)
-        self.history_dialog.setObjectName("statementHistory")
-        self.history_dialog.setWindowTitle("Import history")
-        self.history_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.history_dialog.setMinimumSize(680, 340)
-        self.history_dialog.resize(860, 460)
-        history_layout = QVBoxLayout(self.history_dialog)
-        history_layout.setContentsMargins(18, 16, 18, 16)
-        history_layout.setSpacing(10)
-        history_title = QLabel("Import history")
-        history_title.setObjectName("viewerTitle")
-        history_layout.addWidget(history_title)
-        history_scope = QLabel("All reporting months")
-        history_scope.setObjectName("workspaceHint")
-        history_layout.addWidget(history_scope)
-        self.result = QPlainTextEdit()
-        self.result.setReadOnly(True)
-        self.result.setMaximumHeight(72)
-        self.result.setObjectName("statementImportResult")
-        self.result.hide()
-        history_layout.addWidget(self.result)
-        self.history_empty = QLabel("No statement imports have been saved yet.")
-        self.history_empty.setObjectName("workspaceHint")
-        history_layout.addWidget(self.history_empty)
-        self.history_table = QTableWidget(0, 4)
-        self.history_table.setHorizontalHeaderLabels(["Statement", "Last imported", "Transactions", "Added"])
-        self.history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.history_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.history_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.history_table.setShowGrid(False)
-        self.history_table.verticalHeader().hide()
-        self.history_table.verticalHeader().setDefaultSectionSize(32)
-        self.history_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        history_layout.addWidget(self.history_table, 1)
-        history_footer = QHBoxLayout()
-        history_footer.addStretch()
-        history_close = QPushButton("Close")
-        history_close.clicked.connect(self.history_dialog.reject)
-        history_footer.addWidget(history_close)
-        history_layout.addLayout(history_footer)
         self.empty.setObjectName("statementCount")
         self.layout.addWidget(self.empty)
 
         self.table.setObjectName("statementTransactions")
+        self.table.setItemDelegate(_StatementDelegate(self.table))
+        self.table.setWordWrap(True)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._column_widths = None
+        self._column_timer = QTimer(self)
+        self._column_timer.setSingleShot(True)
+        self._column_timer.timeout.connect(self._size_columns)
+        self.table.viewport().installEventFilter(self)
         self.table.horizontalHeaderItem(3).setToolTip("Amount in Australian dollars (AUD)")
         self.table.setMinimumHeight(120)
         self.table.verticalHeader().setDefaultSectionSize(36)
@@ -469,6 +503,7 @@ class StatementsPage(ActivityPage):
         self.layout.addWidget(self.detail)
         self._render_queue()
         self._filter_changed()
+        QWidget.setTabOrder(self.bank_sync, self.search)
 
     def refresh(self, snapshot: dict) -> None:
         """
@@ -479,7 +514,8 @@ class StatementsPage(ActivityPage):
         self._statement_folder = str(snapshot.get("statement_folder") or self._statement_folder)
         feed = snapshot.get("bank_feed", {})
         connected = bool(feed.get("configured"))
-        self.bank_sync.setText("Sync" if connected else "Connect bank")
+        self.bank_sync.setText("Sync" if connected else "Connect")
+        self.bank_sync.setAccessibleName("Sync bank accounts" if connected else "Connect bank accounts")
         self.bank_sync.setEnabled(not self._busy)
         mappings = [item for item in feed.get("mappings", []) if item.get("enabled")]
         errors = [str(item["error"]) for item in mappings if item.get("error")]
@@ -489,14 +525,17 @@ class StatementsPage(ActivityPage):
         count = len(feed.get("conflicts", []))
         self.bank_status.setText(
             f"{count} bank import issue(s) in Review" if count else
-            "Bank sync needs attention" if errors else
-            f"{len(mappings)} account(s) connected" if connected else
-            "Connect Redbark in Setup → Accounts."
+            "Bank sync needs attention" if errors else ""
         )
+        self.bank_status.setVisible(bool(count or errors))
         self.bank_status.setToolTip("\n".join(errors) if errors else (
             "Last successful check: " + min(checked) + "\nRedbark may return cached bank activity."
             if checked else "Sync imports bank evidence. Process creates journal entries separately."
         ))
+        self.bank_sync.setToolTip(
+            "Sync bank accounts\n" + self.bank_status.toolTip()
+            if connected else "Connect Redbark in Setup → Accounts."
+        )
         reviews = {row["transaction_id"]: row for row in snapshot.get("reviews", [])}
         rows = []
         for source in snapshot.get("transactions", []):
@@ -512,9 +551,53 @@ class StatementsPage(ActivityPage):
                 str(record.get("source_label")) if record.get("source_label")
                 else Path(source).name if source else ""
             )
-        for column, width in ((0, 112), (1, 130), (3, 100), (4, 120), (5, 145)):
+            for column in (3, 4, 5):
+                self.table.item(row, column).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._column_widths = None
+        self._size_columns()
+
+    def eventFilter(self, watched, event) -> bool:
+        """
+        Reflow after viewport changes, including the appearance of a vertical scrollbar.
+        """
+        if watched is self.table.viewport() and event.type() in {QEvent.Type.Resize, QEvent.Type.Show}:
+            self._column_timer.start(0)
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event) -> None:
+        """
+        Let the table settle before sharing its new width among readable metadata and Description.
+        """
+        super().resizeEvent(event)
+        self._column_timer.start(0)
+
+    def _size_columns(self) -> None:
+        """
+        Measure saved text once per refresh, wrapping long names when the viewport cannot fit them inline.
+        """
+        available = self.table.viewport().width()
+        if self._column_widths is None:
+            widths = {}
+            header_metrics = QFontMetrics(self.table.horizontalHeader().font())
+            for column in (0, 1, 3, 4, 5):
+                width = header_metrics.horizontalAdvance(self.table.horizontalHeaderItem(column).text()) + 28
+                for row in range(self.table.rowCount()):
+                    item = self.table.item(row, column)
+                    width = max(width, QFontMetrics(item.font()).horizontalAdvance(item.text()) + 28)
+                widths[column] = width
+            self._column_widths = widths
+        widths = dict(self._column_widths)
+        flexible = max(0, available - sum(widths[column] for column in (0, 3, 5)) - 140)
+        natural = widths[1] + widths[4]
+        if flexible < natural:
+            minimum = min(96, flexible // 2)
+            account = max(minimum, min(flexible - minimum, round(flexible * widths[1] / natural)))
+            widths[1], widths[4] = account, flexible - account
+        for column, width in widths.items():
             self.table.setColumnWidth(column, width)
-        self._refresh_history()
+        self.table.resizeRowsToContents()
+        for row in range(self.table.rowCount()):
+            self.table.setRowHeight(row, max(36, self.table.rowHeight(row)))
 
     def set_statement_folder(self, folder: str) -> None:
         """
@@ -617,6 +700,7 @@ class StatementsPage(ActivityPage):
             else:
                 outcome = item.get("message") or "No completed outcome; kept in the queue."
             messages.append(f"{name} — {outcome}")
+        unfinished = set(self._importing_paths) - finished
         self.paths = [path for path in self.paths if path not in finished]
         self._importing_paths = ()
         if not items:
@@ -626,13 +710,10 @@ class StatementsPage(ActivityPage):
             messages.append(f"\nRemaining queue: {len(self.paths)} {label}.")
         if any(item.get("status") == "imported" for item in items):
             messages.append("\nOpen Review to process the month when ready.")
-        successful = sum(item.get("status") in {"imported", "skipped"} for item in items)
-        feedback = f"{successful} PDF" + ("s" if successful != 1 else "") + " completed."
-        if self.paths:
-            feedback += " Remaining PDFs are kept for retry."
-        self._set_result(
-            "\n".join(messages), feedback if items else "No PDFs completed. Queue kept for retry.",
-        )
+        if unfinished:
+            self._set_result("\n".join(messages), "Some PDFs need retrying.")
+        else:
+            self.import_feedback.hide()
         self._render_queue()
 
     def _icon_button(self, label: str, symbol: str) -> QToolButton:
@@ -653,12 +734,13 @@ class StatementsPage(ActivityPage):
 
     def _set_result(self, detail: str, summary: str) -> None:
         """
-        Keep the latest summary visible and its complete file messages inside import history.
+        Show an actionable PDF issue with complete per-file details available on hover.
         """
-        self.result.setPlainText(detail)
-        self.result.setVisible(bool(detail))
-        self.import_feedback.setText(summary + " Open import history for details.")
+        self.import_feedback.setText(summary)
+        self.import_feedback.setToolTip(detail)
+        self.import_feedback.setAccessibleDescription(detail)
         self.import_feedback.show()
+        self.pdf_panel.show()
 
     def _stage_next(self) -> None:
         """
@@ -686,7 +768,7 @@ class StatementsPage(ActivityPage):
         items = result if isinstance(result, list) else []
         if isinstance(result, dict):
             items = result.get("data", result.get("files", result.get("results", []))) or []
-        messages, attempted, prepared = [], set(), 0
+        messages, attempted = [], set()
         for item in items:
             source = str(item.get("source_path") or "")
             if source not in self._staging_paths:
@@ -694,7 +776,6 @@ class StatementsPage(ActivityPage):
             attempted.add(source)
             status, destination = item.get("status"), str(item.get("path") or "")
             if status in {"staged", "unchanged"} and destination:
-                prepared += 1
                 self._waiting_paths = [path for path in self._waiting_paths if path != source]
                 self._stage_errors.pop(source, None)
                 if destination not in self.paths:
@@ -710,11 +791,9 @@ class StatementsPage(ActivityPage):
         self._staging_paths = ()
         if not messages:
             messages.append("No PDFs were prepared. Selected files remain available for retry.")
-        summary = f"{prepared} PDF" + ("s" if prepared != 1 else "") + " ready to import."
         if self._waiting_paths:
-            summary += " Some PDFs still need preparation."
-        self._set_result("\n".join(messages), summary)
-        if not self._waiting_paths:
+            self._set_result("\n".join(messages), "Some PDFs need retrying.")
+        else:
             self.import_feedback.hide()
         self._render_queue()
         QTimer.singleShot(0, self._stage_next)
@@ -812,6 +891,10 @@ class StatementsPage(ActivityPage):
         Summarise the selected PDFs without expanding a filename list into the transaction workspace.
         """
         count = len(self.paths) + len(self._waiting_paths)
+        self.pdf_panel.setVisible(bool(
+            count or self._staging_paths or self._importing_paths or self._stage_errors
+            or not self.import_feedback.isHidden()
+        ))
         self.queue_empty.setVisible(not count)
         self.queue_count.setVisible(bool(count))
         self._update_queue_controls()
@@ -832,20 +915,11 @@ class StatementsPage(ActivityPage):
         self.retry_stage_button.setEnabled(bool(retry) and available)
         self.clear_button.setVisible(bool(count + waiting))
         self.clear_button.setEnabled(bool(count + waiting) and available)
-        if self._importing_paths:
-            later = sum(path not in self._importing_paths for path in self.paths) + waiting
-            label = "PDF" if len(self._importing_paths) == 1 else "PDFs"
-            message = f"Importing {len(self._importing_paths)} {label}"
-            if later:
-                message += f" · {later} queued for later"
-        elif self._staging_paths:
-            count_staging = len(self._staging_paths)
-            message = f"Preparing {count_staging} PDF" + ("s" if count_staging != 1 else "")
-        else:
-            label = "PDF" if count == 1 else "PDFs"
-            message = f"{count} {label} ready" if count else ""
-            if waiting:
-                message += (" · " if message else "") + f"{waiting} to prepare"
+        total = count + waiting
+        label = "PDF" if total == 1 else "PDFs"
+        message = f"{total} {label}" if total else ""
+        if total and not waiting and not self._importing_paths:
+            message += " ready"
         self.queue_count.setText(message)
 
     def _clear_files(self) -> None:
@@ -867,34 +941,6 @@ class StatementsPage(ActivityPage):
         """
         if self.paths and not self._busy and not self._importing_paths and not self._staging_paths:
             self.action_requested.emit("import_statements", {"paths": list(self.paths)})
-
-    def _show_imports(self) -> None:
-        """
-        Open saved import history on demand without disturbing the selected transaction or queued PDFs.
-        """
-        self._refresh_history()
-        if self.history_dialog.isVisible():
-            self.history_dialog.raise_()
-            self.history_dialog.activateWindow()
-        else:
-            self.history_dialog.open()
-
-    def _refresh_history(self) -> None:
-        """
-        Display each filename's latest successful import without exposing every uploaded revision.
-        """
-        rows = self.snapshot.get("imports", [])
-        self.history_table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            for column, field in enumerate(("source_file", "imported_at", "parsed_count", "inserted_count")):
-                value = _text(row.get(field))
-                item = QTableWidgetItem(Path(value).name if field == "source_file" and value else value)
-                item.setToolTip(value)
-                self.history_table.setItem(row_index, column, item)
-        for column in (1, 2, 3):
-            self.history_table.resizeColumnToContents(column)
-        self.history_empty.setVisible(not rows)
-        self.history_table.setVisible(bool(rows))
 
     def _clear_selection(self) -> None:
         """
@@ -933,26 +979,47 @@ class ReviewPage(ActivityPage):
 
     def __init__(self, parent=None):
         """
-        Separate monthly processing from the selected answer, with a persistent save bar.
+        Keep batch processing and saving together while the selected item supplies its own next action.
         """
         super().__init__(
             "Review", "Resolve bank questions, manual instructions and investment movements.",
-            (("type_label", "Type"), ("date", "Date"), ("description", "Item"),
-             ("status_label", "Status")), "review_id", parent,
+            (("date", "Date"), ("description", "Description"), ("display_amount", "Amount"),
+             ("status_label", "Status")),
+            "review_id", parent,
         )
         self._pending_submission = None
         self._drafts = {}
         self._awaiting_refresh = False
         self._feedback = ""
+        self._batch_feedback = ""
         self._refresh_error = ""
         self._processing = False
         self._bank_aliases = {}
+        self._review_aliases = {}
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(10)
-        self.process_button = HeaderActionButton("Process")
+        self.process_button = HeaderActionButton("Process", icon_only=True)
         self.process_button.clicked.connect(lambda: self.action_requested.emit("process_journal", {}))
-        self.subtitle_row.addWidget(self.process_button, 0, Qt.AlignmentFlag.AlignRight)
-        self.subtitle_row.setContentsMargins(0, 0, 14, 0)
+        self.subtitle_row.setSpacing(8)
+        self.subtitle_row.insertWidget(0, self.process_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.save_button = HeaderActionButton("Save all edited responses", icon_only=True)
+        self.save_button.setIcon(icon("save", colour="#ffffff", size=16))
+        self.save_button.clicked.connect(self._save)
+        self.subtitle_row.insertWidget(1, self.save_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.draft_count = QLabel()
+        self.draft_count.setObjectName("reviewDraftCount")
+        self.subtitle_row.insertWidget(2, self.draft_count)
+        self.discard_changes_button = HeaderActionButton("Discard all unsaved responses", icon_only=True)
+        self.discard_changes_button.setProperty("primary", False)
+        self.discard_changes_button.setIcon(icon("remove", size=16))
+        self.discard_changes_button.clicked.connect(self._discard_local_changes)
+        self.subtitle_row.insertWidget(3, self.discard_changes_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.save_status = QLabel()
+        self.save_status.setObjectName("workspaceError")
+        self.save_status.setWordWrap(True)
+        self.save_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.save_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.layout.insertWidget(1, self.save_status)
         self.layout.removeItem(self.toolbar)
         self.layout.removeWidget(self.empty)
         self.splitter.setOrientation(Qt.Orientation.Horizontal)
@@ -965,32 +1032,22 @@ class ReviewPage(ActivityPage):
         queue_layout.setContentsMargins(0, 0, 0, 0)
         queue_layout.setSpacing(8)
         self.search.setPlaceholderText("Search reviews")
-        self.scope = QComboBox()
-        self.scope.setObjectName("reviewScope")
-        self.scope.setView(QListView(self.scope))
-        self.scope.setAccessibleName("Review item type")
-        for label, kind in (("All types", ""), ("Bank", "bank"), ("Bank imports", "feed"), ("Manual", "manual"),
-                            ("Investments", "investment")):
-            self.scope.addItem(label, kind)
         self.filter = QComboBox()
         self.filter.setObjectName("reviewFilter")
         self.filter.setView(QListView(self.filter))
         self.filter.setAccessibleName("Review work status")
-        self.filter.addItems(["To do", "Needs answer", "Ready to process", "All bank transactions"])
+        self.filter.addItems(["Posted", "Review", "Ready", "All"])
+        self.filter.setCurrentIndex(1)
         arrow = (Path(__file__).parent / "assets" / "chevron_down.svg").as_posix()
         self.filter.setStyleSheet(
             "QComboBox { padding-right: 28px; }"
             "QComboBox::drop-down { width: 28px; border: none; }"
             f'QComboBox::down-arrow {{ image: url("{arrow}"); width: 12px; height: 12px; }}'
         )
-        self.scope.setStyleSheet(self.filter.styleSheet())
         self.filter.currentIndexChanged.connect(self._status_filter_changed)
-        self.scope.currentIndexChanged.connect(self._scope_changed)
+        self.filter.setFixedWidth(112)
+        self.toolbar.addWidget(self.filter)
         queue_layout.addLayout(self.toolbar)
-        filters = QHBoxLayout()
-        filters.addWidget(self.scope, 1)
-        filters.addWidget(self.filter, 1)
-        queue_layout.addLayout(filters)
         self.empty.setObjectName("workspaceStatus")
         self.empty.setWordWrap(True)
         queue_layout.addWidget(self.empty)
@@ -1004,8 +1061,10 @@ class ReviewPage(ActivityPage):
         self.table.setMinimumHeight(140)
         self.table.verticalHeader().setDefaultSectionSize(38)
         self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.table.viewport().installEventFilter(self)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeaderItem(2).setToolTip(
+            "Journal entries show their unsigned total. Unposted bank rows show the signed source amount."
+        )
         self.detail.setMinimumWidth(320)
         self.detail_layout.setContentsMargins(0, 0, 0, 0)
         self.detail_layout.setSpacing(8)
@@ -1014,19 +1073,6 @@ class ReviewPage(ActivityPage):
         empty_layout.setContentsMargins(28, 28, 28, 28)
         empty_layout.setSpacing(10)
         empty_layout.addStretch()
-        empty_icon = QLabel()
-        empty_icon.setPixmap(icon("review", size=38, colour="#7c9a90").pixmap(38, 38))
-        empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_layout.addWidget(empty_icon)
-        empty_title = QLabel("Select an item to review")
-        empty_title.setObjectName("workspaceSection")
-        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_layout.addWidget(empty_title)
-        empty_hint = QLabel("Choose an item from the queue to see its details and next action.")
-        empty_hint.setObjectName("workspaceHint")
-        empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_hint.setWordWrap(True)
-        empty_layout.addWidget(empty_hint)
         empty_layout.addStretch()
         self.detail_layout.addWidget(self.empty_detail, 1)
         self.detail_scroll = QScrollArea()
@@ -1044,46 +1090,78 @@ class ReviewPage(ActivityPage):
         self.transaction_details = TransactionDetails(dismissible=False, compact=True)
         content_layout.addWidget(self.journal_details)
         content_layout.addWidget(self.transaction_details)
-        status_row = QHBoxLayout()
-        status_row.setContentsMargins(DETAIL_TEXT_INSET, 0, 14, 0)
+        self.manual_details = QWidget()
+        manual_layout = QVBoxLayout(self.manual_details)
+        manual_layout.setContentsMargins(DETAIL_TEXT_INSET, 8, 14, 8)
+        manual_layout.setSpacing(6)
+        self.manual_instruction = QLabel()
+        self.manual_instruction.setWordWrap(True)
+        self.manual_instruction.setTextFormat(Qt.TextFormat.PlainText)
+        self.manual_instruction.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.manual_instruction.setAccessibleName("Original manual instruction")
+        manual_header = QHBoxLayout()
+        manual_header.addWidget(self.manual_instruction, 1)
+        self.manual_edit = QToolButton()
+        self.manual_edit.setObjectName("viewerIconAction")
+        self.manual_edit.setFixedSize(32, 32)
+        self.manual_edit.setIconSize(QSize(18, 18))
+        self.manual_edit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.manual_edit.clicked.connect(self._activate_header_action)
+        manual_header.addWidget(self.manual_edit, 0, Qt.AlignmentFlag.AlignTop)
+        manual_layout.addLayout(manual_header)
+        self.manual_date = QLabel()
+        self.manual_date.setObjectName("workspaceHint")
+        manual_layout.addWidget(self.manual_date)
+        content_layout.addWidget(self.manual_details)
+        self.question_section = QWidget()
+        section_layout = QVBoxLayout(self.question_section)
+        section_layout.setContentsMargins(0, 14, 0, 0)
+        section_layout.setSpacing(8)
+        section_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.question = QLabel()
-        self.question.setObjectName("workspaceHint")
+        self.question.setObjectName("reviewQuestion")
+        self.question.setContentsMargins(DETAIL_TEXT_INSET, 0, 14, 0)
         self.question.setWordWrap(True)
         self.question.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.question.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.question.setTextFormat(Qt.TextFormat.PlainText)
         self.question.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        status_row.addWidget(self.question, 1, Qt.AlignmentFlag.AlignTop)
-        self.direct_button = QPushButton("Edit")
-        self.direct_button.setIcon(icon("pen", size=16))
-        self.direct_button.setToolTip("Edit the complete journal entry")
-        self.direct_button.clicked.connect(self._resolve_manually)
-        status_row.addWidget(self.direct_button, 0, Qt.AlignmentFlag.AlignTop)
-        content_layout.addLayout(status_row)
+        section_layout.addWidget(self.question)
         self.response_panel = QWidget()
         self.response_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         editor_layout = QVBoxLayout(self.response_panel)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(6)
         editor_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.manual_button = QPushButton("Open manual instruction")
-        self.manual_button.clicked.connect(self._open_manual)
-        editor_layout.addWidget(self.manual_button)
+        response_heading = QHBoxLayout()
+        response_heading.setContentsMargins(DETAIL_TEXT_INSET, 0, 14, 0)
         label = QLabel("Response")
-        label.setObjectName("workspaceSection")
-        label.setContentsMargins(DETAIL_TEXT_INSET, 0, 0, 0)
-        editor_layout.addWidget(label)
+        label.setObjectName("reviewResponseLabel")
+        response_heading.addWidget(label)
+        response_heading.addStretch()
+        self.discard_button = QToolButton()
+        self.discard_button.setObjectName("viewerIconAction")
+        self.discard_button.setIcon(icon("remove", size=16))
+        self.discard_button.setIconSize(QSize(16, 16))
+        self.discard_button.setFixedSize(28, 28)
+        self.discard_button.setAccessibleName("Discard saved pending response")
+        self.discard_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.discard_button.clicked.connect(self._discard_pending)
+        response_heading.addWidget(self.discard_button)
+        editor_layout.addLayout(response_heading)
         self.answer = QPlainTextEdit()
         self.answer.setObjectName("reviewResponse")
         self.answer.document().setDocumentMargin(0)
         self.answer.setFixedHeight(128)
-        self.answer.setPlaceholderText("Explain the treatment. Add #remember before a rule to keep.")
-        self.answer.setToolTip(
+        self.answer.setAccessibleName("Response")
+        self.answer.setPlaceholderText("Write your response")
+        self._response_help = (
             "Save #remember followed by a reusable rule to share it with both AI workflows. "
             "A trailing #remember keeps the whole response. Edit or remove the tag to update memory."
         )
+        self.answer.setToolTip(self._response_help)
         editor_layout.addWidget(self.answer)
-        content_layout.addWidget(self.response_panel, 0, Qt.AlignmentFlag.AlignTop)
+        section_layout.addWidget(self.response_panel, 0, Qt.AlignmentFlag.AlignTop)
         self.other_panel = QWidget()
         self.other_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         other_layout = QVBoxLayout(self.other_panel)
@@ -1095,64 +1173,23 @@ class ReviewPage(ActivityPage):
         self.other_details.setTextFormat(Qt.TextFormat.PlainText)
         self.other_details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         other_layout.addWidget(self.other_details)
-        self.feed_candidate = QComboBox()
-        self.feed_candidate.setAccessibleName("Previously imported transaction")
-        self.feed_candidate.setView(QListView(self.feed_candidate))
-        other_layout.addWidget(self.feed_candidate)
-        self.feed_import = QPushButton("Import as a separate transaction")
-        self.feed_import.setIcon(icon("add", size=16))
-        self.feed_import.clicked.connect(lambda: self._resolve_feed("import"))
-        other_layout.addWidget(self.feed_import, 0, Qt.AlignmentFlag.AlignLeft)
-        self.feed_candidate.hide()
-        self.feed_import.hide()
         self.other_action = QPushButton()
-        self.other_action.setIcon(icon("pen", size=16))
         self.other_action.clicked.connect(self._open_other)
-        status_row.addWidget(self.other_action, 0, Qt.AlignmentFlag.AlignTop)
+        other_layout.addWidget(self.other_action, 0, Qt.AlignmentFlag.AlignLeft)
         self.other_panel.hide()
-        content_layout.addWidget(self.other_panel)
+        section_layout.addWidget(self.other_panel)
+        content_layout.addWidget(self.question_section, 0, Qt.AlignmentFlag.AlignTop)
         content_layout.addStretch()
         self.splitter.setSizes([450, 420])
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 1)
 
-        footer = QFrame()
-        self.footer = footer
-        footer.setObjectName("workspacePanel")
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(12, 10, 12, 10)
-        self.save_status = QLabel()
-        self.save_status.setObjectName("workspaceStatus")
-        self.save_status.setWordWrap(True)
-        footer_layout.addWidget(self.save_status, 1)
-        self.discard_changes_button = QPushButton("Discard changes")
-        self.discard_changes_button.clicked.connect(self._discard_local_changes)
-        footer_layout.addWidget(self.discard_changes_button)
-        self.discard_button = QPushButton("Discard pending answer")
-        self.discard_button.clicked.connect(self._discard_pending)
-        footer_layout.addWidget(self.discard_button)
-        self.save_button = QToolButton()
-        self.save_button.setObjectName("viewerIconAction")
-        self.save_button.setIcon(icon("save", size=20))
-        self.save_button.setIconSize(QSize(20, 20))
-        self.save_button.setFixedSize(36, 36)
-        self.save_button.setAccessibleName("Save all edited answers")
-        self.save_button.setToolTip("Save all edited answers")
-        self.save_button.setAutoRaise(True)
-        self.save_button.clicked.connect(self._save)
-        footer_layout.addWidget(self.save_button)
-        self.layout.addWidget(footer)
         self.answer.textChanged.connect(self._edited)
         self._show_record(None)
         self._filter_changed()
-
-    def eventFilter(self, watched, event) -> bool:
-        """
-        Keep item descriptions readable in a narrow queue; dates remain in the selected item's details.
-        """
-        if watched is self.table.viewport() and event.type() == QEvent.Type.Resize:
-            self.table.setColumnHidden(1, event.size().width() < 500)
-        return super().eventFilter(watched, event)
+        QWidget.setTabOrder(self.process_button, self.save_button)
+        QWidget.setTabOrder(self.save_button, self.discard_changes_button)
+        QWidget.setTabOrder(self.discard_changes_button, self.search)
 
     def _queue_rows(self, snapshot: dict) -> list[dict]:
         """
@@ -1161,14 +1198,15 @@ class ReviewPage(ActivityPage):
         terminal = {"applied", "posted", "withdrawn", "superseded"}
         manuals = {
             str(row["manual_entry_id"]): row for row in snapshot.get("manuals", [])
-            if str(row.get("status", "")).casefold() not in terminal
+            if not (row.get("retired") or row.get("is_savings"))
         }
+        unfinished = {identifier for identifier, row in manuals.items() if row.get("status") not in terminal}
         self._bank_aliases = {}
         rows = []
         for source in snapshot.get("reviews", []):
             identifier = str(source["transaction_id"])
             manual = source.get("blocking_manual_entry_id") or source.get("manual_entry_id")
-            owner = f"manual:{manual}" if str(manual) in manuals else ""
+            owner = f"manual:{manual}" if str(manual) in unfinished else ""
             if owner:
                 self._bank_aliases[identifier] = owner
             rows.append({
@@ -1186,6 +1224,11 @@ class ReviewPage(ActivityPage):
                 "review_id": f"investment:{source['journal_entry_id']}:{source['line_number']}",
                 "kind": "investment", "type_label": "Investment",
             })
+        for source in snapshot.get("budget_reviews", []):
+            rows.append({
+                **source, "review_id": f"budget:{source['journal_entry_id']}:{source['issue_code']}",
+                "kind": "budget", "type_label": "Budget",
+            })
         feed = snapshot.get("bank_feed", {})
         for source in feed.get("review_conflicts", feed.get("conflicts", [])):
             rows.append({
@@ -1195,22 +1238,97 @@ class ReviewPage(ActivityPage):
                 "account": source.get("account_name", ""), "bank_source": source.get("payload", {}),
                 "status": "import_conflict",
             })
-        labels = {"needs_answer": "Needs answer", "ready": "Ready to process",
-                  "retry": "Retry needed", "complete": "Posted"}
+        entries = {str(row["journal_entry_id"]): row for row in snapshot.get("entries", [])}
+        labels = {"needs_answer": "Review", "ready": "Ready", "retry": "Review", "complete": "Posted"}
         for row in rows:
             state = self._work_state(row)
             row["work_state"] = state
-            row["status_label"] = "Classify" if row["kind"] == "investment" else labels[state]
+            row["status_label"] = (
+                _status_text(row.get("status")) if state == "complete" and (
+                    not row.get("journal_entry_id") or row.get("status") in {"withdrawn", "superseded"}
+                )
+                else labels[state]
+            )
+            entry = row.get("journal_entry") or entries.get(str(row.get("journal_entry_id"))) or row
+            total = _posting_total(entry.get("postings", []))
+            row["display_amount"] = total if total is not None else (
+                row.get("amount") if row["kind"] in {"bank", "feed"} else "—"
+            )
+            row["amount_hint"] = (
+                "Total journal debits; this amount has no cash-flow direction." if total is not None else
+                "Signed bank transaction amount." if row["kind"] in {"bank", "feed"} else
+                "No journal amount is available yet."
+            )
+        rows = self._completed_rows(rows, entries, snapshot)
         order = {"needs_answer": 0, "retry": 1, "ready": 2, "complete": 3}
         return sorted(rows, key=lambda row: (
             order[row["work_state"]], str(row.get("date", "")), row["review_id"],
         ))
 
+    def _completed_rows(self, rows: list[dict], entries: dict, snapshot: dict) -> list[dict]:
+        """
+        Add one completed event per journal identity while retaining actionable work and response routes.
+        """
+        active = [row for row in rows if row["work_state"] != "complete"]
+        history = [row for row in rows if row["work_state"] == "complete" and (
+            not row.get("journal_entry_id") or row.get("status") in {"withdrawn", "superseded"}
+        )]
+        by_source = {}
+        for identifier, entry in entries.items():
+            sources = entry.get("source_transactions") or [
+                line["transaction_id"] for line in entry.get("postings", []) if line.get("transaction_id")
+            ]
+            for source in sources:
+                by_source[str(source)] = identifier
+        blocked = {}
+        for row in active:
+            if row.get("journal_entry_id"):
+                blocked.setdefault(str(row["journal_entry_id"]), row)
+            sources = list(row.get("source_transactions", [])) + list(row.get("candidates", []))
+            if row.get("transaction_id"):
+                sources.append(row["transaction_id"])
+            for source in sources:
+                if str(source) in by_source:
+                    blocked.setdefault(by_source[str(source)], row)
+        completed = {}
+        for row in rows:
+            if row["work_state"] == "complete" and row.get("journal_entry_id") and row not in history:
+                completed.setdefault(str(row["journal_entry_id"]), []).append(row)
+        self._review_aliases = {}
+        posted = []
+        start, end = str(snapshot.get("period_start") or ""), str(snapshot.get("period_end") or "")
+        for identifier, entry in entries.items():
+            candidates = completed.get(identifier, [])
+            if identifier in blocked:
+                representative = blocked[identifier]
+            elif (start and str(entry.get("date") or "") < start) or (
+                end and str(entry.get("date") or "") > end
+            ):
+                continue
+            else:
+                representative = min(
+                    candidates, key=lambda row: (row["kind"] != "manual", row["review_id"]),
+                ) if candidates else {
+                    **entry, "review_id": f"journal:{identifier}", "kind": "journal",
+                    "status": "posted", "status_label": "Posted", "work_state": "complete",
+                    "display_amount": _posting_total(entry.get("postings", [])) or "—",
+                    "amount_hint": "Total journal debits; this amount has no cash-flow direction.",
+                }
+                representative["posted_complete"] = True
+                posted.append(representative)
+            for row in candidates:
+                self._review_aliases[row["review_id"]] = representative["review_id"]
+                if row.get("transaction_id"):
+                    self._bank_aliases.setdefault(str(row["transaction_id"]), representative["review_id"])
+        return active + history + posted
+
     def _work_state(self, record: dict) -> str:
         """
         Describe the next action from saved processing states, without treating old questions as new answers.
         """
-        if record.get("kind") in {"investment", "feed"}:
+        if record.get("kind") == "journal":
+            return "complete"
+        if record.get("kind") in {"investment", "feed", "budget"}:
             return "needs_answer"
         status = str(record.get("status", "")).casefold()
         review = str(record.get("review_status", "")).casefold()
@@ -1221,6 +1339,8 @@ class ReviewPage(ActivityPage):
         if review in retry:
             return "retry"
         if record.get("kind") == "manual":
+            if status in {"applied", "posted", "withdrawn", "superseded"}:
+                return "complete"
             if status in retry:
                 return "retry"
             if status in {"pending", "submitted", "ready"}:
@@ -1251,18 +1371,27 @@ class ReviewPage(ActivityPage):
         rows = list(by_id.values())
         selected = self.current.get(self.identity) if self.current else None
         if selected and selected not in self._drafts:
+            selected = selected if selected in by_id else self._review_aliases.get(selected, selected)
             self.current = by_id.get(selected)
         self._set_records(rows)
         if selected and selected not in self._drafts:
             self._show_record(self.current)
-        for column, width in ((0, 104), (1, 110), (3, 132)):
+        for column, width in ((0, 104), (2, 104), (3, 88)):
             self.table.setColumnWidth(column, width)
         for index, row in enumerate(self.records):
             if row[self.identity] in self._drafts:
                 self.table.item(index, 3).setText("Unsaved")
-            self.table.item(index, 2).setToolTip(
+            self.table.item(index, 2).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.item(index, 2).setToolTip(row.get("amount_hint", ""))
+            self.table.item(index, 3).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            question = row.get("question") or row.get("reason") or row.get("message") or row.get("review_result")
+            if not question and row["kind"] == "investment":
+                question = (
+                    f"Choose the investment treatment for line {row['line_number']}: {row.get('account', '')}."
+                )
+            self.table.item(index, 1).setToolTip(
                 f"{row.get('account', '')}\n{row.get('description', '')}\n"
-                f"{row.get('amount', '')} AUD\n{row['status_label']}"
+                f"{row.get('display_amount', '')} AUD\n{row['status_label']}\n{question or ''}"
             )
         month = snapshot.get("month") or "the selected reporting month"
         dates = f"{snapshot.get('period_start', '')} to {snapshot.get('period_end', '')}"
@@ -1277,7 +1406,8 @@ class ReviewPage(ActivityPage):
         Report all retained local answers, including drafts outside the current selection or filter.
         """
         return bool(
-            self._drafts or self.current and self.current.get("kind") == "bank" and hasattr(self, "answer")
+            self._drafts or self.current and self.current.get("kind") in {"bank", "manual"}
+            and hasattr(self, "answer")
             and self.answer.toPlainText() != self._baseline
         )
 
@@ -1285,7 +1415,10 @@ class ReviewPage(ActivityPage):
         """
         Retain the exact multiline answer with the facts and concurrency tokens originally displayed.
         """
-        if not self.current or self.current.get("kind") != "bank" or not hasattr(self, "answer"):
+        if (
+            not self.current or self.current.get("kind") not in {"bank", "manual"}
+            or not hasattr(self, "answer")
+        ):
             return
         identifier = self.current[self.identity]
         text = self.answer.toPlainText()
@@ -1296,10 +1429,11 @@ class ReviewPage(ActivityPage):
 
     def discard_changes(self) -> None:
         """
-        Restore the latest saved bank revision only after an explicit decision to discard local input.
+        Restore the latest saved response only after an explicit decision to discard local input.
         """
         identifier = self.current.get(self.identity) if self.current else None
         self._drafts.clear()
+        self._batch_feedback = ""
         self.current = next(
             (row for row in self._queue_rows(self.snapshot) if row.get(self.identity) == identifier), None,
         )
@@ -1319,22 +1453,26 @@ class ReviewPage(ActivityPage):
         Keep raw bank deep links compatible, redirecting duplicate attention to its available manual owner.
         """
         raw = str(identifier)
-        target = self._bank_aliases.get(raw, f"bank:{raw}")
-        return self.select_item(raw if raw.startswith(("bank:", "manual:", "investment:", "feed:")) else target)
+        bank_id = f"bank:{raw}"
+        target = bank_id if bank_id in self._drafts else self._bank_aliases.get(raw, bank_id)
+        prefixes = ("bank:", "manual:", "investment:", "feed:", "budget:", "journal:")
+        return self.select_item(raw if raw.startswith(prefixes) else target)
 
     def select_item(self, identifier: str) -> bool:
         """
-        Reveal a stable typed review item while respecting any unsaved bank answer before selection changes.
+        Reveal a stable typed review item while retaining every unsaved response.
         """
         identifier = str(identifier)
+        if not any(row["review_id"] == identifier for row in self.records):
+            identifier = self._review_aliases.get(identifier, identifier)
         target = next((row for row in self.records if row["review_id"] == identifier), None)
         if target is None:
             return False
-        self.scope.setCurrentIndex(self.scope.findData(target["kind"]))
-        bank_history = target["kind"] == "bank" and (
-            target["work_state"] == "complete" or target.get("suppressed_by")
+        selected_filter = (
+            3 if target.get("suppressed_by") else 0 if target.get("posted_complete") else
+            3 if target["work_state"] == "complete" else 2 if target["work_state"] == "ready" else 1
         )
-        self.filter.setCurrentIndex(3 if bank_history else 0)
+        self.filter.setCurrentIndex(selected_filter)
         self.search.clear()
         row = next(index for index, item in enumerate(self.records) if item["review_id"] == identifier)
         self.table.selectRow(row)
@@ -1342,31 +1480,24 @@ class ReviewPage(ActivityPage):
 
     def select_kind(self, kind: str) -> bool:
         """
-        Focus one review type without starting work or discarding an edited answer.
+        Select related unfinished work without filtering the unified queue or discarding edited answers.
         """
         kind = {"all": "", "investments": "investment"}.get(kind, kind)
-        index = self.scope.findData(kind)
-        if index < 0:
+        if kind not in {"", "bank", "manual", "investment", "budget", "feed"}:
             return False
-        self.scope.setCurrentIndex(index)
-        self.filter.setCurrentIndex(0)
+        self.filter.setCurrentIndex(1)
         self.search.clear()
+        target = next((row for row in self.records if (
+            not kind or row["kind"] == kind
+        ) and row["work_state"] != "complete" and not row.get("suppressed_by")), None)
+        if target is not None:
+            return self.select_item(target["review_id"])
         return True
 
     def _status_filter_changed(self) -> None:
         """
-        Make the complete bank-history filter explicit without conflicting with the selected type.
+        Apply the chosen work state across the unified queue.
         """
-        if self.filter.currentIndex() == 3:
-            self.scope.setCurrentIndex(self.scope.findData("bank"))
-        self._filter_changed()
-
-    def _scope_changed(self) -> None:
-        """
-        Restore the unfinished-work filter when switching away from complete bank history.
-        """
-        if self.filter.currentIndex() == 3 and self.scope.currentData() != "bank":
-            self.filter.setCurrentIndex(0)
         self._filter_changed()
 
     def _selection_changed(self) -> None:
@@ -1401,8 +1532,12 @@ class ReviewPage(ActivityPage):
             self._update_controls()
             return
         if action == "save_reviews":
-            self._pending_submission = {"action": action, "answers": deepcopy(payload["answers"])}
+            self._pending_submission = {
+                "action": action, "answers": deepcopy(payload.get("answers", [])),
+                "manual_answers": deepcopy(payload.get("manual_answers", [])),
+            }
             self._feedback = ""
+            self._batch_feedback = ""
             self._update_controls()
             return
         if action not in {"save_review", "discard_review"}:
@@ -1430,7 +1565,7 @@ class ReviewPage(ActivityPage):
         if pending is None or pending["action"] != action:
             return
         if action == "save_reviews":
-            self._feedback = message
+            self._batch_feedback = message
             self._pending_submission = None
             self._update_controls()
             return
@@ -1451,22 +1586,32 @@ class ReviewPage(ActivityPage):
             return
         self._pending_submission = None
         if action == "save_reviews":
-            expected = {str(answer["transaction_id"]) for answer in pending["answers"]}
-            acknowledged = isinstance(result, dict) and set(result.get("transaction_ids", [])) == expected
+            submitted = {
+                "bank:" + str(answer["transaction_id"]): answer for answer in pending["answers"]
+            }
+            submitted.update({
+                "manual:" + str(answer["manual_entry_id"]): answer for answer in pending["manual_answers"]
+            })
+            acknowledged = isinstance(result, dict) and set(result.get("review_ids", [])) == set(submitted)
             if not acknowledged:
-                self._feedback = "The save did not complete. Your edited answers have been kept."
+                self._batch_feedback = "The save did not complete. Your edited responses have been kept."
                 self._update_controls()
                 return
-            for answer in pending["answers"]:
-                identifier = "bank:" + str(answer["transaction_id"])
+            for identifier, answer in submitted.items():
                 draft = self._drafts.get(identifier)
                 if draft and draft["text"] == answer["text"]:
                     self._drafts.pop(identifier)
                 if self.current and self.current.get(self.identity) == identifier:
-                    self.current = {**self.current, "human_review": answer["text"], "review_status": "pending"}
+                    fields = (
+                        {"human_response": answer["text"], "status": "pending"}
+                        if self.current.get("kind") == "manual" else
+                        {"human_review": answer["text"], "review_status": "pending"}
+                    )
+                    self.current = {**self.current, **fields}
                     self._baseline = answer["text"]
             self._awaiting_refresh = True
             self._feedback = ""
+            self._batch_feedback = ""
             self.dirty_changed.emit(self.has_unsaved_changes())
             self._update_controls()
             return
@@ -1492,33 +1637,30 @@ class ReviewPage(ActivityPage):
 
     def _include_record(self, record: dict) -> bool:
         """
-        Filter work type and next action while retaining full bank history for deliberate corrections.
+        Filter by next action while retaining full history for deliberate corrections.
         """
-        if not hasattr(self, "scope"):
+        if not hasattr(self, "filter"):
             return True
-        kind = self.scope.currentData()
-        if kind and record.get("kind") != kind:
-            return False
         selected = self.filter.currentIndex()
         if selected == 3:
-            return record.get("kind") == "bank"
+            return True
         if record.get("suppressed_by"):
             return False
         state = record.get("work_state")
         if selected == 1:
-            return state == "needs_answer"
+            return state in {"needs_answer", "retry"}
         if selected == 2:
             return state == "ready"
-        return state != "complete"
+        return bool(record.get("posted_complete"))
 
     def _filter_changed(self) -> None:
         """
-        Keep dirty bank input visible across filters and disclose unavailable investment review evidence.
+        Keep dirty responses visible across filters and disclose unavailable investment review evidence.
         """
         query = self.search.text().casefold().strip()
         dirty = self.has_unsaved_changes()
         selected = self.current.get(self.identity) if self.current else None
-        counts = {"bank": 0, "manual": 0, "investment": 0, "feed": 0}
+        counts = {"bank": 0, "manual": 0, "investment": 0, "feed": 0, "budget": 0, "journal": 0}
         retained, selected_row = False, None
         previous_loading, self._loading = self._loading, True
         for index, record in enumerate(self.records):
@@ -1546,13 +1688,10 @@ class ReviewPage(ActivityPage):
         elif not sum(counts.values()):
             message = ""
         else:
-            message = (
-                f"Bank {counts['bank']} · Manual {counts['manual']} · Investments {counts['investment']}"
-            )
-            if counts["feed"]:
-                message += f" · Bank imports {counts['feed']}"
+            count = sum(counts.values())
+            message = f"{count} item{'s' if count != 1 else ''}"
         if retained:
-            message = "\n".join(filter(None, (message, "Your edited bank answer is kept visible.")))
+            message = "\n".join(filter(None, (message, "Your edited response is kept visible.")))
         self.empty.setText(message)
         self.empty.setVisible(bool(message))
         warning = self._refresh_error
@@ -1569,21 +1708,31 @@ class ReviewPage(ActivityPage):
         """
         if not hasattr(self, "answer"):
             return
-        bank = not record or record.get("kind") == "bank"
+        bank = bool(record and record.get("kind") == "bank")
+        manual = bool(record and record.get("kind") == "manual")
+        responds = bank or manual and record.get("entry_mode") != "direct"
         self.empty_detail.setVisible(record is None)
         self.detail_scroll.setVisible(record is not None)
-        self.response_panel.setVisible(bool(record) and bank)
-        self.other_panel.setVisible(not bank)
-        self._baseline = str(record.get("human_review", "")) if record and bank else ""
+        self.response_panel.setVisible(responds)
+        self.other_panel.setVisible(bool(record) and not bank)
+        self.question_section.setVisible(bool(record))
+        field = "human_response" if manual else "human_review"
+        self._baseline = str(record.get(field, "")) if bank or manual else ""
         self._feedback = ""
         self.answer.blockSignals(True)
         draft = self._drafts.get(record.get(self.identity)) if record else None
         self.answer.setPlainText(draft["text"] if draft else self._baseline)
         self.answer.blockSignals(False)
         self._show_detail_card(record)
+        self.question.clear()
         self.question.setToolTip("")
-        if not bank:
+        self.question.setVisible(bool(record) and not responds)
+        self._set_response_prompt("")
+        if record and not bank:
             self._show_other(record)
+            if responds:
+                self._set_response_prompt(self.question.text(), str(record.get("error") or ""))
+                self.question.hide()
             self._update_controls()
             return
         if not record:
@@ -1604,16 +1753,27 @@ class ReviewPage(ActivityPage):
                     if record.get("status") == "posted" else
                     "Add guidance if needed, or process the month to categorise this transaction."
                 )
-            self.question.setText("Status: " + question)
-            self.question.setToolTip(str(record.get("review_result") or ""))
+            self._set_response_prompt(question, str(record.get("review_result") or ""))
         self._update_controls()
+
+    def _set_response_prompt(self, question: str, detail: str = "") -> None:
+        """
+        Show saved guidance as a placeholder while keeping it available after a response has been entered.
+        """
+        question = question.strip()
+        self.answer.setPlaceholderText(question or "Write your response")
+        self.answer.setAccessibleDescription(question)
+        guidance = "\n\n".join(dict.fromkeys(value for value in (question, detail) if value))
+        self.answer.setToolTip("\n\n".join(value for value in (guidance, self._response_help) if value))
 
     def _show_detail_card(self, record: dict | None) -> None:
         """
-        Reuse the complete journal card when postings exist; otherwise show original bank or instruction facts.
+        Show posted accounting in the shared card and unposted bank or manual input in its own view.
         """
         self.journal_details.update_record(None, self.snapshot)
         self.transaction_details.update_record(None, self.snapshot)
+        self.manual_details.hide()
+        self._active_details = None
         if record is None:
             return
         entry = record.get("journal_entry") or next((
@@ -1630,100 +1790,155 @@ class ReviewPage(ActivityPage):
             }
         if entry is not None:
             self.journal_details.update_record(entry, self.snapshot)
+            self._active_details = self.journal_details
         elif record.get("kind") in {"bank", "feed"}:
             self.transaction_details.update_record(record, self.snapshot)
+            self._active_details = self.transaction_details
+            if record.get("kind") == "bank":
+                self.transaction_details.status.setText(record.get("status_label", ""))
         else:
-            self.journal_details.update_record({
-                **record, "description": record.get("instruction") or record.get("description") or "",
-                "total_debit": None, "postings": [],
-            }, self.snapshot)
+            self.manual_instruction.setText(str(
+                record.get("instruction") or record.get("description") or ""
+            ).upper())
+            self.manual_date.setText("Accounting date · " + str(record.get("date") or "—"))
+            self.manual_details.show()
+            self._active_details = self.manual_details
+
+    def _detail_actions_available(self) -> bool:
+        """
+        Keep every selected-record route behind the same fresh-snapshot and idle-work requirements.
+        """
+        return bool(
+            self.snapshot.get("ready", True) and not self.snapshot.get("error")
+            and not self._refresh_error and not self._busy and not self._awaiting_refresh
+        )
+
+    def _update_header_action(self, available: bool) -> None:
+        """
+        Place the selected review's exact editing route in its active evidence card's header.
+        """
+        self.journal_details.set_header_action(None, None)
+        self.transaction_details.set_header_action(None, None)
+        self.manual_edit.hide()
+        self._header_callback = None
+        record = self.current
+        if not record or record.get("kind") == "feed" or self._active_details is None:
+            return
+        symbol = "pen"
+        if record["kind"] == "bank":
+            if record.get("manual_entry_id") or record.get("blocking_manual_entry_id"):
+                label, callback = "Edit the owning manual instruction", self._open_manual
+            else:
+                label, callback = "Edit the complete journal entry", self._resolve_manually
+        elif record["kind"] == "manual":
+            label = (
+                "Edit journal entry" if record.get("entry_mode") == "direct" else "Edit the original instruction"
+            )
+            callback = self._open_other
+        elif record["kind"] == "budget" and record.get("issue_code") == "liability_category":
+            label, callback, symbol = "Choose the expense category in Accounts", self._open_other, "settings"
+        elif record["kind"] == "investment":
+            label, callback = "Edit this investment posting", self._open_other
+        else:
+            label, callback = "Edit the complete journal entry", self._open_other
+        if self._active_details is self.manual_details:
+            self._header_callback = callback
+            self.manual_edit.setIcon(icon(symbol, gui_colour(self, "icon", "#355653"), size=18))
+            self.manual_edit.setAccessibleName(label)
+            self.manual_edit.setToolTip(label)
+            self.manual_edit.setEnabled(available)
+            self.manual_edit.show()
+        else:
+            self._active_details.set_header_action(label, callback, symbol=symbol, enabled=available)
+
+    def _activate_header_action(self) -> None:
+        """
+        Follow the unposted instruction's current header route only while its source context is usable.
+        """
+        if self._header_callback is not None and self._detail_actions_available():
+            self._header_callback()
 
     def _show_other(self, record: dict) -> None:
         """
         Keep manual and investment next steps beside the same shared facts, without a second response editor.
         """
         feed = record["kind"] == "feed"
-        self.feed_candidate.setVisible(feed and record.get("conflict_kind") != "changed")
-        self.feed_import.setVisible(feed and record.get("conflict_kind") != "changed")
+        if record["kind"] == "journal" or (
+            record["kind"] == "manual" and record.get("entry_mode") == "direct"
+        ):
+            self.question_section.hide()
+            self.other_panel.hide()
+            return
         if feed:
             changed = record.get("conflict_kind") == "changed"
-            self.question.setText("Status: " + (
+            self.question.setText(
                 "Redbark returned changed facts for an imported transaction." if changed else
-                "Check whether this transaction was already imported."
-            ))
-            self.feed_candidate.clear()
-            sources = {item["transaction_id"]: item for item in self.snapshot.get("transactions", [])}
-            for candidate in record.get("candidate_records") or record.get("candidates", []):
-                identifier = candidate.get("transaction_id") if isinstance(candidate, dict) else str(candidate)
-                item = candidate if isinstance(candidate, dict) else sources.get(identifier, {})
-                amount = _aud(item.get("amount"), code=False)
-                label = " · ".join((str(item.get("date") or ""), str(item.get("description") or ""), amount))
-                self.feed_candidate.addItem(label.strip(" ·") or identifier, identifier)
+                "An earlier duplicate check held this transaction."
+            )
             sections = [str(record.get("message") or record.get("reason") or (
                 "Your saved transaction and posted entries have not changed. Keep the saved record only "
                 "after checking the bank evidence; any accounting adjustment belongs in the journal."
-                if changed else "Link the existing record, or confirm that this is a separate transaction."
+                if changed else "Import this separate Redbark transaction now, or sync Statements to "
+                "import it when Redbark returns it again."
             ))]
             if changed:
                 for saved in record.get("candidate_records", []):
                     amount = _aud(saved.get("amount"), code=False)
                     sections.insert(0, "Saved record\n" + str(saved.get("date") or "") + " · "
                                     + amount + "\n" + str(saved.get("description") or ""))
-            self.other_action.setText("Keep saved record" if changed else "Already imported")
+            self.other_action.setText("Keep saved record" if changed else "Import transaction")
             self.other_action.setToolTip("Resolve this source conflict without overwriting posted entries.")
         elif record["kind"] == "manual":
             status = record.get("question") or record.get("error") or record["status_label"]
-            self.question.setText("Status: " + str(status))
+            self.question.setText(str(status))
             sections = []
-            for key, title in (("human_response", "Response"), ("error", "Last error")):
-                if record.get(key):
-                    sections.append(title + "\n" + str(record[key]))
-            self.other_action.setText("Edit")
-            self.other_action.setToolTip("Open this saved instruction without leaving Review.")
+            if record.get("error") and record["error"] != status:
+                sections.append("Last error\n" + str(record["error"]))
+        elif record["kind"] == "budget":
+            self.question.setText(str(record.get("question") or "Check this cash flow."))
+            sections = ["Set Asset account type and Expense category in Setup → Accounts."]
         else:
-            self.question.setText("Status: Investment treatment needed.")
+            self.question.setText("Investment treatment needed.")
             sections = [f"Choose the treatment for line {record.get('line_number', '')}: "
                         + str(record.get("account") or "") + "."]
             start = str(self.snapshot.get("period_start") or "")
             if start and str(record.get("date") or "") < start:
                 sections.append("This earlier movement still affects investment cost.")
-            self.other_action.setText("Edit")
-            self.other_action.setToolTip("Open the complete journal event and focus this investment posting.")
         self.other_details.setText("\n\n".join(sections))
         self.other_details.setVisible(bool(sections))
+        self.other_panel.setVisible(bool(sections) or feed)
 
     def _open_other(self) -> None:
         """
         Route non-bank review work to its existing editor with all original identity fields intact.
         """
-        if not self.current or not self.other_action.isEnabled():
+        if not self.current or not self._detail_actions_available():
             return
         if self.current.get("kind") == "feed":
-            self._resolve_feed("keep" if self.current.get("conflict_kind") == "changed" else "link")
+            self._resolve_feed("keep" if self.current.get("conflict_kind") == "changed" else "import")
         elif self.current.get("kind") == "manual":
             self.action_requested.emit("open_manual_editor", {
                 "manual_entry_id": self.current["manual_entry_id"],
                 "journal_entry_id": self.current.get("journal_entry_id") or None,
-                "mode": "instruction",
+                "mode": "direct" if self.current.get("entry_mode") == "direct" else "instruction",
             })
-        elif self.current.get("kind") == "investment":
+        elif self.current.get("kind") == "budget" and self.current.get("issue_code") == "liability_category":
+            self.action_requested.emit("open_account_settings", {"account_key": self.current.get("account_key")})
+        elif self.current.get("kind") in {"investment", "budget", "journal"}:
             self.action_requested.emit("open_entry_editor", {
                 "journal_entry_id": self.current["journal_entry_id"],
-                "line_number": self.current["line_number"],
+                "line_number": self.current.get("line_number"),
             })
 
     def _resolve_feed(self, action: str) -> None:
         """
         Submit an explicit source reconciliation using the exact conflict revision shown to the user.
         """
-        if not self.current or self.current.get("kind") != "feed" or self._busy:
-            return
-        identifier = self.feed_candidate.currentData() if action == "link" else None
-        if action == "link" and not identifier:
+        if not self.current or self.current.get("kind") != "feed" or not self._detail_actions_available():
             return
         self.action_requested.emit("redbark_resolve", {
             "id": self.current["id"], "revision": self.current["revision"],
-            "action": action, "transaction_id": identifier,
+            "action": action,
         })
 
     def _pending_answer(self) -> bool:
@@ -1742,19 +1957,29 @@ class ReviewPage(ActivityPage):
         """
         Keep save availability, ownership routing and feedback consistent with the selected review.
         """
-        if not hasattr(self, "save_button"):
+        if not hasattr(self, "answer"):
             return
         ready = (
             self.snapshot.get("ready", True) and not self.snapshot.get("error") and not self._refresh_error
         )
         self.journal_details.set_stale(not ready)
         self.transaction_details.set_stale(not ready)
+        self.journal_details.set_busy(self._busy or self._awaiting_refresh)
+        self.transaction_details.set_busy(self._busy or self._awaiting_refresh)
         available = ready and not self._busy and not self._awaiting_refresh
         bank = bool(self.current and self.current.get("kind") == "bank")
+        manual_response = bool(self.current and self.current.get("kind") == "manual")
+        completed_manual = manual_response and self.current.get("work_state") == "complete"
         owned = bool(bank and self.current.get("manual_entry_id"))
         blocked = bool(bank and self.current.get("blocking_manual_entry_id"))
-        interrupted = bool(self.current and self.current.get("review_status") == "requesting")
-        editable = bank and not owned and not blocked and not interrupted
+        interrupted = bool(self.current and (
+            self.current.get("review_status") == "requesting"
+            or manual_response and self.current.get("status") == "requesting"
+        ))
+        editable = (
+            (bank or manual_response) and not owned and not blocked
+            and not interrupted and not completed_manual
+        )
         dirty = self.has_unsaved_changes()
         self.answer.setReadOnly(not (editable and available))
         self.save_button.setEnabled(
@@ -1769,44 +1994,29 @@ class ReviewPage(ActivityPage):
             "Discard the saved pending answer. Save or discard local edits first."
             if dirty else "Discard the pending answer without undoing posted accounting."
         )
-        manual = bank and (
-            self.current.get("manual_entry_id") or self.current.get("blocking_manual_entry_id")
-        )
-        self.manual_button.setVisible(bool(manual))
-        self.manual_button.setEnabled(bool(manual) and available)
-        self.direct_button.setVisible(bank)
-        self.direct_button.setEnabled(bank and available and not blocked)
-        self.other_action.setVisible(bool(self.current) and not bank)
-        self.other_action.setEnabled(bool(self.current) and not bank and available)
-        self.feed_candidate.setEnabled(available)
-        self.feed_import.setEnabled(available)
-        self.footer.setVisible(bank or dirty)
+        feed = bool(self.current and self.current.get("kind") == "feed")
+        self.other_action.setVisible(feed)
+        self.other_action.setEnabled(feed and available)
+        self._update_header_action(available)
         self.process_button.setEnabled(ready and not self._busy)
-        self.process_button.setText("Processing…" if self._busy and self._processing else "Process")
-        if self._feedback:
+        self.process_button.setText("Process")
+        count = len(self._drafts)
+        self.draft_count.setText(f"{count} unsaved response{'s' if count != 1 else ''}")
+        self.draft_count.setVisible(dirty)
+        if self._batch_feedback:
+            message = self._batch_feedback
+        elif self._feedback:
             message = self._feedback
-        elif self._busy:
-            message = "Work is running. Saved facts remain available to inspect."
-        elif self._awaiting_refresh:
-            message = "Saved. Refreshing the review."
+        elif self._busy or self._awaiting_refresh:
+            message = ""
         elif not ready:
             message = "Reviews unavailable. Check Setup and refresh."
-        elif dirty:
-            count = len(self._drafts)
-            message = f"{count} unsaved answer{'s' if count != 1 else ''} · Save when ready"
-        elif not self.current:
-            message = "Select a transaction to review."
-        elif owned:
-            message = "Edit this event through its manual instruction."
-        elif blocked:
-            message = "Resolve the pending manual instruction before reviewing this transaction."
-        elif interrupted:
-            message = "Work was interrupted. Process the month to continue."
-        elif pending:
-            message = "Answer saved. Process the month to apply it."
+        elif dirty and any(not draft["text"].strip() for draft in self._drafts.values()):
+            message = "Complete each edited response before saving."
         else:
-            message = "No unsaved changes"
+            message = ""
         self.save_status.setText(message)
+        self.save_status.setVisible(bool(message))
 
     def _edited(self) -> None:
         """
@@ -1834,14 +2044,19 @@ class ReviewPage(ActivityPage):
         ):
             return
         if any(not draft["text"].strip() for draft in self._drafts.values()):
-            QMessageBox.information(self, "Answer needed", "Complete each edited answer before saving.")
+            QMessageBox.information(self, "Response needed", "Complete each edited response before saving.")
             return
-        answers = [{
-            "transaction_id": draft["record"]["transaction_id"],
-            "revision": draft["record"]["context_revision"],
-            "answer_token": draft["record"].get("answer_token", ""), "text": draft["text"],
-        } for draft in self._drafts.values()]
-        self.action_requested.emit("save_reviews", {"answers": answers})
+        answers, manual_answers = [], []
+        for draft in self._drafts.values():
+            record = draft["record"]
+            manual = record.get("kind") == "manual"
+            identity = "manual_entry_id" if manual else "transaction_id"
+            payload = {
+                identity: record[identity], "revision": record["context_revision"],
+                "answer_token": record.get("answer_token", ""), "text": draft["text"],
+            }
+            (manual_answers if manual else answers).append(payload)
+        self.action_requested.emit("save_reviews", {"answers": answers, "manual_answers": manual_answers})
 
     def _discard_local_changes(self) -> None:
         """
@@ -1879,7 +2094,7 @@ class ReviewPage(ActivityPage):
         """
         Open the owning or blocking manual instruction using its stable saved identity.
         """
-        if self.current and self.manual_button.isEnabled():
+        if self.current and self._detail_actions_available():
             identifier = self.current.get("manual_entry_id") or self.current.get("blocking_manual_entry_id")
             if identifier:
                 self.action_requested.emit("open_manual_editor", {
@@ -1891,7 +2106,7 @@ class ReviewPage(ActivityPage):
         Open direct accounting with complete source identity and any existing manual ownership intact.
         """
         if (
-            self.current and self.current.get("kind") == "bank" and self.direct_button.isEnabled()
+            self.current and self.current.get("kind") == "bank" and self._detail_actions_available()
             and not self.current.get("blocking_manual_entry_id")
         ):
             self.action_requested.emit("open_entry_editor", {
@@ -1914,7 +2129,7 @@ class JournalPage(ActivityPage):
         super().__init__(
             "Journal", "Inspect posted entries and their sources. Direct edits do not call AI.",
             (("date", "Date"), ("description", "Event"),
-             ("total_debit", "Debits AUD"), ("total_credit", "Credits AUD")),
+             ("total_debit", "Debits AUD"), ("total_credit", "Credits AUD"), ("budget_status", "Budget")),
             "journal_entry_id", parent,
         )
         self._refresh_error = ""
@@ -1922,11 +2137,10 @@ class JournalPage(ActivityPage):
         self.viewer = None
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(10)
-        self.process_button = HeaderActionButton("Process")
+        self.process_button = HeaderActionButton("Process", icon_only=True)
         self.process_button.clicked.connect(lambda: self._request_action("process_journal"))
-        self.subtitle_row.addWidget(self.process_button, 0, Qt.AlignmentFlag.AlignRight)
-        self.subtitle_row.setContentsMargins(0, 0, 14, 0)
-        self.search.setPlaceholderText("Search entries, accounts or posting descriptions")
+        self.subtitle_row.insertWidget(0, self.process_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.search.setPlaceholderText("Search journal")
         self.layout.removeWidget(self.empty)
         self.layout.insertWidget(2, self.empty)
         self.empty.setObjectName("workspaceHint")
@@ -1949,6 +2163,7 @@ class JournalPage(ActivityPage):
         self.detail.hide()
         self.splitter.hide()
         self._filter_changed()
+        QWidget.setTabOrder(self.process_button, self.search)
 
     def refresh(self, snapshot: dict) -> None:
         """
@@ -1963,13 +2178,18 @@ class JournalPage(ActivityPage):
             credit = sum((Decimal(str(row.get("credit") or 0)) for row in postings), Decimal(0))
             rows.append({
                 **entry, "total_debit": f"{debit:.2f}", "total_credit": f"{credit:.2f}",
+                "budget_status": entry.get("budget_status") or "Unavailable",
+                "budget_tooltip": entry.get("budget_tooltip") or
+                    "Budget status is unavailable in this snapshot. Refresh the workspace.",
                 "debit_accounts": _posting_accounts(postings, "debit"),
                 "credit_accounts": _posting_accounts(postings, "credit"),
             })
         self._set_records(rows)
-        for column, width in ((0, 112), (2, 130), (3, 130)):
+        for column, width in ((0, 112), (2, 130), (3, 130), (4, 134)):
             self.table.setColumnWidth(column, width)
         for index, row in enumerate(self.records):
+            self.table.item(index, 4).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.item(index, 4).setToolTip(row["budget_tooltip"])
             self.table.item(index, 1).setToolTip(
                 f"{row.get('description', '')}\nDebit accounts: {row['debit_accounts'] or '-'}\n"
                 f"Credit accounts: {row['credit_accounts'] or '-'}"
@@ -2063,7 +2283,9 @@ class JournalPage(ActivityPage):
         elif not shown:
             message = ""
         else:
-            message = f"{shown} of {len(self.records)} posted entries in this reporting month"
+            message = (
+                f"{shown} entries" if shown == len(self.records) else f"{shown} of {len(self.records)} entries"
+            )
         self.empty.setText(message)
         self.empty.setToolTip(self._refresh_error)
         self.empty.setVisible(bool(message))
@@ -2121,7 +2343,7 @@ class JournalPage(ActivityPage):
             return
         available = self._available()
         self.process_button.setEnabled(available)
-        self.process_button.setText("Processing…" if self._busy and self._processing else "Process")
+        self.process_button.setText("Process")
 
     def _request_action(self, action: str) -> None:
         """
@@ -2148,6 +2370,21 @@ def _posting_accounts(postings: list[dict], side: str) -> str:
     return "; ".join(dict.fromkeys(
         row.get("account", "") for row in postings if Decimal(str(row.get(side) or "0")) > 0
     ))
+
+
+def _posting_total(postings: list[dict]) -> str | None:
+    """
+    Derive an unsigned event amount from saved postings without inventing an amount for an instruction.
+    """
+    if not postings:
+        return None
+    try:
+        amounts = [Decimal(str(line.get("debit") or "0")) for line in postings]
+    except (ValueError, ArithmeticError):
+        return None
+    if any(not amount.is_finite() or amount < 0 for amount in amounts):
+        return None
+    return format(sum(amounts, Decimal(0)), ".2f")
 
 
 def _text(value: object) -> str:

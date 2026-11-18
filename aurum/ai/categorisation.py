@@ -3,7 +3,7 @@
 #                                                 AI - Categorisation                                                  #
 # -------------------------------------------------------------------------------------------------------------------- #
 """
-Aurum asks ChatGPT to choose an income or expense account when a bank transaction has a clear purpose.
+Aurum asks ChatGPT to choose a supported counterpart when a bank transaction has a clear purpose.
 
 This module prepares small batches with a compact account catalogue and replaces configured bank identifiers
 before sending descriptions. The model returns either an account choice or a question for manual review,
@@ -26,11 +26,12 @@ from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
 from aurum.ai.skills import Skill, explicit_memory_context, guidance_context, load_categorisation_skill
 from aurum.finance.accounts import Account, AccountRegistry, AccountType
+from aurum.finance.budget import BudgetSettings, budget_policy
 from aurum.finance.transaction import Transaction
 from aurum.finance.review import Guidance
 
 # Changing the prompt never invalidates or automatically resends saved decisions.
-PROMPT_VERSION = "journal-v3"
+PROMPT_VERSION = "cashflow-v1"
 MAX_BATCH_SIZE = 20
 
 
@@ -133,6 +134,7 @@ def classify_batch(
     skill: Skill | None = None,
     guidance: list[Guidance] | None = None,
     explicit_memory: list[dict] | None = None,
+    budget: BudgetSettings | None = None,
 ) -> tuple[list[Decision], dict]:
     """
     Send one batch and accept it only when every decision agrees with the supplied rows and account types.
@@ -140,9 +142,9 @@ def classify_batch(
     Args:
         client: Authenticated connection with an explicitly selected model.
         transactions: At most twenty nonzero, unposted statement lines selected by the journal command.
-        accounts: Registry containing their source accounts and the permitted income/expense accounts.
+        accounts: Registry containing source accounts and supported counterpart roles.
         skill: Accounting instructions loaded once by the command, or None to load the project skill here.
-        guidance: Private guidance inferred from human answers; its application remains an AI decision.
+        guidance: Accounting hints filtered to remove retired budget controls; policy remains authoritative.
 
     Returns:
         Decisions in input order and reported token usage. Empty input makes no request.
@@ -172,9 +174,13 @@ def classify_batch(
     categories: dict[str, Account] = {
         key: account for key, account in accounts.accounts.items()
         if account.account_type in (AccountType.INCOME, AccountType.EXPENSE)
+        or budget is not None and (
+            key in budget.cash_accounts or key in budget.investment_accounts
+            or key in budget.liability_categories or key == budget.capital_account
+        )
     }
     if not categories:
-        raise ValueError("Configure income and expense accounts before categorisation.")
+        raise ValueError("Configure supported counterpart accounts before categorisation.")
 
     skill = skill or load_categorisation_skill()
     learned, _ = guidance_context(guidance, accounts, " ".join(row.description for row in transactions))
@@ -182,12 +188,14 @@ def classify_batch(
     payload = {
         "mode": "categorise",
         "currency": "AUD",
+        "budget_policy": budget_policy(budget),
         "guidance": learned,
         "explicit_memory": explicit_memory_context(explicit_memory, accounts),
         "accounts": [
             {
                 "key": key, "name": redact_bank_details(account.name, accounts),
                 "type": account.account_type.value,
+                "is_bank": account.bank_details is not None,
                 "purpose": redact_bank_details(account.notes or "", accounts),
             }
             for key, account in categories.items()
@@ -195,6 +203,7 @@ def classify_batch(
         "transactions": [
             {
                 "row_id": row_id, "date": row.date.isoformat(),
+                "account_key": by_id[row.account_id].key,
                 "description": redact_bank_details(row.description, accounts),
                 "amount": format(row.amount, ".2f"),
             }
@@ -202,7 +211,8 @@ def classify_batch(
         ],
     }
     response, usage = client.request(
-        instructions=skill.instructions, payload=payload, output_schema=_response_schema(rows, categories)
+        instructions=skill.instructions + "\n\n" + budget_policy(budget)["rule"],
+        payload=payload, output_schema=_response_schema(rows, categories),
     )
     try:
         try:
@@ -225,11 +235,14 @@ def classify_batch(
                 account = categories.get(result.account_key)
                 if account is None:
                     raise ValueError("The model chose an account outside the permitted catalogue.")
-                expected = AccountType.EXPENSE if row.amount < 0 else AccountType.INCOME
-                if account.account_type != expected:
-                    raise ValueError(
-                        "The model chose an account incompatible with the transaction direction."
+                question = _counterpart_question(row, account, accounts, budget)
+                if question:
+                    decisions[row.transaction_id] = Decision(
+                        transaction_id=row.transaction_id, status="needs_review",
+                        reason="This movement needs complete supported accounting facts.", question=question,
+                        model=model, prompt_version=skill.version,
                     )
+                    continue
                 account_id = account.id
             decisions[row.transaction_id] = Decision(
                 transaction_id=row.transaction_id, status=result.status,
@@ -244,6 +257,36 @@ def classify_batch(
         ) from None
 
 # %% 3. Helpers ----------------------------------------------------------------------------------------------
+def _counterpart_question(
+    row: Transaction, account: Account, accounts: AccountRegistry, budget: BudgetSettings | None,
+) -> str | None:
+    """
+    Keep unsupported lending, unmatched transfers and ambiguous disposals in Review.
+    """
+    source = next(item for item in accounts.accounts.values() if item.id == row.account_id)
+    if budget is None:
+        return None if account.account_type in {AccountType.INCOME, AccountType.EXPENSE} else (
+            "Configure the supported account roles before classifying this movement."
+        )
+    if source.key not in budget.cash_accounts:
+        return "Identify the configured cash account and the purpose of this movement."
+    if account.bank_details is not None:
+        return "Link the matching imported bank transaction before recording this transfer."
+    if account.account_type == AccountType.LIABILITY and row.amount > 0:
+        return "New borrowing is not supported. Review this receipt and its accounting treatment."
+    if account.key in budget.investment_accounts and row.amount > 0:
+        return (
+            "Was this cash from an already recorded sale, a security sale, or a balance-only fund withdrawal? "
+            "Supply the sale units and proceeds, or confirm the fund value and cost basis in Manual."
+        )
+    if (
+        account.account_type == AccountType.EQUITY and row.amount < 0
+        and account.key != budget.capital_account
+    ):
+        return "Explain this payment from Capital before posting it."
+    return None
+
+
 def _response_schema(rows: dict, categories: dict) -> dict:
     """
     Limit structured output to this batch's short row identifiers and permitted account keys.

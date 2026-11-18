@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 # Aurum imports
 from aurum.gui.icons import icon
+from aurum.gui.opening import BankOpeningRow
 
 ACCOUNT_GROUPS = (
     ("asset", "Assets"), ("liability", "Liabilities"), ("equity", "Equity"),
@@ -40,6 +41,7 @@ class CatalogueForm(QWidget):
     """
 
     changed = Signal()
+    budget_changed = Signal(str, object)
 
     def __init__(
         self, schema: dict, value: Any, choices: dict, kind: str, parent: QWidget | None = None,
@@ -57,6 +59,7 @@ class CatalogueForm(QWidget):
         self.noun = "account" if kind == "accounts" else "security"
         self._active_index = -1
         self.editor = None
+        self._budget_context = None
         self._fixed = choices.get("fixed_equity_accounts", {}) if kind == "accounts" else {}
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         layout = QHBoxLayout(self)
@@ -69,9 +72,7 @@ class CatalogueForm(QWidget):
         list_layout.setContentsMargins(0, 0, 0, 0)
         list_layout.setSpacing(10)
         heading = QHBoxLayout()
-        self.list_heading = QLabel(kind.title())
-        self.list_heading.setObjectName("catalogueSection")
-        heading.addWidget(self.list_heading, 1)
+        heading.addStretch()
         self.add_button = QToolButton()
         self.add_button.setObjectName("catalogueAdd")
         self.add_button.setIcon(icon("add", size=18))
@@ -111,12 +112,8 @@ class CatalogueForm(QWidget):
 
         details = QWidget()
         detail_layout = QVBoxLayout(details)
-        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setContentsMargins(0, self.add_button.height() + list_layout.spacing(), 0, 0)
         detail_layout.setSpacing(12)
-        self.detail_heading = _CatalogueTitle()
-        self.detail_heading.setObjectName("catalogueDetailTitle")
-        self.detail_heading.setTextFormat(Qt.TextFormat.PlainText)
-        detail_layout.addWidget(self.detail_heading)
         self.detail = QScrollArea()
         self.detail.setObjectName("catalogueDetails")
         self.detail.setWidgetResizable(True)
@@ -220,7 +217,6 @@ class CatalogueForm(QWidget):
             self.list_widget.scrollToItem(self.list_widget.item(selected_row))
         else:
             self.list_widget.verticalScrollBar().setValue(scroll)
-        self.list_heading.setText(self.kind.title())
 
     def _select_row(self, row: int) -> None:
         """
@@ -242,7 +238,6 @@ class CatalogueForm(QWidget):
             old.deleteLater()
         self.editor = None
         if not 0 <= index < len(self.records):
-            self.detail_heading.setText("No selection")
             empty = QLabel(f"Add a {self.noun} to get started.")
             empty.setObjectName("catalogueHint")
             empty.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -250,9 +245,13 @@ class CatalogueForm(QWidget):
             self.remove_button.setEnabled(False)
             return
         record = self.records[index]
-        self.detail_heading.setText(self._label(record))
         if self.kind == "accounts":
-            self.editor = AccountEditor(record, self._fixed.get(record.get("key")))
+            self.editor = AccountEditor(
+                record, self._fixed.get(record.get("key")),
+                opening_drafts=self.choices.get("bank_opening_drafts"),
+            )
+            self.editor.set_budget_context(self._budget_context)
+            self.editor.budget_changed.connect(self.budget_changed.emit)
         else:
             self.editor = SecurityEditor(record)
         self.editor.changed.connect(self._detail_changed)
@@ -273,7 +272,6 @@ class CatalogueForm(QWidget):
         before = self.records[self._active_index].get(self.type_field)
         self._store_active()
         record = self.records[self._active_index]
-        self.detail_heading.setText(self._label(record))
         self._rebuild_list(self._active_index, reveal=before != record.get(self.type_field))
         self.changed.emit()
 
@@ -301,11 +299,13 @@ class CatalogueForm(QWidget):
         index = self._active_index
         if not 0 <= index < len(self.records) or self.records[index].get("key") in self._fixed:
             return
-        self.records.pop(index)
+        removed = self.records.pop(index)
         index = min(index, len(self.records) - 1)
         self._rebuild_list(index, reveal=True)
         self._select_index(index)
         self.changed.emit()
+        if self.kind == "accounts" and removed.get("key"):
+            self.budget_changed.emit(removed["key"], None)
 
 
 class AccountsForm(CatalogueForm):
@@ -318,6 +318,14 @@ class AccountsForm(CatalogueForm):
         Use account details while retaining Setup's common configuration-form interface.
         """
         super().__init__(schema, value, choices, "accounts", parent)
+
+    def set_budget_context(self, data: dict | None) -> None:
+        """
+        Read the shared budget draft without rebuilding account fields or emitting an edit.
+        """
+        self._budget_context = deepcopy(data)
+        if self.editor is not None:
+            self.editor.set_budget_context(self._budget_context)
 
 
 class SecuritiesForm(CatalogueForm):
@@ -339,24 +347,25 @@ class AccountEditor(QWidget):
     """
 
     changed = Signal()
+    budget_changed = Signal(str, object)
 
-    def __init__(self, record: dict, fixed_name: str | None = None, parent=None) -> None:
+    def __init__(
+        self, record: dict, fixed_name: str | None = None, parent=None, *, opening_drafts=None,
+    ) -> None:
         """
         Present bank identifiers and the optional closing date directly, preserving their exact input.
         """
         super().__init__(parent)
         self.original = deepcopy(record)
         self.fixed_name = fixed_name
+        self._budget_context = None
+        self._budget_mode = "role"
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 12, 8)
         layout.setSpacing(14)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        if fixed_name:
-            hint = QLabel("Required by financial reports. Its name, type and identity are fixed here.")
-            hint.setObjectName("catalogueHint")
-            hint.setWordWrap(True)
-            layout.addWidget(hint)
         form = _form_layout()
+        self._form = form
         layout.addLayout(form)
         self.name = _text_field(fixed_name or record.get("name"), "Account name")
         self.name.setReadOnly(bool(fixed_name))
@@ -368,6 +377,8 @@ class AccountEditor(QWidget):
             record.get("account_type"),
         )
         self.account_type.setEnabled(not bool(fixed_name))
+        if fixed_name:
+            self.account_type.setToolTip("Required by financial reports. Its type and identity are fixed.")
         _add_row(form, "Account type", self.account_type)
         self.institution = _text_field(record.get("institution"), "Optional")
         _add_row(form, "Institution", self.institution)
@@ -386,6 +397,14 @@ class AccountEditor(QWidget):
         self.closing_date = _text_field(record.get("closing_date"), "YYYY-MM-DD or DD-MM-YYYY")
         self.closing_date.setToolTip("Optional. Leave blank while the account remains open.")
         _add_row(form, "Closing date", self.closing_date)
+        self.opening_row = None
+        if opening_drafts is not None and record.get("account_type") == "asset" and bank:
+            self.opening_row = BankOpeningRow(record, opening_drafts, self)
+            _add_row(form, "Opening balance", self.opening_row)
+        self.budget_choice = _choice_field((), None)
+        _add_row(form, "Asset account type", self.budget_choice)
+        self.budget_label = form.labelForField(self.budget_choice)
+        self.budget_choice.currentIndexChanged.connect(self._choose_budget)
         self.notes = QPlainTextEdit()
         self.notes.setPlaceholderText("Optional notes")
         self.notes.setPlainText(_text(record.get("notes")))
@@ -403,6 +422,9 @@ class AccountEditor(QWidget):
             field.textChanged.connect(self.changed)
         self.account_type.currentIndexChanged.connect(self.changed)
         self.notes.textChanged.connect(self.changed)
+        self.name.textChanged.connect(self._refresh_budget_row)
+        self.account_type.currentIndexChanged.connect(self._refresh_budget_row)
+        self._refresh_budget_row()
         layout.addStretch(1)
 
     def value(self) -> dict:
@@ -427,6 +449,85 @@ class AccountEditor(QWidget):
             elif "closing_date" in result:
                 result["closing_date"] = None
         return result
+
+    def set_budget_context(self, data: dict | None) -> None:
+        """
+        Display the authoritative budget draft while leaving all account metadata drafts intact.
+        """
+        self._budget_context = deepcopy(data)
+        self._refresh_budget_row()
+
+    def _refresh_budget_row(self) -> None:
+        """
+        Offer one applicable account setting and retain incompatible references for explicit repair.
+        """
+        data = self._budget_context or {}
+        key = self.original.get("key")
+        kind = self.account_type.currentData()
+        cash = key in data.get("cash_accounts", ())
+        investment = key in data.get("investment_accounts", ())
+        repayment = data.get("liability_categories", {}).get(key)
+        assigned = cash or investment or repayment is not None
+        visible = kind in {"asset", "liability"} or assigned
+        self._form.setRowVisible(self.budget_choice, visible)
+        self._budget_mode = "liability" if kind == "liability" else "role"
+        label = "Expense category" if self._budget_mode == "liability" else "Asset account type"
+        self.budget_label.setText(label)
+        self.budget_choice.setAccessibleName(label + " for " + (self.name.text() or "new account"))
+        options = [(None, "Choose expense category" if kind == "liability" else "None")]
+        if kind == "liability":
+            options.extend((category_key, category.get("name", category_key))
+                           for category_key, category in data.get("categories", {}).items()
+                           if category.get("kind") == "expense")
+        elif kind == "asset":
+            options.extend((("cash", "Cash"), ("investment", "Investment")))
+        current = (
+            repayment if kind == "liability" else "cash" if cash else "investment" if investment else None
+        )
+        invalid = None
+        if sum((cash, investment, repayment is not None)) > 1:
+            invalid = "Multiple roles (unavailable)"
+        elif kind == "liability" and (cash or investment):
+            invalid = ("Cash" if cash else "Investment") + " (unavailable)"
+        elif kind != "liability" and repayment is not None:
+            category = data.get("categories", {}).get(repayment, {})
+            invalid = str(category.get("name", repayment)) + " (unavailable)"
+        elif current not in {value for value, _text in options}:
+            label = {"cash": "Cash", "investment": "Investment"}.get(current, current)
+            category = data.get("categories", {}).get(current, {})
+            invalid = str(category.get("name", label)) + " (unavailable)"
+        self.budget_choice.blockSignals(True)
+        self.budget_choice.clear()
+        for value, text in options:
+            self.budget_choice.addItem(text, value)
+        if invalid:
+            self.budget_choice.addItem(invalid, "__unavailable__")
+            index = self.budget_choice.count() - 1
+            self.budget_choice.model().item(index).setEnabled(False)
+        else:
+            index = max(0, self.budget_choice.findData(current))
+        self.budget_choice.setCurrentIndex(index)
+        self.budget_choice.blockSignals(False)
+        self.budget_choice.setEnabled(bool(key) and self._budget_context is not None)
+        self.budget_choice.setToolTip(
+            "Save this account before choosing its budget setting." if not key else
+            "Budget settings are unavailable. Reload Setup to try again." if self._budget_context is None else
+            "Choose an expense category for this account's full cash repayments." if kind == "liability" else
+            "Cash includes this account's movements in the budget. Investment identifies an asset whose "
+            "transfers to and from Cash accounts count as investing and investment returns. "
+            "These choices do not change its accounting type or bank details."
+        )
+
+    def _choose_budget(self, _index: int) -> None:
+        """
+        Submit one explicit role choice to Setup without writing or changing account metadata.
+        """
+        key = self.original.get("key")
+        value = self.budget_choice.currentData()
+        if not key or self._budget_context is None or value == "__unavailable__":
+            return
+        choice = {"liability_category": value} if self._budget_mode == "liability" else value
+        self.budget_changed.emit(key, choice)
 
     def _bank_tone(self) -> None:
         """
@@ -515,43 +616,6 @@ class _CatalogueDelegate(QStyledItemDelegate):
             option = QStyleOptionViewItem(option)
             option.rect.adjust(16, 0, 0, 0)
         super().paint(painter, option, index)
-
-
-class _CatalogueTitle(QLabel):
-    """
-    Keep long selected names readable without forcing an outer catalogue scrollbar or wider window.
-    """
-
-    def __init__(self, parent=None) -> None:
-        """
-        Use a single elided line while retaining the full name as a tooltip.
-        """
-        super().__init__(parent)
-        self._full_text = ""
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-
-    def setText(self, text: str) -> None:
-        """
-        Retain the complete label independently of the space available for displaying it.
-        """
-        self._full_text = text
-        self.setToolTip(text)
-        self._update_text()
-
-    def resizeEvent(self, event) -> None:
-        """
-        Recompute the visible label when the detail column changes width.
-        """
-        super().resizeEvent(event)
-        self._update_text()
-
-    def _update_text(self) -> None:
-        """
-        End long labels with an ellipsis instead of clipping or increasing the layout's minimum height.
-        """
-        super().setText(self.fontMetrics().elidedText(
-            self._full_text, Qt.TextElideMode.ElideRight, max(1, self.width()),
-        ))
 
 
 def _form_layout() -> QFormLayout:

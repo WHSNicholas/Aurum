@@ -7,8 +7,8 @@ Aurum carries written manual-entry instructions through the same validated journ
 
 A submission keeps the user's accounting date, explanation and optional statement references together.
 Its case adds relevant bank evidence and existing events without changing those facts. An outcome either
-supplies one complete balanced entry, a budget-only monthly savings split, or explains what still prevents it.
-Savings splits have no journal lines and cannot claim bank sources. Database reservations, desktop
+supplies one complete balanced entry or explains what still prevents it. Retired savings fields remain only
+to read historical outcomes; they cannot authorise new allocations. Database reservations, desktop
 editing and AI calls remain separate from these immutable models.
 """
 
@@ -23,7 +23,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # Aurum imports
 from aurum.finance.dates import parse_input_date
 from aurum.finance.journal import JournalEntry
-from aurum.finance.investments import InvestmentCalculation, InvestmentInstruction
+from aurum.finance.investments import (
+    AccountWithdrawalCalculation, AccountWithdrawalInstruction, InvestmentCalculation, InvestmentInstruction,
+)
 from aurum.finance.transaction import Transaction
 from aurum.finance.savings import SavingsAllocation, SavingsContext
 
@@ -176,11 +178,17 @@ class ManualOutcome(BaseModel):
 
     manual_id: UUID
     status: Literal["apply", "needs_review", "unsupported", "pricing"]
-    event_kind: Literal["general", "opening", "investment", "savings"] = "general"
+    event_kind: Literal["general", "opening", "investment", "withdrawal", "savings"] = "general"
     entry: JournalEntry | None = None
     savings: SavingsAllocation | None = Field(default=None, exclude_if=lambda value: value is None)
     investment: InvestmentInstruction | None = None
     pricing: InvestmentCalculation | None = None
+    withdrawal: AccountWithdrawalInstruction | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    withdrawal_calculation: AccountWithdrawalCalculation | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     investment_budget_category: str | None = Field(
         default=None, min_length=1, exclude_if=lambda value: value is None,
     )
@@ -232,11 +240,24 @@ class ManualOutcome(BaseModel):
         if self.status == "unsupported" and self.question is not None:
             raise ValueError("An unsupported manual result needs a reason, not a clarification question.")
         if self.status == "pricing" and (
-            self.investment is None or self.event_kind != "investment" or self.question is not None
+            not (
+                self.investment is not None and self.event_kind == "investment"
+                or self.withdrawal is not None and self.event_kind == "withdrawal"
+            ) or self.question is not None
         ):
             raise ValueError("A pricing result needs an investment instruction and no question.")
         if self.origin == "ai" and self.status == "apply" and self.event_kind == "investment" and (
             self.investment is None or self.pricing is None
         ):
             raise ValueError("A posted investment needs its instruction and calculation.")
+        if self.withdrawal is not None and self.event_kind != "withdrawal":
+            raise ValueError("Withdrawal facts belong only to a withdrawal result.")
+        if self.withdrawal_calculation is not None and (
+            self.withdrawal is None or self.status != "apply"
+        ):
+            raise ValueError("A withdrawal calculation needs a completed withdrawal.")
+        if self.origin == "ai" and self.status == "apply" and self.event_kind == "withdrawal" and (
+            self.withdrawal is None or self.withdrawal_calculation is None
+        ):
+            raise ValueError("A posted withdrawal needs confirmed facts and its calculation.")
         return self

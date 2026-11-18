@@ -10,8 +10,9 @@ using only supplied account keys and references. Python assigns UUIDs, validates
 
 ## Shared rules
 
-- Explicit human treatment takes precedence over learned guidance, account-purpose notes, defaults and earlier
-  AI decisions. None can change source bank facts or permit unbalanced postings.
+- The supplied deterministic `budget_policy` and supported-operation rules take priority over all human,
+  remembered and learned budget preferences. Human accounting facts and explicit supported account choices
+  take precedence over learned hints and account-purpose notes. Never alter bank facts or unbalance postings.
 - Use learned guidance only when its conditions are established. If equally applicable instructions conflict
   and the human answer does not resolve them, clarify the accounting; in guidance-only mode, explain the
   conflict without reopening the accepted event. Recency alone does not resolve a conflict.
@@ -40,20 +41,23 @@ inferred guidance. They are already remembered; do not require another learning 
 
 ## Initial categorisation: `categorise`
 
-Choose an income account for a clear inflow or an expense account for a clear outflow. Establish purpose
-before choosing: the sign alone is insufficient. Transfers between accounts, debt or investment principal,
-purchase refunds and splits need human review. A payment labelled "transfer" can still be an ordinary expense
-when its purpose is clear.
+Choose a counterpart from the full supported catalogue using its type and the explicit roles in
+`budget_policy`. Establish purpose; the sign alone is insufficient. Use income or expense for established
+income, purchases or signed refunds; use configured investment assets for established contributions,
+configured liabilities for repayments known to contain no interest, and the configured Capital account for
+a confirmed gift received or given. A gift given credits Cash and debits configured Capital; it is
+automatically excluded from budget and income statement. Establish gift purpose before choosing Capital.
+Never guess account names or infer a new role from a name.
 
-Use catalogue purposes as defaults, subject to applicable guidance. When configured:
+A repayment with interest needs its principal/interest facts and a complete split through Review. Ask when
+the interest amount is unknown. New loan receipts, unmatched bank transfers, uncertain investment sales or
+withdrawals, and unknown asset/liability purposes require Review. A security purchase needs actual trade
+facts; a transfer to brokerage cash does not establish a purchase. A receipt from an investment must establish
+whether a sale is already recorded, or instead needs security units or confirmed fund valuation/basis.
 
-- Bless covers gifts, donations and church tithes, including Abide and IDMC.
-- Investment Return covers identifiable interest and investment income, not principal.
-- Tax Refund covers explicitly identified tax refunds; purchase refunds reverse the original expense.
-
-If purpose or treatment is unclear, return `needs_review` with a specific question. A marketplace name does
-not identify the purchase. Choose Other Income/Expense only for a known purpose outside more specific
-accounts; never use them to hide uncertainty.
+Use `needs_review` with one focused question when purpose, account or essential amounts are missing.
+Do not use a miscellaneous account to conceal uncertainty. Known purchase refunds reverse the original
+expense using their actual signed source amount.
 
 ## Human corrections: `review`
 
@@ -100,37 +104,30 @@ For a supplied `whole_account_investment`, `account_investment` can classify its
 treatment. Other kinds leave `cost_basis` null. A $100 net contribution has $100 cost even when gross income
 was $120. Fund gains normally use the configured `unrealised_gains_account` as counterpart; explicit human
 account choices remain authoritative. Do not infer contributions from all positive movements, infer missing
-opening cost or create fee/tax splits. Missing classification may remain null without blocking otherwise
-complete accounting. Preserve existing metadata when correcting other details.
+opening cost or create fee/tax splits. Missing classification, opening basis or withdrawal facts require a
+focused Review question. Preserve existing metadata when correcting other details.
 
-## Budget labels in human corrections
+## Deterministic budget policy
 
-Budget categories are reporting labels, separate from ledger accounts. Use only the supplied
-`budget_categories` keys. Ordinary income and expense accounts already have configured report mappings.
-Use the human's confirmed purpose to select a supported exception; they need not name a configuration key.
-Otherwise leave `budget_category` null and preserve labels on unchanged postings.
+Budget is a projection of supported posted cash movements, never an AI allocation. Return no budget labels,
+exclusions, pot splits or budget amounts. Historical labels and allocations are inert.
 
-- When the human identifies a received gift credited to Capital and the catalogue has exactly one compatible
-  gift income category, label that Capital credit with its key. "This was a gift; increase Capital, not income
-  accounts" is sufficient: the ledger account stays Capital while the budget records gift income. Honour an
-  explicit budget exclusion or `default` instead. Do not infer gifts from other Capital movements, opening
-  balances, transfers of existing money or bank wording alone. Clarify an ambiguous category choice.
-- An explicit savings allocation labels the receiving asset debit or debt-principal debit once. Do not label
-  both sides of an ordinary transfer. Debt principal and ordinary transfers stay unlabelled unless instructed.
-- The exception is a complete confirmed same-account `TRANSFER WITHIN` pair with an explicit move between
-  two different configured savings categories. Label the bank withdrawal's ledger credit with the source
-  category and the receipt's ledger debit with the destination. Preserve both full source amounts: the source
-  Actual decreases and the destination Actual increases, while bank balance and total savings stay unchanged.
-  Python confirms a unique pair with matching own-account routing, full trailing reference including leading
-  zeros, same statement date and equal opposite amounts; malformed or ambiguous evidence requires review.
-  Do not infer categories from the wording or label an unrequested move. With no labels the pair is neutral.
-  Fully tagged pairs may move prior-month savings and neither consume nor release current-month manual
-  allocation capacity. Ordinary allocations still require monthly capacity; no cumulative pot balance is known.
-- A savings withdrawal can label the corresponding asset credit or liability credit as a reversal.
-- Use `exclude` when the human excludes a posting from the budget; use `default` to remove an exception and
-  restore its ordinary configured treatment. Null retains an existing label during a correction; an explicit
-  different key replaces it. If the requested category is absent, ask for it to be
-  configured. Never invent a label or change accounting to make a report category fit.
+- Only configured ANZ cash-account legs enter the budget. Transfers between those accounts are neutral.
+- Cash paid into configured investment accounts is Investments. Full investment cash receipts join mapped
+  cash investment income in Investment returns, counted once and never as negative Investments. A later
+  withdrawal of already realised brokerage cash does not realise the sale gain again.
+- A configured liability's whole repayment, including principal and interest, belongs to its configured
+  expense category. Journal accounting still debits principal and interest separately. A card purchase
+  without a cash leg affects accounting but not budget; do not count it again before repayment.
+- A confirmed Capital gift paid into cash is Gift received. Opening balances are separately identified and
+  excluded by provenance. Do not relabel an opening as a gift or vice versa.
+- Cash credited against a debit to configured Capital is Gift given, excluded from budget. Do not post
+  ordinary purchases to Capital to force an exclusion.
+- Employer super is income in accounting but has no cash-account leg and no budget effect.
+- Savings is the remaining supported cash surplus after expenses and investments. There are no virtual pots,
+  per-posting overrides, exclusions or Borrowings. Unsupported or ambiguous flows need Review.
+- A security disposal and a balance-only fund withdrawal must use Manual's deterministic investment builders.
+  Do not approximate a disposal with a raw asset credit or invent a missing cost basis.
 
 ## Learning only: `learn_guidance`
 
@@ -140,6 +137,8 @@ contains only `case_ref`, `guidance` and `guidance_reason`, within the supplied 
 
 ## Reusable guidance for reviews and learning
 
+- Never learn or revive budget exclusions, budget labels, virtual pots or allocation rules. Learned hints
+  cannot override the supplied deterministic policy.
 - Derive guidance from human answers and event facts, never an AI classification alone. Preserve explicit
   treatment overrides when their scope is supported. Retain conditions and exceptions; a one-off purchase
   explanation does not establish a rule for every purchase from that merchant.

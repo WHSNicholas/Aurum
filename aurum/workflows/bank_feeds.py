@@ -23,7 +23,7 @@ from aurum.banking.redbark import RedbarkCancelled, RedbarkClient, redbark_histo
 from aurum.database.bank_feeds import (
     apply_feed_records, classify_feed_records, create_feed_tables, disconnect_feed, feed_snapshot,
     resolve_feed_conflict,
-    save_feed_settings, set_auto_sync, source_revision, transaction_from_feed,
+    save_feed_settings, source_revision, transaction_from_feed,
 )
 from aurum.database.transactions import load_transactions
 from aurum.finance.accounts import AccountRegistry, AccountType
@@ -38,8 +38,8 @@ def preview_connection(
     """
     Fetch and validate a proposed connection without saving mappings, bank evidence or credentials.
 
-    The returned private preview retains downloaded source facts and stale-input signatures. The GUI should
-    cache it behind an opaque token, displaying only account summaries and the explicit confirmation action.
+    The returned private preparation retains downloaded source facts and stale-input signatures. The final
+    explicit connection save runs this preparation internally before committing any credentials or sources.
     """
     _check_cancelled(cancelled)
     client.check_connection()
@@ -66,11 +66,11 @@ def preview_connection(
             "external_account_id": mapping["external_account_id"], "name": mapping["name"],
             "new_count": sum(item["kind"] == "new" for item in outcomes),
             "existing_count": sum(item["kind"] == "existing" for item in outcomes),
-            "conflict_count": sum(item["kind"] in {"duplicate", "changed"} for item in outcomes),
+            "conflict_count": sum(item["kind"] == "changed" for item in outcomes),
             "ignored_count": sum(item["kind"] == "ignored" for item in outcomes),
         })
     if source_revision(connection) != baseline:
-        raise ValueError("Saved bank sources changed during this preview. Preview the connection again.")
+        raise ValueError("Saved bank sources changed during checking. Save the connection again.")
     return result
 
 
@@ -88,9 +88,9 @@ def save_connection(
         if verify_configuration:
             verify_configuration()
         if _account_signature(accounts) != preview["account_signature"]:
-            raise ValueError("Account settings changed after this preview. Preview the connection again.")
+            raise ValueError("Account settings changed. Check the connection again before saving.")
         if source_revision(connection) != preview["source_revision"]:
-            raise ValueError("Saved bank sources changed after this preview. Preview the connection again.")
+            raise ValueError("Saved bank sources changed during checking. Save the connection again.")
         create_feed_tables(connection)
         save_feed_settings(
             connection, preview["mappings"], auto_sync=preview["auto_sync"],

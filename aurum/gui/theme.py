@@ -9,11 +9,13 @@ Apply saved report colours to one desktop workspace without changing its configu
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
 from pathlib import Path
+from decimal import Decimal
+from html import escape
 import re
 from tempfile import TemporaryDirectory
 
 from PySide6.QtCore import QEvent, QObject
-from PySide6.QtGui import QAction, QColor, QPalette
+from PySide6.QtGui import QAction, QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication, QAbstractButton, QAbstractSpinBox, QComboBox, QLabel, QLineEdit, QPlainTextEdit,
     QTextEdit, QWidget,
@@ -26,14 +28,15 @@ from aurum.gui.icons import (
 )
 
 # Keep budget meanings recognisable across every workspace theme.
-BUDGET_COLOURS = {"income": "#527ca3", "expense": "#ae6468", "savings": "#5e8a70"}
+BUDGET_COLOURS = {"income": "#527ca3", "expense": "#c94c5c", "savings": "#228b62"}
 
 _ASSETS = {}
 _OBSERVER = None
 _COLOUR_ROLES = {
     "page": "#f5f7f6",
     "surface": "#ffffff",
-    "panel": "#e7efeb #e3eeea #eaf1ed #edf3f0 #edf3ef #f5f8f6 #f0f4f1 #e9efeb #e6ede9",
+    "card": "#e7efeb",
+    "panel": "#e3eeea #eaf1ed #edf3f0 #edf3ef #f5f8f6 #f0f4f1 #e9efeb #e6ede9",
     "text": "#243b3b #31584e #2e5147",
     "heading": "#235b58 #204e48 #285f53 #365850 #355f58 #426d64 #456a5c",
     "muted": "#637a78 #65766e #4d7069 #47665d #536f64 #587469 #41655d #425f59 #7b8d87",
@@ -65,7 +68,7 @@ _LEGACY_ROLES = {colour: role for role, colours in _COLOUR_ROLES.items() for col
 # %% 1. Saved Theme Resolution -------------------------------------------------------------------------------
 def resolve_gui_theme(settings: ReportSettings) -> dict[str, str]:
     """
-    Derive serialisable GUI roles from the same selected appearance used by the PDF renderer.
+    Derive distinct desktop layers and clear controls from the selected report palette.
 
     This calculation is safe in a read-only workspace worker. Fixed themes ignore the shared mode switch,
     while budget charts keep their blue/red/green meanings independently of report palette overrides.
@@ -73,51 +76,69 @@ def resolve_gui_theme(settings: ReportSettings) -> dict[str, str]:
     theme, colours = settings.theme, settings.mode_colours
     if theme.fixed is not None:
         page, surface = theme.fixed.page, theme.fixed.surface
-        divider, group = theme.fixed.divider, theme.fixed.group
+        group = theme.fixed.group
     else:
         page = theme.dark_page if settings.dark_mode else theme.light_page
         surface = theme.dark_surface if settings.dark_mode else theme.light_surface
-        divider = theme.dark_divider if settings.dark_mode else theme.light_divider
         group = theme.dark_group if settings.dark_mode else theme.light_group
     if settings.colour_scheme == "sunset_hues":
-        # Desktop panels use the dusty rose palette shade; PDF group fills keep their saved colour.
+        # Dusty rose supplies desktop tints; the report's pale-yellow group fill stays in PDFs.
         group = theme.palette[min(3, len(theme.palette) - 1)]
     primary = theme.primary or theme.palette[0]
-    accent = theme.highlight or theme.palette[1]
-    table_header = theme.table_header or theme.palette[2]
     dark = _luminance(page) < 0.18
-    panel = _composite(group, surface) if group else _mix(surface, primary, 0.12 if dark else 0.07)
-    text = _readable(colours.text, (page, surface, panel))
-    muted = _readable(colours.muted, (page, surface, panel))
-    heading = _readable(colours.heading_text or primary, (page, surface, panel))
-    selected = _mix(surface, accent, 0.28 if dark else 0.18)
+    # Keep controls light while letting cards carry the palette instead of whitening every layer.
+    surface = _mix(page, surface, 0.55) if dark else _mix("#ffffff", surface, 0.60)
+    if settings.colour_scheme == "sunset_hues":
+        surface = _mix("#ffffff", group, 0.08)
+        page = _mix("#ffffff", group, 0.10)
+    tint = _composite(group, surface) if group else theme.palette[2]
+    card = _card_surface(surface, tint, page, 0.12 if dark else 0.55 if group else 0.18)
+    panel = _mix(surface, tint, 0.20 if dark else 0.42 if group else 0.12)
+    table_header = _mix(surface, primary, 0.16 if dark else 0.07)
+    selected = _mix(surface, theme.highlight or primary, 0.26 if dark else 0.18)
+    hover = _mix(surface, theme.highlight or primary, 0.12 if dark else 0.07)
+    focus = _mix(surface, theme.highlight or primary, 0.32 if dark else 0.23)
+    backgrounds = (page, surface, card, panel, table_header, hover, selected, focus)
+    text = _readable(colours.text, backgrounds)
+    muted = _readable(colours.muted, backgrounds)
+    heading = _readable(colours.heading_text or primary, backgrounds)
+    accent = primary
+    on_accent = _readable(colours.on_primary, (accent,))
+    accent_hover = _interaction_surface(accent, on_accent, 0.10)
+    accent_focus = _interaction_surface(accent, on_accent, 0.20)
     sidebar = primary
     sidebar_text = _readable(colours.on_primary, (sidebar,))
-    warning_bg = colours.draft_bg
+    sidebar_hover = _interaction_surface(sidebar, sidebar_text, 0.08)
+    sidebar_selected = _interaction_surface(sidebar, sidebar_text, 0.16)
+    warning_bg = _mix(surface, tint, 0.78) if settings.colour_scheme == "sunset_hues" else (
+        _mix(surface, colours.draft_border, 0.22) if dark else _mix(surface, colours.draft_bg, 0.55)
+    )
     roles = {
         "name": settings.colour_scheme, "dark": "true" if dark else "false",
-        "page": page, "surface": surface, "panel": panel, "text": text, "muted": muted,
-        "heading": heading, "icon": _readable(colours.icon or heading, (page, surface, panel)),
-        "accent": accent, "on_accent": _readable(colours.on_highlight, (accent,)),
-        "accent_hover": _mix(accent, "#ffffff" if dark else "#000000", 0.12),
+        "page": page, "surface": surface, "card": card, "panel": panel, "text": text, "muted": muted,
+        "heading": heading, "icon": _readable(colours.icon or heading, backgrounds),
+        "accent": accent, "on_accent": on_accent,
+        "accent_hover": accent_hover, "accent_focus": accent_focus,
         "accent_disabled": _mix(surface, accent, 0.45),
-        "border": divider, "hover": _mix(surface, accent, 0.14),
+        "border": _mix(surface, text, 0.18 if dark else 0.14),
+        "control_border": _readable(_mix(surface, text, 0.28), (surface,), minimum=3),
+        "hover": hover, "focus": focus,
         "selected": selected, "on_selected": _readable(text, (selected,)),
-        "alternate": _mix(surface, primary, 0.04),
+        "alternate": _mix(surface, primary, 0.025),
         "sidebar": sidebar, "sidebar_text": sidebar_text,
         "sidebar_muted": _readable(_mix(sidebar_text, sidebar, 0.25), (sidebar,)),
-        "sidebar_hover": _mix(sidebar, sidebar_text, 0.10),
-        "sidebar_selected": _mix(sidebar, sidebar_text, 0.18),
+        "sidebar_hover": sidebar_hover, "sidebar_selected": sidebar_selected,
         "table_header": table_header,
-        "on_table_header": _readable(colours.on_table_header, (table_header,)),
+        "on_table_header": _readable(muted, (table_header,)),
         "disabled": _mix(text, surface, 0.52), "disabled_bg": _mix(surface, page, 0.55),
         "scroll": _mix(surface, text, 0.25), "scroll_hover": _mix(surface, text, 0.45),
         "positive": _readable(colours.positive, (page, surface)),
         "negative": _readable(colours.negative, (page, surface)),
         "success_bg": _mix(surface, colours.positive, 0.15),
         "danger_bg": _mix(surface, colours.negative, 0.15),
-        "warning_bg": warning_bg, "warning_text": _readable(colours.draft_text, (warning_bg, page)),
-        "warning_border": colours.draft_border,
+        "warning_bg": warning_bg,
+        "warning_text": _readable(colours.draft_text, (warning_bg, page, surface)),
+        "warning_border": _mix(warning_bg, colours.draft_border, 0.35),
         "budget_income": BUDGET_COLOURS["income"], "budget_expenses": BUDGET_COLOURS["expense"],
         "budget_savings": BUDGET_COLOURS["savings"],
     }
@@ -130,6 +151,38 @@ def gui_colour(widget: QObject | None, role: str, fallback: str = "#355653") -> 
     """
     theme = _owning_theme(widget)
     return str(theme.get(role, fallback))
+
+
+def monetary_font(base: QFont) -> QFont:
+    """
+    Use the report's numeric face while retaining a monetary control's existing size and weight.
+    """
+    font = QFont(base)
+    font.setFamily("Geist Mono")
+    return font
+
+
+def monetary_html(value: str) -> str:
+    """
+    Style one known monetary value inside a mixed label without changing the surrounding body text.
+    """
+    return '<span style="font-family: Geist Mono">' + escape(value) + '</span>'
+
+
+def monetary_text(value: object) -> str:
+    """
+    Display read-only table amounts with two decimals while retaining empty and unavailable values.
+    """
+    if value is None or value == "":
+        return ""
+    text = str(value)
+    try:
+        amount = Decimal(text.replace("\u202f", "").replace("\u00a0", ""))
+        if not amount.is_finite():
+            return "—"
+    except ArithmeticError:
+        return text
+    return format(amount, ",.2f").replace(",", "\u202f") if "\u202f" in text else format(amount, ".2f")
 
 
 # %% 2. Workspace Application --------------------------------------------------------------------------------
@@ -169,10 +222,11 @@ def theme_stylesheet(theme: dict[str, str]) -> str:
     source = (Path(__file__).parent / "style.qss").read_text(encoding="utf-8")
     headings = (
         "pageTitle", "workspacePageTitle", "overviewTitle", "setupTitle", "viewerTitle",
-        "overviewSection", "setupSectionTitle", "configCollectionTitle", "configDetailTitle",
-        "catalogueDetailTitle", "budgetSection", "workspaceSection",
+        "setupSectionTitle", "configCollectionTitle", "configDetailTitle",
+        "budgetSection", "workspaceSection",
     )
     selectors = ", ".join(f"QLabel#{name}" for name in headings)
+    selectors += ', QLabel[headingLevel="2"], QLabel[headingLevel="3"]'
     return _themed_styles(source, theme) + f"\n{selectors} {{ color: {theme['heading']}; }}\n"
 
 
@@ -248,6 +302,13 @@ def _refresh_widget(widget: QWidget, theme: dict[str, str], *, template_owner: Q
             sidebar = True
             break
         parent = parent.parentWidget()
+    if sidebar and isinstance(widget, QLineEdit) and widget.objectName() == "sidebarOwner":
+        palette = widget.palette()
+        palette.setColor(QPalette.ColorRole.Text, QColor(theme["sidebar_text"]))
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(theme["sidebar_muted"]))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(theme["sidebar_selected"]))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(theme["sidebar_text"]))
+        widget.setPalette(palette)
     role = str(widget.property("aurumIconRole") or (
         "sidebar_text" if sidebar else "on_accent" if widget.property("primary") else "icon"
     ))
@@ -327,32 +388,51 @@ def _style_colour(selector: str, declaration: str, colour: str, theme: dict[str,
     """
     Distinguish shared white/teal literals used on buttons, sidebars, tables and ordinary surfaces.
     """
+    if "#setupPalettePill" in selector and declaration == "background":
+        # Palette chips need a neutral backing even when the chosen theme uses their colour for cards.
+        return "#ffffff"
+    if "#sidebarFooterDivider" in selector and declaration == "background":
+        return _mix(theme["sidebar"], theme["sidebar_text"], 0.24)
     foreground = declaration in {"color", "selection-color"}
     if declaration == "selection-background-color":
         return theme["selected"]
     if declaration == "selection-color":
         return theme["on_selected"]
-    if '#overviewNext[complete="true"]' in selector or '#overviewStage[tone="done"]' in selector:
+    if '#overviewStage[tone="done"]' in selector:
         return theme["sidebar_text" if foreground else "sidebar"]
+    if "#overviewStage" in selector and declaration == "background":
+        return theme["panel"]
     sidebar = any(name in selector for name in (
-        "#sidebar", "#navigation", "#brand", "#tagline", "#workspaceLabel", "#ownerLabel", "#openWorkspace",
+        "#sidebar", "#navigation", "#brand", "#tagline", "#sidebarOwner",
     ))
     if sidebar or "QToolTip" in selector:
         if foreground:
             return theme["sidebar_muted" if any(name in selector for name in (
-                "#tagline", "#workspaceLabel", "#sidebarQuoteAttribution", ":disabled",
+                "#tagline", "#sidebarQuoteAttribution", ":disabled",
             )) else "sidebar_text"]
         return theme["sidebar_selected" if ":selected" in selector or ":pressed" in selector else
                      "sidebar_hover" if ":hover" in selector or ":focus" in selector else "sidebar"]
     if "QHeaderView" in selector:
         role = "on_table_header" if foreground else "border" if "border" in declaration else "table_header"
         return theme[role]
-    primary = 'primary="true"' in selector or selector.strip() == "QTabBar::tab:selected" or (
+    filled_tab = "QTabBar" in selector and "::tab:selected" in selector and not any(
+        name in selector for name in (
+            "#setupTabs", "#statementTabs", "#manualTabs", "#caseTabs", "#reportsTabs",
+        )
+    )
+    primary = 'primary="true"' in selector or filled_tab or (
         "QCheckBox::indicator:checked" in selector
     )
     if primary:
         return theme["on_accent" if foreground else "accent_disabled" if ":disabled" in selector else
-                     "accent_hover" if ":hover" in selector or ":focus" in selector else "accent"]
+                     "accent_focus" if ":focus" in selector else "accent_hover" if ":hover" in selector
+                     else "accent"]
+    if not foreground and ":focus" in selector:
+        return theme["icon" if "border" in declaration else "focus"]
+    if "border" in declaration and any(name in selector for name in (
+        "QLineEdit", "QPlainTextEdit", "QTextEdit", "QDateEdit", "QSpinBox", "QDoubleSpinBox",
+    )) and ":disabled" not in selector:
+        return theme["control_border"]
     key = colour.lower()
     if key in {"white", "#ffffff"}:
         return theme["text" if foreground else "surface"]
@@ -427,17 +507,41 @@ def _contrast(first: str, second: str) -> float:
     return (max(a, b) + .05) / (min(a, b) + .05)
 
 
-def _readable(colour: str, backgrounds: tuple[str, ...]) -> str:
+def _card_surface(surface: str, tint: str, page: str, weight: float) -> str:
     """
-    Retain configured text where readable, otherwise move its shade toward the better neutral endpoint.
+    Retain a visible palette tint while separating broad cards from the surrounding canvas.
     """
-    if min(_contrast(colour, background) for background in backgrounds) >= 4.5:
+    candidate = _mix(surface, tint, weight)
+    endpoint = "#ffffff" if _luminance(page) < 0.18 else "#000000"
+    for step in range(11):
+        adjusted = _mix(candidate, endpoint, step * 0.02)
+        if _contrast(adjusted, page) >= 1.2:
+            return adjusted
+    return adjusted
+
+
+def _interaction_surface(surface: str, foreground: str, weight: float) -> str:
+    """
+    Highlight a control without reducing the foreground's contrast below readable body text.
+    """
+    candidate = _mix(surface, foreground, weight)
+    if _contrast(candidate, foreground) >= 4.5:
+        return candidate
+    endpoint = "#000000" if _luminance(foreground) > 0.5 else "#ffffff"
+    return _mix(surface, endpoint, weight)
+
+
+def _readable(colour: str, backgrounds: tuple[str, ...], *, minimum: float = 4.5) -> str:
+    """
+    Retain a configured shade when its contrast is sufficient, otherwise move toward the better endpoint.
+    """
+    if min(_contrast(colour, background) for background in backgrounds) >= minimum:
         return colour
     target = max(("#ffffff", "#000000"), key=lambda value: min(
         _contrast(value, background) for background in backgrounds
     ))
     for step in range(1, 21):
         candidate = _mix(colour, target, step / 20)
-        if min(_contrast(candidate, background) for background in backgrounds) >= 4.5:
+        if min(_contrast(candidate, background) for background in backgrounds) >= minimum:
             return candidate
     return target

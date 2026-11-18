@@ -224,23 +224,17 @@ def disconnect_feed(connection: sqlite3.Connection, expected_revision: str) -> d
 # %% 2. Importing And Resolving Evidence ---------------------------------------------------------------------
 def classify_feed_records(connection: sqlite3.Connection, mapping: dict, records: list[dict]) -> list[dict]:
     """
-    Compare a validated account observation with saved IDs and possible handover duplicates.
+    Identify repeated or changed observations by provider identity, accepting each unseen ID separately.
+
+    Equal amounts, descriptions and overlapping dates do not establish that two bank records are the same.
     """
-    saved = [item for item in load_transactions(connection) if str(item.account_id) == mapping["account_id"]]
     links = {
         row[0]: (row[1], json.loads(row[2])) for row in connection.execute(
             "SELECT external_transaction_id, transaction_id, accepted_payload "
             "FROM bank_feed_transactions WHERE external_account_id = ?", (mapping["external_account_id"],),
         )
     } if _has_tables(connection) else {}
-    existing_conflicts = {
-        row[0]: (row[1], json.loads(row[2])) for row in connection.execute(
-            "SELECT external_transaction_id, kind, payload FROM bank_feed_conflicts "
-            "WHERE external_account_id = ?", (mapping["external_account_id"],),
-        )
-    } if _has_tables(connection) else {}
     handover = date.fromisoformat(mapping["handover_date"])
-    previous_feed = feed_snapshot(connection)["provenance"]
     seen = {}
     result = []
     for payload in records:
@@ -260,23 +254,7 @@ def classify_feed_records(connection: sqlite3.Connection, mapping: dict, records
         if item.date < handover:
             result.append({"kind": "ignored", "payload": payload, "candidates": []})
             continue
-        purchase = date.fromisoformat(payload["date"])
-        candidates = [
-            str(other.transaction_id) for other in saved if other.amount == item.amount and (
-                (other.date == item.date and _normalise(other.description) == _normalise(item.description))
-                or (purchase < handover <= item.date and purchase <= other.date < handover)
-                or (
-                    str(other.transaction_id) in previous_feed
-                    and _dates_overlap(purchase, item.date, other, previous_feed[str(other.transaction_id)])
-                )
-            )
-        ]
-        previous = existing_conflicts.get(external_id)
-        if previous and _economic_facts(previous[1]) == signature and previous[0] == "duplicate":
-            kind = "duplicate"
-        else:
-            kind = "duplicate" if candidates else "new"
-        result.append({"kind": kind, "payload": payload, "candidates": candidates})
+        result.append({"kind": "new", "payload": payload, "candidates": []})
     return result
 
 
@@ -290,7 +268,7 @@ def apply_feed_records(
     counts = {"new_count": 0, "existing_count": 0, "conflict_count": 0, "ignored_count": 0}
     for outcome in outcomes:
         kind, payload = outcome["kind"], outcome["payload"]
-        if kind in {"duplicate", "changed"}:
+        if kind == "changed":
             counts["conflict_count"] += 1
             _save_conflict(connection, mapping, outcome)
         elif kind == "new":
@@ -300,12 +278,14 @@ def apply_feed_records(
             counts["new_count"] += 1
         elif kind == "existing":
             counts["existing_count"] += 1
+        else:
+            counts["ignored_count"] += 1
+        if kind in {"new", "existing"}:
+            # Successful imports also clear warnings retained from the former similarity check.
             connection.execute(
                 "DELETE FROM bank_feed_conflicts WHERE external_account_id = ? "
                 "AND external_transaction_id = ?", (mapping["external_account_id"], payload["id"]),
             )
-        else:
-            counts["ignored_count"] += 1
     unresolved = connection.execute(
         "SELECT COUNT(*) FROM bank_feed_conflicts WHERE external_account_id = ?",
         (mapping["external_account_id"],),
@@ -322,13 +302,12 @@ def apply_feed_records(
 
 def resolve_feed_conflict(
     connection: sqlite3.Connection, conflict_id: str, revision: str, action: str,
-    transaction_id: str | None = None,
 ) -> dict:
     """
     Resolve an explicitly selected observation without rewriting source facts or journal entries.
 
-    Link confirms an existing source; import confirms a distinct event. Keep acknowledges changed provider
-    facts while retaining the saved source. A stale conflict rejects the complete decision.
+    Import releases a record held by the retired duplicate check. Keep acknowledges changed provider facts
+    while retaining the saved source. A stale conflict rejects the complete decision.
     """
     _begin(connection)
     with connection:
@@ -349,21 +328,12 @@ def resolve_feed_conflict(
                 "AND external_transaction_id = ?",
                 (_json(payload), mapping["external_account_id"], payload["id"]),
             )
-        elif action == "link":
-            if transaction_id not in conflict["candidates"]:
-                raise ValueError("Choose one of this conflict's existing transaction candidates.")
-            source = next((item for item in load_transactions(connection)
-                           if str(item.transaction_id) == transaction_id), None)
-            observed = transaction_from_feed(mapping, payload)
-            if source is None or source.account_id != observed.account_id or source.amount != observed.amount:
-                raise ValueError("The chosen source no longer matches this account and signed amount.")
-            _link_transaction(connection, mapping, payload, transaction_id)
         elif action == "import":
             item = transaction_from_feed(mapping, payload)
             _insert_transaction(connection, item)
             _link_transaction(connection, mapping, payload, str(item.transaction_id))
         else:
-            raise ValueError("Choose an existing transaction or confirm a distinct new transaction.")
+            raise ValueError("Import this held transaction as a separate bank record.")
         connection.execute("DELETE FROM bank_feed_conflicts WHERE id = ?", (conflict_id,))
         remaining = connection.execute(
             "SELECT COUNT(*) FROM bank_feed_conflicts WHERE external_account_id = ?",
@@ -529,30 +499,15 @@ def _save_conflict(connection: sqlite3.Connection, mapping: dict, outcome: dict)
 
 def _economic_facts(payload: dict) -> tuple:
     """
-    Compare bank evidence while ignoring mutable enrichment categories and display timestamps.
+    Compare validated bank facts without treating text casing or numeric presentation as a change.
     """
+    amount = payload.get("amount") or {}
     return (
         payload.get("account"), payload.get("date"), payload.get("post_date"), payload.get("value_date"),
-        payload.get("description"), _json(payload.get("amount")), payload.get("direction"),
-        payload.get("reference"), payload.get("extended_description"),
-    )
-
-
-def _normalise(value: str) -> str:
-    """
-    Compare whitespace only when identifying a possible duplicate for explicit human review.
-    """
-    return " ".join(value.split())
-
-
-def _dates_overlap(purchase: date, posted: date, saved: Transaction, evidence: dict) -> bool:
-    """
-    Flag a possible replacement provider ID even when its wording or posting date changed.
-    """
-    old_purchase = date.fromisoformat(evidence["date"])
-    old_posted = date.fromisoformat(evidence.get("post_date") or evidence["date"])
-    return max(min(purchase, posted), min(old_purchase, old_posted, saved.date)) <= min(
-        max(purchase, posted), max(old_purchase, old_posted, saved.date),
+        str(payload.get("description") or "").casefold(),
+        (Decimal(str(amount["amount"])), str(amount.get("currency", "")).casefold()),
+        payload.get("direction"), payload.get("reference"),
+        str(payload.get("extended_description") or "").casefold(),
     )
 
 

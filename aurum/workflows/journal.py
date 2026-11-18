@@ -6,8 +6,8 @@
 Aurum turns imported bank transactions and saved human instructions into balanced journal events.
 
 The desktop Process action applies saved manual instructions and review answers
-before ordinary categorisation, matches clear bank transfers locally, and allocates virtual savings after
-accounting is complete. Existing storage validates complete events and retains retryable request history.
+before ordinary categorisation and matches clear bank transfers locally. Deterministic cash-flow rules
+validate supported events; existing storage retains complete accounting and retryable request history.
 
 Processing uses the selected reporting month while preserving complete linked events and checking wider
 evidence for ambiguity. Snapshots expose saved facts without making AI calls merely to display a page.
@@ -16,10 +16,9 @@ evidence for ambiguity. Snapshots expose saved facts without making AI calls mer
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack
 from pathlib import Path
-import re
 import sqlite3
 from uuid import UUID
 
@@ -37,13 +36,13 @@ from aurum.database.journal import (
 from aurum.database.transactions import load_transactions
 from aurum.database.memory import load_explicit_memory
 from aurum.database.manual import (
-    load_manual_entries, manual_claims, manual_context_revision, manual_owner_ids,
+    load_manual_entries, manual_claims, manual_context_revision, manual_owner_ids, manual_response_token,
 )
 from aurum.finance.accounts import Account, AccountRegistry, AccountType
-from aurum.finance.budget import BudgetSettings
-from aurum.finance.journal import JournalEntry, JournalLine
+from aurum.finance.budget import BudgetSettings, project_budget_entry
+from aurum.finance.journal import AccountInvestmentDetails, JournalEntry, JournalLine
 from aurum.finance.securities import SecurityRegistry
-from aurum.finance.transaction import Transaction
+from aurum.finance.transaction import Transaction, match_transfers as _match_transfers
 from aurum.database.reviews import (
     load_active_guidance,
     load_review_cases, load_review_baselines, load_review_answers, review_display_versions,
@@ -85,7 +84,7 @@ def process_journal(
         model: Explicit ChatGPT model slug; an unavailable model raises an error.
         retry_errors: Allow failed or interrupted requests to be attempted again.
         securities: Configured instruments; None leaves investment posting unavailable for library calls.
-        budget: Optional category catalogue for explicit gift and savings labels supplied through review.
+        budget: Shared cash-flow roles and deterministic categories used to validate automatic posting.
         quote_fetcher: Optional synthetic market provider used by isolated checks.
         client_factory: Connection factory, replaceable with a synthetic client for local checks.
         progress: Optional callback for brief stage messages; library calls are quiet by default.
@@ -109,7 +108,7 @@ def process_journal(
         else len(posted_transaction_ids(connection)),
         "requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
         "reviews_applied": 0, "review_questions": 0, "review_failed": 0,
-        "manual_posted": 0, "manual_questions": 0, "manual_failed": 0, "savings_applied": 0,
+        "manual_posted": 0, "manual_questions": 0, "manual_failed": 0,
     }
     if cancelled and cancelled():
         counts["stopped"] = 1
@@ -163,15 +162,9 @@ def process_journal(
         _process_transactions(
             connection, accounts, get_client, counts, model=model, skill=skill,
             retry_errors=retry_errors, blocked=session.blocked | manual_session.blocked, progress=report,
-            transaction_ids=source_ids, cancelled=cancelled,
+            transaction_ids=source_ids, cancelled=cancelled, budget=budget,
+            report_settings=report_settings,
         )
-        if not (cancelled and cancelled()):
-            process_manuals(
-                connection, accounts, manual_session, get_client, counts, model=model,
-                skill=manual_skill, retry_errors=retry_errors, savings_only=True,
-                securities=securities, budget=budget, quote_fetcher=quote_fetcher, progress=report,
-                cancelled=cancelled,
-            )
     counts["manual_local_questions"] = len(manual_session.messages)
     counts["stopped"] = int(bool(cancelled and cancelled()))
     if period is not None:
@@ -192,6 +185,7 @@ def learn_from_reviews(
     client_factory: Callable[[], AbstractContextManager[ChatGPTConnection]] = connect,
     progress: Callable[[str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    budget: BudgetSettings | None = None,
 ) -> dict[str, int]:
     """
     Backfill learning outcomes from accepted reviews while keeping saved accounting and responses unchanged.
@@ -216,7 +210,7 @@ def learn_from_reviews(
 
             process_guidance(
                 connection, accounts, get_client, counts, model=model, skill=skill, retry_errors=retry_errors,
-                progress=progress, cancelled=cancelled,
+                progress=progress, cancelled=cancelled, budget=budget,
             )
     finally:
         export_guidance(connection, guidance_path)
@@ -328,12 +322,14 @@ def journal_snapshot(
             "manual_entry_id": str(submission.id), "date": submission.date.isoformat(),
             "entry_mode": "direct" if outcome is not None and outcome.origin == "human" else "instruction",
             "is_savings": bool(record.get("is_savings")),
+            "retired": bool(record.get("is_savings")),
             "instruction": submission.instruction, "human_response": submission.human_response,
             "source_transactions": [str(identifier) for identifier in submission.source_transactions],
             "status": "needs_review" if submission.id in manual_session.messages else record["status"],
             "question": manual_session.messages.get(submission.id, record["question"] or ""),
             "error": record["error"] or "",
             "context_revision": manual_context_revision(connection, submission.id, accounts),
+            "answer_token": manual_response_token(record),
             "journal_entry_id": str(entry.id) if entry else "",
             "postings": _posting_rows(entry, by_account) if entry else [],
         })
@@ -465,6 +461,7 @@ def _process_transactions(
     blocked: set[UUID],
     progress: Callable[[str], None] | None = None,
     transaction_ids: set[UUID] | None = None, cancelled: Callable[[], bool] | None = None,
+    budget: BudgetSettings | None = None, report_settings: ReportSettings | None = None,
 ) -> None:
     """
     Match and classify sources that are not waiting on a human review, preserving existing safeguards.
@@ -545,7 +542,8 @@ def _process_transactions(
         client = client_provider()
         _classify_transactions(
             connection, work, accounts, client, counts, posted, model=model, retry_errors=retry_errors,
-            skill=skill, progress=report, cancelled=cancelled,
+            skill=skill, progress=report, cancelled=cancelled, budget=budget,
+            report_settings=report_settings,
         )
 
 
@@ -561,6 +559,7 @@ def _classify_transactions(
     retry_errors: bool,
     skill: Skill,
     progress: Callable[[str], None] | None = None, cancelled: Callable[[], bool] | None = None,
+    budget: BudgetSettings | None = None, report_settings: ReportSettings | None = None,
 ) -> None:
     """
     Save each complete classification batch and its accounting entries atomically.
@@ -584,7 +583,7 @@ def _classify_transactions(
         try:
             decisions, usage = classify_batch(
                 client, batch, accounts, skill=skill, guidance=load_active_guidance(connection),
-                explicit_memory=load_explicit_memory(connection),
+                explicit_memory=load_explicit_memory(connection), budget=budget,
             )
         except (ChatGPTError, ValueError, OSError) as error:
             record_usage(counts, getattr(error, "usage", {}))
@@ -604,13 +603,37 @@ def _classify_transactions(
             break
 
         batch_rows = {row.transaction_id: row for row in batch}
-        entries = {
-            decision.transaction_id: _classification_entry(
-                batch_rows[decision.transaction_id], decision, accounts,
-            )
-            for decision in decisions if decision.status == "classified"
-        }
-        save_categorisation_batch(connection, decisions, entries, accounts)
+        entries = {}
+        validated = []
+        for decision in decisions:
+            if decision.status != "classified":
+                validated.append(decision)
+                continue
+            row = batch_rows[decision.transaction_id]
+            selected = next(item for item in accounts.accounts.values() if item.id == decision.account_id)
+            question = None
+            if budget is not None and selected.key in budget.investment_accounts and (
+                report_settings is None or selected.key not in report_settings.account_investments
+            ):
+                question = (
+                    "Is this a transfer to brokerage cash or a security purchase? "
+                    "Confirm the account and actual units or trade facts in Manual."
+                )
+            entry = _classification_entry(row, decision, accounts, budget=budget)
+            issues = project_budget_entry(entry, accounts, budget).issues if budget is not None else ()
+            if issues:
+                question = " ".join(issue.message for issue in issues)
+            if question:
+                validated.append(Decision(
+                    transaction_id=row.transaction_id, status="needs_review", model=model,
+                    prompt_version=skill.version, reason="This movement needs supported accounting facts.",
+                    question=question,
+                ))
+            else:
+                entries[decision.transaction_id] = entry
+                validated.append(decision)
+        decisions = validated
+        save_categorisation_batch(connection, decisions, entries, accounts, budget=budget)
         record_usage(counts, usage)
         counts["entries_created"] += len(entries)
         counts["linked_sources"] += len(entries)
@@ -627,208 +650,6 @@ def _check_sources(transactions: list[Transaction], accounts: dict[UUID, Account
             raise ValueError("Every pending transaction needs a configured asset bank account.")
 
 
-def _match_transfers(
-    transactions: list[Transaction], accounts: dict[UUID, Account],
-    *, evidence: Mapping[str, Mapping[str, object]] | None = None,
-) -> tuple[list[tuple[Transaction, Transaction]], set[UUID]]:
-    """
-    Find uniquely paired internal transfers and identify all rows needing internal-transfer handling.
-
-    A pair first needs the same complete trailing # reference. Its two descriptions must identify reciprocal
-    BSB/account tuples, with TRANSFER TO on the outgoing row and TRANSFER FROM on the incoming row. Amounts
-    must be opposite, source banks distinct and statement dates within three calendar days. Every pending
-    row participates in the uniqueness check, including reviews that cannot themselves be posted.
-
-    TRANSFER WITHIN is a separate same-account rule: both rows must name their own configured bank details,
-    share the complete reference and statement date, and carry equal opposite amounts. Both source rows
-    remain journal postings on that bank account; their total is zero.
-
-    Known internal movements with missing or conflicting details remain in review. Equal amounts alone
-    never substitute for a missing transfer reference. Effective dates do not change matching or event dates.
-    Feed evidence can supply a complete ANZ route and trailing reference in extended_description. It never
-    replaces source wording, combines separate partial fields, or treats a provider reference as an ANZ #.
-
-    Returns:
-        Outgoing/incoming pairs, and IDs of every identified or potentially matched internal movement.
-    """
-    bank_accounts = [
-        account for account in accounts.values()
-        if account.account_type == AccountType.ASSET and account.bank_details is not None
-    ]
-    bank_ids = {account.id for account in bank_accounts}
-    identifiers: dict[tuple[str, str], set[UUID]] = {}
-    numbers: set[str] = set()
-    for account in bank_accounts:
-        details = account.bank_details
-        if details is not None:
-            identifiers.setdefault((details.bsb, details.account_number), set()).add(account.id)
-            numbers.add(details.account_number)
-
-    grouped: dict[str, list[Transaction]] = {}
-    counterparts: dict[UUID, UUID] = {}
-    within_mentions, within_routes = set(), set()
-    internal = set()
-    for row in transactions:
-        if row.account_id not in bank_ids:
-            continue
-        source = (evidence or {}).get(str(row.transaction_id), {})
-        extended = source.get("extended_description")
-        descriptions = (row.description,)
-        if isinstance(extended, str) and extended.strip() and extended != row.description:
-            descriptions += (extended,)
-        # Observe each original field separately. Partial bank fields must never manufacture a full route.
-        description = _transfer_route_text(descriptions)
-        # Recognise own-account mentions even when their format is too uncertain for automatic matching.
-        for wording in descriptions:
-            transfer_word = re.search(r"\bTRANSFER\b", wording, re.IGNORECASE)
-            known_number = transfer_word is not None and any(
-                re.search(r"(?<!\w)" + r"[ \t-]*".join(number) + r"(?!\w)", wording)
-                for number in numbers
-            )
-            if known_number or _names_internal_account(row, bank_accounts, description=wording):
-                internal.add(row.transaction_id)
-            if source and transfer_word:
-                # An API transfer with insufficient routing needs a human rather than inferred categories.
-                internal.add(row.transaction_id)
-            if re.search(r"\bTRANSFER\s+WITHIN\b", wording, re.IGNORECASE):
-                within_mentions.add(row.transaction_id)
-                internal.add(row.transaction_id)
-        references = {
-            reference for wording in descriptions
-            if (reference := _wording_reference(wording)) is not None
-        }
-        # Conflicting observations still participate in ambiguity checks for every reference they name.
-        for reference in references:
-            grouped.setdefault(reference, []).append(row)
-        if description is None:
-            continue
-        if row.transaction_id in within_mentions:
-            route = re.fullmatch(
-                r"TRANSFER\s+WITHIN\s+([0-9]{6})\s*-\s*([0-9]+)\s+#[0-9]+\s*",
-                description, re.IGNORECASE,
-            )
-            if (
-                route is not None and row.amount != 0
-                and identifiers.get((route[1], route[2])) == {row.account_id}
-            ):
-                within_routes.add(row.transaction_id)
-            continue
-        routes = re.findall(
-            r"\bTRANSFER\s+(FROM|TO)\s+([0-9]{6})\s*-\s*([0-9]+)(?!\w)",
-            description, re.IGNORECASE,
-        )
-        if len(routes) != 1:
-            continue
-        direction, bsb, number = routes[0]
-        owners = identifiers.get((bsb, number), set())
-        if len(owners) != 1 or row.amount == 0:
-            continue
-        expected_direction = "TO" if row.amount < 0 else "FROM"
-        if direction.upper() == expected_direction:
-            counterparts[row.transaction_id] = next(iter(owners))
-
-    neighbours: dict[UUID, list[Transaction]] = {row.transaction_id: [] for row in transactions}
-    for rows in grouped.values():
-        if any(row.transaction_id in internal for row in rows):
-            internal.update(row.transaction_id for row in rows)
-        for index, first in enumerate(rows):
-            for second in rows[index + 1:]:
-                if (
-                    first.amount == 0 or first.amount != -second.amount
-                    or abs((first.date - second.date).days) > 3
-                ):
-                    continue
-                if first.account_id == second.account_id and (
-                    first.date != second.date
-                    or not {first.transaction_id, second.transaction_id} & within_mentions
-                ):
-                    continue
-                # A shared reference and matching cash movement can reveal an incomplete internal transfer.
-                internal.update((first.transaction_id, second.transaction_id))
-                # Count plausible counterparts before route validation, including malformed or protected rows.
-                neighbours[first.transaction_id].append(second)
-                neighbours[second.transaction_id].append(first)
-
-    pairs = []
-    for outgoing in transactions:
-        if outgoing.amount >= 0 or len(neighbours[outgoing.transaction_id]) != 1:
-            continue
-        incoming = neighbours[outgoing.transaction_id][0]
-        within_pair = (
-            outgoing.account_id == incoming.account_id
-            and {outgoing.transaction_id, incoming.transaction_id} <= within_routes
-        )
-        between_pair = (
-            outgoing.account_id != incoming.account_id
-            and counterparts.get(outgoing.transaction_id) == incoming.account_id
-            and counterparts.get(incoming.transaction_id) == outgoing.account_id
-        )
-        if (
-            len(neighbours[incoming.transaction_id]) == 1
-            and (within_pair or between_pair)
-        ):
-            pairs.append((outgoing, incoming))
-    return pairs, internal
-
-
-def _transfer_route_text(descriptions: tuple[str, ...]) -> str | None:
-    """
-    Choose one complete original field only when its reference, direction and route are uncontradicted.
-
-    A provider payment reference is not supplied here: it is not guaranteed to be ANZ's trailing # value.
-    Returning text only for matching leaves both saved source objects and resulting journal lines unchanged.
-    """
-    references, directions, routes = set(), set(), set()
-    candidates = []
-    for description in descriptions:
-        observed = re.findall(r"(?<!\w)#([0-9]+)(?!\w)", description)
-        if len(observed) > 1:
-            return None
-        references.update(observed)
-        directions.update(
-            match.upper() for match in re.findall(
-                r"\bTRANSFER\s+(FROM|TO|WITHIN)\b", description, re.IGNORECASE,
-            )
-        )
-        matches = re.findall(
-            r"\bTRANSFER\s+(FROM|TO|WITHIN)\s+([0-9]{6})\s*-\s*([0-9]+)(?!\w)",
-            description, re.IGNORECASE,
-        )
-        routes.update((direction.upper(), bsb, number) for direction, bsb, number in matches)
-        if _wording_reference(description) is not None and len(matches) == 1:
-            candidates.append(description)
-    if len(references) != 1 or len(directions) != 1 or len(routes) != 1:
-        return None
-    return next(iter(candidates), None)
-
-
-def _wording_reference(description: str) -> str | None:
-    """
-    Keep a single complete trailing numeric reference as text, including its leading zeroes.
-    """
-    match = re.search(r"(?<!\w)#([0-9]+)\s*$", description)
-    references = re.findall(r"(?<!\w)#([0-9]+)(?!\w)", description)
-    return match[1] if match is not None and len(references) == 1 else None
-
-
-def _names_internal_account(
-    transaction: Transaction, accounts: list[Account], *, description: str | None = None,
-) -> bool:
-    """
-    Keep explicitly named own-account transfers in review when an exact account-number match is absent.
-    """
-    description = (transaction.description if description is None else description).casefold()
-    if "transfer" not in description:
-        return False
-    if "between my accounts" in description or "between own accounts" in description:
-        return True
-    for account in accounts:
-        if account.id == transaction.account_id:
-            continue
-        for label in (account.name, account.key.replace("_", " ")):
-            if re.search(r"(?<!\w)" + re.escape(label.casefold()) + r"(?!\w)", description):
-                return True
-    return False
 
 
 def _bank_line(transaction: Transaction) -> JournalLine:
@@ -864,9 +685,10 @@ def _classification_entry(
     transaction: Transaction,
     decision: Decision,
     accounts: AccountRegistry,
+    *, budget: BudgetSettings | None = None,
 ) -> JournalEntry:
     """
-    Build the bank and income/expense postings for one validated response without saving anything.
+    Build the bank and supported counterpart postings for one validated response without saving anything.
 
     Original wording remains on both postings.
 
@@ -879,10 +701,15 @@ def _classification_entry(
     selected = next(
         (account for account in accounts.accounts.values() if account.id == decision.account_id), None,
     )
-    expected = AccountType.EXPENSE if transaction.amount < 0 else AccountType.INCOME
+    supported = selected is not None and (
+        selected.account_type in {AccountType.INCOME, AccountType.EXPENSE}
+        or budget is not None and selected.key in {
+            *budget.investment_accounts, *budget.liability_categories, budget.capital_account,
+        }
+    )
     if (
         decision.status != "classified" or decision.transaction_id != transaction.transaction_id
-        or transaction.amount == 0 or selected is None or selected.account_type != expected
+        or transaction.amount == 0 or not supported or selected.bank_details is not None
     ):
         raise ValueError("The classification must select a compatible account for this source transaction.")
 
@@ -891,6 +718,8 @@ def _classification_entry(
         JournalLine(
             account_id=selected.id, debit=-transaction.amount, description=transaction.description,
             effective_date=transaction.effective_date,
+            account_investment=AccountInvestmentDetails(kind="contribution")
+            if budget is not None and selected.key in budget.investment_accounts else None,
         )
         if transaction.amount < 0 else JournalLine(
             account_id=selected.id, credit=transaction.amount, description=transaction.description,
@@ -924,7 +753,7 @@ def _summary(
               and decisions[identifier].status in {"failed", "requesting"}}
     manual_records = [
         row for row in load_manual_entries(connection)
-        if manual_ids is None or row['manual_id'] in manual_ids
+        if not row.get("is_savings") and (manual_ids is None or row["manual_id"] in manual_ids)
     ]
     manual_sources = set(manual_claims(connection)) & pending
     latest_reviews = {

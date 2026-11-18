@@ -6,8 +6,8 @@
 Edit monthly budget amounts beside a visual comparison of income, expenses and savings.
 
 Existing recurring plans remain readable until an explicit edit adopts independent monthly targets.
-Month navigation never creates or saves a plan. Category identities, account mappings and virtual pots
-remain separate from the selected month's amounts.
+Month navigation never creates or saves a plan. Global account roles are edited on Accounts and retained
+in this shared draft; targets belong to the selected month. Savings and Investments are fixed destinations.
 """
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
@@ -15,15 +15,17 @@ remain separate from the selected month's amounts.
 from copy import deepcopy
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from math import ceil
+from html import escape
 import re
 
 from pydantic import ValidationError
-from PySide6.QtCore import QEvent, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QRegion
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
+    QAbstractItemView, QDialog, QFrame, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QRadioButton, QSizePolicy, QStyleFactory, QStyledItemDelegate, QTableWidget,
+    QSizePolicy, QStyleFactory, QStyledItemDelegate, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -31,19 +33,20 @@ from PySide6.QtWidgets import (
 from aurum.finance.budget import BudgetSettings, budget_plan_totals
 from aurum.finance.dates import reporting_month
 from aurum.gui.budget_chart import BudgetAllocationChart
+from aurum.gui.controls import SearchField, wrapped_text_layout
 from aurum.gui.icons import icon
-from aurum.gui.theme import gui_colour
+from aurum.gui.theme import gui_colour, monetary_html
 
 KINDS = {"income": "Income", "expense": "Expenses", "savings": "Savings"}
 ALLOWED_ACCOUNTS = {
-    "income": {"income", "equity"}, "expense": {"expense"}, "savings": {"asset", "liability"},
+    "income": {"income"}, "expense": {"expense"}, "savings": set(),
 }
 
 
 # %% 1. Monthly Budget Editor --------------------------------------------------------------------------------
 class BudgetForm(QWidget):
     """
-    Keep direct monthly inputs, account assignments and virtual-pot choices in one unsaved draft.
+    Keep monthly targets and deterministic cash-flow account roles in one unsaved draft.
     """
 
     changed = Signal()
@@ -59,15 +62,17 @@ class BudgetForm(QWidget):
         year, month = reporting_month(date.today())
         self._month = f"{year:04d}-{month:02d}"
         self.selected_key = None
-        self.tables, self.sections, self.actions, self.totals = {}, {}, {}, {}
+        self.tables, self.sections, self.actions = {}, {}, {}
         self.amounts, self._row_keys = {}, {}
+        self._account_buttons = {}
+        self._account_popup = None
         self._summary = {}
         self._copy_available = False
         self._building = False
-        self._residual_group = QButtonGroup(self)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+        layout.setSpacing(8)
         self.header = QWidget(self)
         self.header.setObjectName("budgetFixedHeader")
         self.header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -87,25 +92,52 @@ class BudgetForm(QWidget):
         self.summary = QLabel()
         self.summary.setObjectName("budgetPlanStatus")
         self.summary.setWordWrap(True)
-        self.summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.summary.setTextFormat(Qt.TextFormat.RichText)
         header_layout.addWidget(self.summary)
         self.header.hide()
 
+        self.invalid_notice = QWidget()
+        warning = QHBoxLayout(self.invalid_notice)
+        warning.setContentsMargins(0, 0, 0, 0)
+        self.invalid_label = QLabel()
+        self.invalid_label.setObjectName("setupError")
+        warning.addWidget(self.invalid_label)
+        repair = QToolButton()
+        repair.setObjectName("budgetAction")
+        repair.setIcon(icon("settings", size=18))
+        repair.setFixedSize(28, 28)
+        repair.setToolTip("Review invalid categories")
+        repair.setAccessibleName("Review invalid categories")
+        repair.clicked.connect(self._show_invalid)
+        warning.addWidget(repair)
+        warning.addStretch()
+        layout.addWidget(self.invalid_notice)
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        layout.addLayout(columns, 1)
+        self.invalid_dialog = QDialog(self)
+        self.invalid_dialog.setWindowTitle("Invalid Budget Categories")
+        self.invalid_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.invalid_dialog.resize(640, 360)
+        invalid_layout = QVBoxLayout(self.invalid_dialog)
         for kind, name in (*KINDS.items(), ("unknown", "Invalid category section")):
             panel = QFrame()
             panel.setObjectName("budgetSectionPanel")
-            panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+            panel.setMinimumWidth(0)
+            panel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
             section = QVBoxLayout(panel)
             section.setContentsMargins(0, 0, 0, 0)
             section.setSpacing(8)
-            heading = QHBoxLayout()
             title = QLabel(name)
             title.setObjectName("budgetSection")
-            heading.addWidget(title)
-            total = QLabel()
-            total.setObjectName("budgetSectionTotal")
-            heading.addWidget(total)
-            heading.addStretch()
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            section.addWidget(title)
+            action_row = QWidget()
+            action_row.setFixedHeight(28)
+            actions = QHBoxLayout(action_row)
+            actions.setContentsMargins(0, 0, 0, 0)
+            actions.setSpacing(4)
+            actions.addStrut(28)
             controls = []
             for symbol, label, callback in (
                 ("add", "Add category", lambda _checked=False, selected=kind: self._add_category(selected)),
@@ -116,51 +148,59 @@ class BudgetForm(QWidget):
                 button = QToolButton()
                 button.setObjectName("budgetAction")
                 button.setAutoRaise(True)
-                button.setFixedSize(30, 30)
+                button.setFixedSize(28, 28)
                 size = 14 if symbol in {"up", "down"} else 18
                 button.setIcon(icon(symbol, size=size))
                 button.setIconSize(QSize(size, size))
                 button.setToolTip(label)
                 button.setAccessibleName(label)
                 button.clicked.connect(callback)
-                heading.addWidget(button)
+                actions.addWidget(button)
                 controls.append(button)
-            controls[0].setVisible(kind != "unknown")
-            section.addLayout(heading)
-            table = QTableWidget(0, 5 if kind == "savings" else 3)
-            table.setObjectName("budgetCategoryTable")
-            table.setShowGrid(False)
-            headers = ["Category", "Monthly amount", "Accounts"]
+            controls[0].setVisible(kind not in {"unknown", "savings"})
             if kind == "savings":
-                headers += ["Pot", "Residual"]
+                for control in controls:
+                    control.hide()
+            actions.addStretch()
+            section.addWidget(action_row)
+            table = _BudgetCategoryTable()
+            table.setObjectName("budgetCategoryTable")
+            table.setMinimumSize(0, 0)
+            table.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            table.setShowGrid(False)
+            headers = ["Category", "Amount", "Links"]
             table.setHorizontalHeaderLabels(headers)
-            for column in (0, 1):
+            table.horizontalHeaderItem(1).setToolTip("Monthly amount")
+            table.horizontalHeaderItem(2).setToolTip("Linked accounts")
+            for column in range(3):
                 table.horizontalHeaderItem(column).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             table.setItemDelegateForColumn(0, _CenteredCategoryDelegate(table))
             table.verticalHeader().hide()
             table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-            table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             table.horizontalHeader().setStyleSheet("QHeaderView::section { border-right: none; }")
-            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-            table.setColumnWidth(1, 140)
-            table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-            for column in range(3, table.columnCount()):
-                table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-                table.setColumnWidth(column, 52 if column == 3 else 86)
             table.currentCellChanged.connect(
                 lambda row, _column, _old_row, _old_column, selected=kind: self._select_row(selected, row)
             )
             table.itemChanged.connect(self._rename_category)
-            section.addWidget(table)
-            layout.addWidget(panel, 0, Qt.AlignmentFlag.AlignHCenter)
+            section.addWidget(table, 1)
+            if kind == "unknown":
+                invalid_layout.addWidget(panel, 1)
+            else:
+                columns.addWidget(panel, 1)
             self.tables[kind], self.sections[kind] = table, panel
-            self.actions[kind], self.totals[kind] = controls, total
-        layout.addStretch()
+            self.actions[kind] = controls
+        close = QToolButton()
+        close.setObjectName("budgetAction")
+        close.setIcon(icon("close", size=18))
+        close.setFixedSize(28, 28)
+        close.setToolTip("Close; edits remain in Setup until saved")
+        close.setAccessibleName("Close invalid categories")
+        close.clicked.connect(self.invalid_dialog.accept)
+        invalid_layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
         self._build_tables()
-        self._size_sections()
 
     @property
     def categories(self) -> dict:
@@ -175,6 +215,50 @@ class BudgetForm(QWidget):
         """
         return deepcopy(self.data)
 
+    def account_roles(self) -> dict:
+        """
+        Return only the global mappings edited on Accounts, apart from the monthly budget draft.
+        """
+        return {
+            "cash_accounts": list(self.data.get("cash_accounts", [])),
+            "investment_accounts": list(self.data.get("investment_accounts", [])),
+            "liability_categories": dict(self.data.get("liability_categories", {})),
+        }
+
+    def set_account_roles(self, roles: dict) -> None:
+        """
+        Replace account-owned mappings without changing targets or emitting a budget-form edit.
+        """
+        self.data.update({
+            "cash_accounts": list(roles.get("cash_accounts", [])),
+            "investment_accounts": list(roles.get("investment_accounts", [])),
+            "liability_categories": dict(roles.get("liability_categories", {})),
+        })
+
+    def set_account_role(self, account: str, choice: object) -> bool:
+        """
+        Apply one explicit account choice, clearing incompatible roles while retaining all other mappings.
+        """
+        if not account:
+            return False
+        before = self.account_roles()
+        roles = deepcopy(before)
+        target = {"cash": "cash_accounts", "investment": "investment_accounts"}.get(
+            choice if isinstance(choice, str) else ""
+        )
+        for field in ("cash_accounts", "investment_accounts"):
+            if field != target:
+                roles[field] = [key for key in roles[field] if key != account]
+            elif account not in roles[field]:
+                roles[field].append(account)
+        category = choice.get("liability_category") if isinstance(choice, dict) else None
+        if category is None:
+            roles["liability_categories"].pop(account, None)
+        else:
+            roles["liability_categories"][account] = category
+        self.set_account_roles(roles)
+        return roles != before
+
     def set_reporting_month(self, month: str) -> None:
         """
         Select an initial or requested planning month without creating targets or emitting a change.
@@ -183,17 +267,20 @@ class BudgetForm(QWidget):
         self._month = month
         self._build_tables()
 
-    def summary_info(self) -> dict[str, str]:
+    def summary_info(self) -> dict[str, object]:
         """
         Expose the selected month's allocated totals and draft status for Setup's read-only summary card.
         """
-        return dict(self._summary)
+        return {**self._summary, "totals": dict(self._summary.get("totals", {}))}
 
     def view_state(self) -> dict:
         """
         Retain category selection while leaving the shared reporting month with the window.
         """
-        return {"category": self.selected_key}
+        return {
+            "category": self.selected_key,
+            "scroll": {kind: table.verticalScrollBar().value() for kind, table in self.tables.items()},
+        }
 
     def restore_view_state(self, state: dict) -> None:
         """
@@ -201,6 +288,7 @@ class BudgetForm(QWidget):
         """
         self.selected_key = state.get("category")
         self._build_tables()
+        self._restore_scroll(state.get("scroll", {}))
 
     def eventFilter(self, watched, event) -> bool:
         """
@@ -218,47 +306,51 @@ class BudgetForm(QWidget):
         """
         super().changeEvent(event)
         if event.type() == QEvent.Type.EnabledChange and hasattr(self, "header"):
+            if not self.isEnabled():
+                self._close_accounts()
             self.header.setEnabled(self.isEnabled())
             if hasattr(self, "copy_month"):
                 self.copy_month.setEnabled(self.isEnabled() and self._copy_available)
 
-    def resizeEvent(self, event) -> None:
+    def hideEvent(self, event) -> None:
         """
-        Keep amount tables comfortably narrow and centred within the available scroll viewport.
+        Dismiss account choices when leaving the page without reverting already staged links.
         """
-        super().resizeEvent(event)
-        self._size_sections()
+        self._close_accounts()
+        super().hideEvent(event)
 
     def minimumSizeHint(self) -> QSize:
         """
-        Allow a narrow viewport to reduce the preferred table width without horizontal scrolling.
+        Let the three tables share the available viewport instead of sizing the page to their rows.
         """
-        hint = super().minimumSizeHint()
-        return QSize(min(380, hint.width()), hint.height())
+        return QSize(0, 160)
 
-    def _size_sections(self) -> None:
+    def _restore_scroll(self, positions: dict) -> None:
         """
-        Prefer eighty percent of the form width, capped at 740 pixels and bounded by its viewport.
+        Restore each independent table's position after rebuilding or returning to this section.
         """
-        if not hasattr(self, "sections"):
-            return
-        available = max(1, self.contentsRect().width())
-        width = min(740, available, max(600, int(available * 0.8)))
-        for panel in self.sections.values():
-            if panel.minimumWidth() != width or panel.maximumWidth() != width:
-                panel.setFixedWidth(width)
+        for kind, position in positions.items():
+            if kind in self.tables:
+                self.tables[kind].verticalScrollBar().setValue(position)
+
+    def _show_invalid(self) -> None:
+        """
+        Keep malformed saved categories repairable without adding a fourth ordinary budget column.
+        """
+        self.invalid_dialog.show()
+        self.invalid_dialog.raise_()
+        self.invalid_dialog.activateWindow()
 
     def _build_tables(self) -> None:
         """
         Rebuild the displayed month while retaining category identities and untouched draft values.
         """
+        self._close_accounts()
+        positions = {kind: table.verticalScrollBar().value() for kind, table in self.tables.items()}
         self._building = True
         self.amounts, self._row_keys = {}, {}
-        for button in self._residual_group.buttons():
-            self._residual_group.removeButton(button)
+        self._account_buttons = {}
         targets = _raw_targets(self.data, self._month)
-        savings = self.data.get("savings") or {}
-        pots = savings.get("category_keys", [])
         for kind, table in self.tables.items():
             table.blockSignals(True)
             table.setRowCount(0)
@@ -267,68 +359,65 @@ class BudgetForm(QWidget):
                 if (category.get("kind") if category.get("kind") in KINDS else "unknown") == kind
             ]
             self._row_keys[kind] = keys
-            self.sections[kind].setVisible(kind != "unknown" or bool(keys))
+            if kind == "unknown":
+                self.invalid_notice.setVisible(bool(keys))
+                self.invalid_label.setText(
+                    f"{len(keys)} invalid " + ("category" if len(keys) == 1 else "categories")
+                )
             for row, key in enumerate(keys):
                 category = self.categories[key]
                 table.insertRow(row)
                 name = QTableWidgetItem(category.get("name", key))
                 name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 name.setData(Qt.ItemDataRole.UserRole, key)
-                name.setToolTip(f"Stable category key: {key}")
+                name.setToolTip(f"{category.get('name', key)}\nStable category key: {key}")
+                if key in {"savings", "investments", "gift_received", "investment_return"}:
+                    name.setFlags(name.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 table.setItem(row, 0, name)
                 amount = targets.get(key)
                 editor = QLineEdit("" if amount is None else str(amount))
+                editor.setProperty("monetary", True)
+                editor.setObjectName("budgetAmount")
+                editor.setMinimumWidth(0)
                 editor.setPlaceholderText("Amount")
                 editor.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 editor.setAccessibleName(f"{category.get('name', key)} monthly amount")
                 editor.setProperty("budgetCategory", key)
                 editor.installEventFilter(self)
                 editor.textChanged.connect(lambda text, selected=key: self._set_amount(selected, text))
-                table.setCellWidget(row, 1, editor)
+                editor.ensurePolished()
+                editor.setFixedHeight(editor.sizeHint().height())
+                amount_cell = QWidget()
+                amount_cell.setObjectName("budgetAmountCell")
+                amount_layout = QVBoxLayout(amount_cell)
+                amount_layout.setContentsMargins(4, 0, 4, 0)
+                amount_layout.addWidget(editor, 0, Qt.AlignmentFlag.AlignVCenter)
+                table.setCellWidget(row, 1, amount_cell)
                 self.amounts[key] = editor
-                account_keys = category.get("accounts", [])
-                names = [self.choices.get("accounts", {}).get(item, item) for item in account_keys]
-                account_button = QPushButton(", ".join(names) if names else "Choose accounts")
-                account_button.setToolTip(
-                    ", ".join(names) if names else "Choose the accounts for this category"
-                )
+                account_button = _AccountLinkButton()
                 account_button.setAccessibleName(f"Accounts for {category.get('name', key)}")
                 account_button.clicked.connect(
                     lambda _checked=False, selected=key: self._edit_accounts(selected)
                 )
-                table.setCellWidget(row, 2, account_button)
-                if kind == "savings":
-                    pot = _PotSwitch()
-                    pot.setObjectName("budgetPotToggle")
-                    pot.setChecked(key in pots)
-                    pot.setAccessibleName(f"Use {category.get('name', key)} as a savings pot")
-                    pot.setAccessibleDescription("Independent choice; several savings pots can be selected.")
-                    pot.setToolTip("Include this category as a savings pot. Several can be selected.")
-                    pot.setProperty("budgetCategory", key)
-                    pot.installEventFilter(self)
-                    pot.toggled.connect(lambda checked, selected=key: self._set_pot(selected, checked))
-                    table.setCellWidget(row, 3, _control_cell(pot))
-                    residual = _ResidualChoice()
-                    residual.setObjectName("budgetResidualChoice")
-                    self._residual_group.addButton(residual)
-                    residual.setChecked(key == savings.get("residual_category"))
-                    residual.setEnabled(key in pots)
-                    residual.setAccessibleName(f"Use {category.get('name', key)} for remaining savings")
-                    residual.setAccessibleDescription("Exclusive choice; select one residual savings pot.")
-                    residual.setToolTip("The one pot receiving remaining savings.")
-                    residual.setProperty("budgetCategory", key)
-                    residual.installEventFilter(self)
-                    residual.clicked.connect(
-                        lambda _checked=False, selected=key: self._set_residual(selected)
+                if key in {"savings", "investments", "gift_received"}:
+                    automatic = QLabel("Auto")
+                    automatic.setObjectName("budgetAutomatic")
+                    automatic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    automatic.setToolTip(
+                        "Calculated from cash movements and account roles in Setup → Accounts."
                     )
-                    table.setCellWidget(row, 4, _control_cell(residual))
+                    account_button.deleteLater()
+                    table.setCellWidget(row, 2, automatic)
+                else:
+                    table.setCellWidget(row, 2, account_button)
+                    self._account_buttons[key] = account_button
+                    self._update_account_button(key)
                 table.setRowHeight(row, max(42, editor.sizeHint().height() + 12))
-            row_height = sum(table.rowHeight(row) for row in range(len(keys))) or 42
-            height = table.horizontalHeader().sizeHint().height() + row_height + table.frameWidth() * 2
-            table.setFixedHeight(height)
             table.blockSignals(False)
+            table.resize_link_rows()
         self._building = False
         self._select_key(self.selected_key)
+        self._restore_scroll(positions)
         self._summarise()
 
     def _select_row(self, kind: str, row: int) -> None:
@@ -370,7 +459,9 @@ class BudgetForm(QWidget):
         """
         for kind, buttons in self.actions.items():
             keys = self._row_keys.get(kind, [])
-            selected = self.selected_key in keys
+            selected = self.selected_key in keys and self.selected_key not in {
+                "savings", "investments", "gift_received", "investment_return",
+            }
             index = keys.index(self.selected_key) if selected else -1
             for button, enabled in zip(buttons[1:], (
                 selected, selected and index > 0, selected and index < len(keys) - 1,
@@ -438,36 +529,31 @@ class BudgetForm(QWidget):
             f"Replace this month's amounts with {_month_name(previous)}."
             if previous else "There is no earlier month."
         )
-        status, detail = "incomplete", ""
+        status, detail, display_detail = "incomplete", "", ""
         totals = {kind: None for kind in KINDS}
         try:
             settings = BudgetSettings.model_validate(self.data)
             totals = budget_plan_totals(settings, self._month)
-            for kind, label in self.totals.items():
-                amount = totals.get(kind)
-                label.setText("" if kind == "unknown" else "Not set" if amount is None else _money(amount))
             if self.categories:
                 if all(value is not None for value in totals.values()):
                     income, expense, savings = (_cents(totals[kind]) for kind in KINDS)
                     difference = income - expense - savings
                     status = "balanced" if difference == 0 else "invalid"
-                    detail = (
-                        "" if difference == 0 else
-                        f"Income has {_money(Decimal(difference) / 100)} left to allocate."
-                        if difference > 0 else
-                        f"Expenses and savings exceed income by {_money(Decimal(-difference) / 100)}."
-                    )
+                    if difference:
+                        amount = _money(Decimal(abs(difference)) / 100)
+                        prefix = "Income has " if difference > 0 else "Expenses and savings exceed income by "
+                        suffix = " left to allocate." if difference > 0 else "."
+                        detail = prefix + amount + suffix
+                        display_detail = prefix + monetary_html(amount) + suffix
         except (ValidationError, ValueError, TypeError) as error:
             status = "invalid"
             detail = _validation_message(error) if isinstance(error, ValidationError) else str(error)
-            for label in self.totals.values():
-                label.setText("Check amounts")
-        self.summary.setText(detail)
+        self.summary.setText(display_detail or escape(detail))
         self.summary.setVisible(status == "invalid")
         self.summary.setProperty("tone", status)
         self.summary.style().unpolish(self.summary)
         self.summary.style().polish(self.summary)
-        self._summary = {"month": self._month, "status": status, "detail": detail}
+        self._summary = {"month": self._month, "status": status, "detail": detail, "totals": dict(totals)}
         self._summary.update({
             kind: "—" if amount is None else _money(amount) for kind, amount in totals.items()
         })
@@ -492,7 +578,7 @@ class BudgetForm(QWidget):
         """
         Add a category in the chosen section with a stable key and an unfinished monthly target.
         """
-        if kind not in KINDS:
+        if kind not in {"income", "expense"}:
             return
         name, accepted = QInputDialog.getText(self, "Add " + KINDS[kind].lower() + " category", "Name")
         if not accepted or not name.strip():
@@ -516,10 +602,11 @@ class BudgetForm(QWidget):
         Remove a draft category while leaving saved-history validation to the configuration save.
         """
         key = self.selected_key
-        if key not in self.categories:
+        if key not in self.categories or key in {
+            "savings", "investments", "gift_received", "investment_return",
+        }:
             return
         self._adopt_month()
-        self._remove_pot(key)
         del self.categories[key]
         for targets in self.data.get("monthly_overrides", {}).values():
             targets.pop(key, None)
@@ -549,8 +636,11 @@ class BudgetForm(QWidget):
 
     def _edit_accounts(self, key: str) -> None:
         """
-        Edit account mappings with a searchable checklist while retaining unavailable saved references.
+        Open a searchable multi-select dropdown whose changes join the current Setup draft immediately.
         """
+        if not self.isEnabled() or key not in self._account_buttons:
+            return
+        self._close_accounts()
         self._select_key(key)
         category = self.categories[key]
         current = list(category.get("accounts", []))
@@ -558,108 +648,316 @@ class BudgetForm(QWidget):
         names, types = self.choices.get("accounts", {}), self.choices.get("account_types", {})
         available = [item for item in names if not types or types.get(item) in permitted or item in current]
         available += [item for item in current if item not in available]
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Accounts for " + category.get("name", key))
-        dialog.resize(440, 390)
-        layout = QVBoxLayout(dialog)
-        search = QLineEdit()
-        search.setPlaceholderText("Search accounts")
-        layout.addWidget(search)
-        listing = QListWidget()
-        listing.setObjectName("budgetAccountChecklist")
-        listing.setAccessibleName("Linked accounts")
-        listing.setItemDelegate(_AccountCheckDelegate(listing))
-        listing.setUniformItemSizes(True)
-        listing.setCursor(Qt.CursorShape.PointingHandCursor)
-        # macOS can leave unchecked item indicators invisible. Give this list its own visible checkbox style.
-        listing._check_style = QStyleFactory.create("Fusion")
-        listing._check_style.setParent(listing)
-        listing.setStyle(listing._check_style)
-        for account_key in available:
-            label = names.get(account_key, account_key + " (unavailable)")
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, account_key)
-            item.setToolTip(account_key)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if account_key in current else Qt.CheckState.Unchecked)
-            listing.addItem(item)
-        search.textChanged.connect(
-            lambda text: [listing.item(index).setHidden(text.casefold() not in (
-                listing.item(index).text() + " " + listing.item(index).data(Qt.ItemDataRole.UserRole)
-            ).casefold()) for index in range(listing.count())]
+        options = []
+        for account in available:
+            label = names.get(account, account)
+            if account not in names or types and types.get(account) not in permitted:
+                label += " (unavailable)"
+            options.append((account, label))
+        popup = _AccountLinksPopup(
+            self, self._account_buttons[key], category.get("name", key),
+            options, current, category.get("kind"),
         )
-        layout.addWidget(listing)
-        account_kind = {
-            "income": "income or equity", "expense": "expense", "savings": "asset or liability",
-        }.get(category.get("kind"), "eligible")
-        note = QLabel(
-            "Click an account to include or exclude it. Links apply to every month." if available else
-            f"Add and save an {account_kind} account in Setup → Accounts first."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Cancel,
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(dialog.accept)
-        buttons.button(QDialogButtonBox.StandardButton.Apply).setEnabled(bool(available))
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            checked = [listing.item(index).data(Qt.ItemDataRole.UserRole) for index in range(listing.count())
-                       if listing.item(index).checkState() == Qt.CheckState.Checked]
-            selected = [item for item in current if item in checked]
-            selected += [item for item in checked if item not in selected]
-            if selected != current:
-                self._adopt_month()
-                self.categories[key]["accounts"] = selected
-                self._build_tables()
-                self.changed.emit()
+        self._account_popup = popup
+        popup.selection_changed.connect(lambda selected: self._set_accounts(key, selected))
+        popup.closed.connect(lambda: self._accounts_closed(popup))
+        popup.open()
 
-    def _set_pot(self, key: str, checked: bool) -> None:
+    def _set_accounts(self, key: str, checked: list[str]) -> None:
         """
-        Choose virtual savings pots directly without introducing ledger accounts.
+        Preserve link order and update only the active cell, leaving the dropdown and other edits intact.
         """
-        self._adopt_month()
-        if checked:
-            savings = deepcopy(self.data.get("savings") or {"residual_category": key, "category_keys": []})
-            savings["category_keys"] = list(savings["category_keys"])
-            if key not in savings["category_keys"]:
-                savings["category_keys"].append(key)
-            self.data["savings"] = savings
-        else:
-            self._remove_pot(key)
-        self._build_tables()
-        self.changed.emit()
-
-    def _remove_pot(self, key: str) -> None:
-        """
-        Keep the remaining pot choices valid when a draft category leaves the pot list.
-        """
-        savings = self.data.get("savings")
-        if not savings or key not in savings.get("category_keys", []):
+        if not self.isEnabled() or key not in self.categories:
+            self._close_accounts()
             return
-        remaining = [item for item in savings["category_keys"] if item != key]
-        if not remaining:
-            self.data["savings"] = None
-        else:
-            savings["category_keys"] = remaining
-            if savings.get("residual_category") == key:
-                savings["residual_category"] = remaining[0]
+        current = list(self.categories[key].get("accounts", []))
+        selected = [item for item in current if item in checked]
+        selected += [item for item in checked if item not in selected]
+        if selected == current:
+            return
+        self._adopt_month()
+        self.categories[key]["accounts"] = selected
+        self._update_account_button(key)
+        self._edited()
 
-    def _set_residual(self, key: str) -> None:
+    def _update_account_button(self, key: str) -> None:
         """
-        Select the one configured pot receiving unallocated monthly savings.
+        Show complete staged account names without rebuilding the table or moving keyboard focus.
         """
-        savings = self.data.get("savings") or {}
-        if key in savings.get("category_keys", []) and savings.get("residual_category") != key:
-            self._adopt_month()
-            savings["residual_category"] = key
-            self._build_tables()
-            self.changed.emit()
+        button = self._account_buttons[key]
+        keys = self.categories[key].get("accounts", [])
+        names = self.choices.get("accounts", {})
+        labels = [names.get(account, account + " (unavailable)") for account in keys]
+        button.setText("\n".join(labels) or "Choose accounts")
+        button.setToolTip(
+            (", ".join(labels) + "\n" if labels else "Choose accounts. ")
+            + "Links apply to every month; save them with Setup."
+        )
+        button.setAccessibleDescription(f"{len(keys)} linked accounts. " + ", ".join(labels))
+        for table in self.tables.values():
+            table.resize_link_rows()
+
+    def _close_accounts(self) -> None:
+        """
+        Close choices before rebuilding, disabling or hiding their owning form.
+        """
+        popup = self._account_popup
+        self._account_popup = None
+        if popup is not None:
+            popup.close()
+
+    def _accounts_closed(self, popup: QWidget) -> None:
+        """
+        Release the active popup reference while keeping all explicit checkbox changes staged.
+        """
+        if self._account_popup is popup:
+            self._account_popup = None
 
 
 # %% 2. Table Controls ---------------------------------------------------------------------------------------
+class _AccountLinkButton(QToolButton):
+    """
+    Keep complete account names readable in a wrapping, keyboard-accessible dropdown field.
+    """
+
+    def __init__(self, parent=None) -> None:
+        """
+        Reserve a small trailing chevron while the label uses the rest of the cell.
+        """
+        super().__init__(parent)
+        self._text = ""
+        self.setObjectName("budgetAccountLink")
+        self.setMinimumWidth(0)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def setText(self, text: str) -> None:
+        """
+        Update the wrapping label without drawing a second native button caption.
+        """
+        self._text = text
+        self.update()
+
+    def text(self) -> str:
+        """
+        Expose the full visible account names to accessibility and inspection.
+        """
+        return self._text
+
+    def heightForWidth(self, width: int) -> int:
+        """
+        Give the table enough room for every linked account at the current column width.
+        """
+        text = wrapped_text_layout(self._text, self.font(), width - 24, Qt.AlignmentFlag.AlignCenter)
+        return max(42, ceil(text.boundingRect().height()) + 16)
+
+    def paintEvent(self, event) -> None:
+        """
+        Retain native interaction fills and draw the shared thin disclosure chevron at the trailing edge.
+        """
+        super().paintEvent(event)
+        painter = QPainter(self)
+        text = wrapped_text_layout(self._text, self.font(), self.width() - 24, Qt.AlignmentFlag.AlignCenter)
+        painter.setPen(QColor(gui_colour(self, "text")))
+        text.draw(painter, QPointF(4, (self.height() - text.boundingRect().height()) / 2))
+        icon("chevron_down", gui_colour(self, "icon"), 10).paint(
+            painter, self.width() - 16, (self.height() - 10) // 2, 10, 10,
+        )
+
+
+class _BudgetCategoryTable(QTableWidget):
+    """
+    Share available width between category, amount and links without forcing the page wider.
+    """
+
+    def __init__(self, parent=None) -> None:
+        """
+        Observe the viewport so adding a vertical scrollbar also recalculates the column widths.
+        """
+        super().__init__(0, 3, parent)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.horizontalHeader().setMinimumSectionSize(0)
+        self.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        """
+        Reserve a usable amount field and give account names most of the remaining space.
+        """
+        if watched is self.viewport() and event.type() == QEvent.Type.Resize:
+            width = max(0, self.viewport().width())
+            amount = min(width, max(104, round(width * 0.25)))
+            heading = self.horizontalHeaderItem(0)
+            minimum = (
+                self.horizontalHeader().fontMetrics().horizontalAdvance(heading.text()) + 10 if heading else 0
+            )
+            category = min(width - amount, max(minimum, round((width - amount) * 0.4)))
+            for column, size in enumerate((category, amount, width - amount - category)):
+                self.setColumnWidth(column, size)
+            self.resize_link_rows()
+        return super().eventFilter(watched, event)
+
+    def resize_link_rows(self) -> None:
+        """
+        Fit full linked names while ordinary rows retain their compact height.
+        """
+        for row in range(self.rowCount()):
+            editor, links = self.cellWidget(row, 1), self.cellWidget(row, 2)
+            height = max(42, editor.sizeHint().height() + 12) if editor is not None else 42
+            if isinstance(links, _AccountLinkButton):
+                height = max(height, links.heightForWidth(self.columnWidth(2)))
+            self.setRowHeight(row, height)
+
+
+class _AccountLinksPopup(QFrame):
+    """
+    Toggle category-account links in place while leaving persistence to Setup Save.
+    """
+
+    selection_changed = Signal(object)
+    closed = Signal()
+
+    def __init__(
+        self, parent: QWidget, anchor: QWidget, category: str, options: list[tuple[str, str]],
+        current: list[str], kind: str,
+    ) -> None:
+        """
+        Build a searchable checklist without emitting changes while its saved selections are populated.
+        """
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.anchor = anchor
+        self.setObjectName("budgetAccountsPopup")
+        self.setAccessibleName("Accounts for " + category)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setStyleSheet(
+            "QFrame#budgetAccountsPopup { background: transparent; } "
+            "QListWidget#budgetAccountChecklist { background: transparent; border: none; padding: 4px; } "
+            "QLabel#budgetAccountEmpty { background: transparent; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        self.search = SearchField("Search accounts")
+        self.search.setAccessibleName("Search accounts for " + category)
+        self.search.installEventFilter(self)
+        layout.addWidget(self.search)
+        self.listing = QListWidget()
+        self.listing.setObjectName("budgetAccountChecklist")
+        self.listing.setAccessibleName("Linked accounts for " + category)
+        self.listing.setItemDelegate(_AccountCheckDelegate(self.listing))
+        self.listing.setUniformItemSizes(True)
+        self.listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.listing.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Fusion keeps unchecked indicators visible on macOS, alongside the shared themed checkmarks.
+        self.listing._check_style = QStyleFactory.create("Fusion")
+        self.listing._check_style.setParent(self.listing)
+        self.listing.setStyle(self.listing._check_style)
+        for account, label in options:
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, account)
+            item.setToolTip(label + "\n" + account)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if account in current else Qt.CheckState.Unchecked)
+            self.listing.addItem(item)
+        self.listing.setFixedHeight(min(300, max(42, len(options) * 34 + 8)))
+        self.listing.setVisible(bool(options))
+        layout.addWidget(self.listing)
+        account_kind = {"income": "income", "expense": "expense"}.get(kind, "eligible")
+        self.empty = QLabel(f"Add and save an {account_kind} account in Setup → Accounts first.")
+        self.empty.setObjectName("budgetAccountEmpty")
+        self.empty.setWordWrap(True)
+        self.empty.setVisible(not options)
+        layout.addWidget(self.empty)
+        self.search.textChanged.connect(self._filter)
+        self.listing.itemChanged.connect(self._changed)
+
+    def open(self) -> None:
+        """
+        Anchor beneath the cell, or above it when necessary, within the current display's bounds.
+        """
+        bounds = self.anchor.screen().availableGeometry()
+        self.setFixedWidth(min(320, bounds.width() - 16))
+        self.adjustSize()
+        below = self.anchor.mapToGlobal(QPoint(0, self.anchor.height() + 4))
+        top = self.anchor.mapToGlobal(QPoint(0, -4))
+        x = max(bounds.left() + 8, min(below.x(), bounds.right() - self.width() - 7))
+        y = below.y() if below.y() + self.height() <= bounds.bottom() - 8 else top.y() - self.height()
+        self.move(x, max(bounds.top() + 8, y))
+        self.show()
+        self.search.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def eventFilter(self, watched, event) -> bool:
+        """
+        Let Down move directly from search to the first visible account for keyboard selection.
+        """
+        if watched is self.search and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Down:
+            for index in range(self.listing.count()):
+                if not self.listing.item(index).isHidden():
+                    self.listing.setCurrentRow(index)
+                    self.listing.setFocus(Qt.FocusReason.TabFocusReason)
+                    return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event) -> None:
+        """
+        Escape dismisses the dropdown while retaining changes already staged through its checkboxes.
+        """
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            self.anchor.setFocus(Qt.FocusReason.PopupFocusReason)
+            return
+        super().keyPressEvent(event)
+
+    def hideEvent(self, event) -> None:
+        """
+        Release the popup after dismissal without undoing its explicit selections.
+        """
+        super().hideEvent(event)
+        self.closed.emit()
+        self.deleteLater()
+
+    def paintEvent(self, event) -> None:
+        """
+        Fill the rounded native popup with the owning workspace's saved surface colour.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(gui_colour(self, "surface", "#ffffff")))
+        painter.drawRoundedRect(QRectF(self.rect()), 12, 12)
+
+    def resizeEvent(self, event) -> None:
+        """
+        Round the native window itself so the backing never leaves square corner artefacts.
+        """
+        super().resizeEvent(event)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 12, 12)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def _filter(self, text: str) -> None:
+        """
+        Filter only visibility, preserving every checked account even when it is hidden by search.
+        """
+        visible = 0
+        for index in range(self.listing.count()):
+            item = self.listing.item(index)
+            matches = text.casefold() in (item.text() + " " + item.data(Qt.ItemDataRole.UserRole)).casefold()
+            item.setHidden(not matches)
+            visible += matches
+        if self.listing.count():
+            self.empty.setText("No matching accounts")
+            self.empty.setVisible(not visible)
+
+    def _changed(self, _item: QListWidgetItem) -> None:
+        """
+        Publish the complete checked set after one interaction without closing the dropdown.
+        """
+        self.selection_changed.emit([
+            self.listing.item(index).data(Qt.ItemDataRole.UserRole) for index in range(self.listing.count())
+            if self.listing.item(index).checkState() == Qt.CheckState.Checked
+        ])
+
+
 class _AccountCheckDelegate(QStyledItemDelegate):
     """
     Toggle account links across the full row while retaining native check-state and keyboard support.
@@ -702,111 +1000,7 @@ class _CenteredCategoryDelegate(QStyledItemDelegate):
         return editor
 
 
-class _PotSwitch(QCheckBox):
-    """
-    Present an independent savings-pot choice as a compact switch with native checkbox behavior.
-    """
-
-    def __init__(self, parent=None) -> None:
-        """
-        Use a small fixed switch area while retaining Qt's keyboard and accessibility implementation.
-        """
-        super().__init__(parent)
-        self.setFixedSize(36, 22)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-
-    def sizeHint(self) -> QSize:
-        """
-        Reserve enough room for the track, sliding thumb and focus ring.
-        """
-        return QSize(36, 22)
-
-    def hitButton(self, position) -> bool:
-        """
-        Make the complete compact switch respond to pointer activation.
-        """
-        return self.rect().contains(position)
-
-    def paintEvent(self, event) -> None:
-        """
-        Draw a rounded track and white thumb without inheriting a tick-image stylesheet.
-        """
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.hasFocus():
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(gui_colour(self, "accent", "#82afa1")), 1.2))
-            painter.drawRoundedRect(QRectF(0.7, 0.7, 34.6, 20.6), 10, 10)
-        track = gui_colour(self, "accent" if self.isChecked() else "border", "#3b896c")
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(track if self.isEnabled() else gui_colour(self, "disabled", "#dde3df")))
-        painter.drawRoundedRect(QRectF(1, 2, 34, 18), 9, 9)
-        painter.setBrush(QColor(gui_colour(self, "on_accent" if self.isChecked() else "surface", "#ffffff")))
-        painter.drawEllipse(QRectF(19 if self.isChecked() else 3, 4, 14, 14))
-
-
-class _ResidualChoice(QRadioButton):
-    """
-    Present the one residual savings choice as a radio dot with native exclusive-choice behavior.
-    """
-
-    def __init__(self, parent=None) -> None:
-        """
-        Keep the radio's drawing separate from shared checkbox tick styling.
-        """
-        super().__init__(parent)
-        self.setFixedSize(22, 22)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-
-    def sizeHint(self) -> QSize:
-        """
-        Reserve a centred radio circle and an outer keyboard-focus ring.
-        """
-        return QSize(22, 22)
-
-    def hitButton(self, position) -> bool:
-        """
-        Let the full radio control area respond to pointer activation.
-        """
-        return self.rect().contains(position)
-
-    def paintEvent(self, event) -> None:
-        """
-        Draw a standard circular outline and selected dot, preserving disabled and focus states.
-        """
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.hasFocus():
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(gui_colour(self, "accent", "#82afa1")), 1.2))
-            painter.drawEllipse(QRectF(0.7, 0.7, 20.6, 20.6))
-        colour = gui_colour(self, "icon" if self.isChecked() else "border", "#397a68")
-        if not self.isEnabled():
-            colour = gui_colour(self, "disabled", "#ced8d2")
-        painter.setPen(QPen(QColor(colour), 1.2))
-        painter.setBrush(QColor(gui_colour(self, "surface", "#ffffff")))
-        painter.drawEllipse(QRectF(3, 3, 16, 16))
-        if self.isChecked():
-            painter.setPen(Qt.PenStyle.NoPen)
-            colour = gui_colour(self, "icon" if self.isEnabled() else "disabled", "#397a68")
-            painter.setBrush(QColor(colour))
-            painter.drawEllipse(QRectF(7, 7, 8, 8))
-
-
 # %% 3. Helpers ----------------------------------------------------------------------------------------------
-def _control_cell(control: QWidget) -> QWidget:
-    """
-    Centre a compact savings control horizontally and vertically inside its table cell.
-    """
-    cell = QWidget()
-    cell.setObjectName("budgetControlCell")
-    layout = QHBoxLayout(cell)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    layout.addWidget(control)
-    return cell
-
-
 def _raw_targets(data: dict, month: str) -> dict:
     """
     Resolve editable values while retaining incomplete decimal text that cannot yet form a valid model.
