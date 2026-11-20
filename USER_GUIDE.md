@@ -291,7 +291,9 @@ Exact dollar amounts on Analysis use two decimals and ungrouped digits, such as 
   **4W** shows the selected reporting month, **12W** shows the last three, and the longer ranges show
   six, twelve or all months.
 - **Account Balances**, directly below Cash Flow, shows the daily balance of any asset, liability or equity
-  account. Select its name to switch accounts. The change beneath the amount is measured from the first
+  account or configured asset group. It opens on **Liquid Cash Assets** when that group exists.
+  Choose **Investments** to see its members' combined daily balance, or select an individual account.
+  The change beneath the amount is measured from the first
   visible day. Equity includes the same earnings rollover and market adjustments as the balance sheet.
   For investment accounts the line includes both cash in the account and the market value of its holdings.
 - **Spending by Category** shows the selected month's breakdown alongside Cash Flow and Account Balances.

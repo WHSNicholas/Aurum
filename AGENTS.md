@@ -123,7 +123,9 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Right-align the Net Worth amount at 32px. Under both daily balances show the change since the first
   visible day with a vertical bar before its percentage. Put the inspected date beside the Net Worth change.
   Account Balances offers all balance-sheet accounts by name and uses their daily report presentation,
-  including liability signs, earnings rollover and market adjustments. Centre the
+  including liability signs, earnings rollover and market adjustments. Offer configured asset groups in
+  the same selector, summing their members' daily closing balances. Default to Liquid Cash Assets when
+  available and retain the user's selection on refresh. Centre the
   13px Assets and Liabilities readout below the Net Worth plot. Show exact Analysis amounts with cents and
   ungrouped digits in charts, footers, tooltips and accessible descriptions. Keep compact chart axis labels.
   Cash Flow groups signed Income, Expenses and Savings into one, three, six, twelve or all reporting months.

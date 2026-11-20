@@ -9,6 +9,7 @@ Explore posted financial history with synchronized balance, cash-flow and spendi
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
 from datetime import date, timedelta
+from decimal import Decimal
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -50,6 +51,7 @@ class AnalysisPage(QWidget):
         self._cash_months = ()
         self._cash_indices = {}
         self._account_id = None
+        self._balance_members = {}
         self._spending_month = None
         self._cash_series = -1
         self.selected = -1
@@ -157,7 +159,7 @@ class AnalysisPage(QWidget):
         asset_row = QHBoxLayout()
         self.accounts = QComboBox()
         self.accounts.setObjectName("analysisAssetAccount")
-        self.accounts.setAccessibleName("Balance sheet account")
+        self.accounts.setAccessibleName("Balance sheet account or asset group")
         self.accounts.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.accounts.setMinimumContentsLength(12)
         self.accounts.setMaximumWidth(320)
@@ -260,11 +262,22 @@ class AnalysisPage(QWidget):
         self.ranges.setEnabled(bool(history.daily))
         self.accounts.blockSignals(True)
         self.accounts.clear()
-        for account in history.balance_accounts:
+        self._balance_members.clear()
+        positions = {account.key: i for i, account in enumerate(history.balance_accounts)}
+        account_names = {account.name for account in history.balance_accounts}
+        default = len(history.asset_groups) if history.balance_accounts else 0
+        for name, keys in history.asset_groups.items():
+            identifier = f"group:{name}"
+            self._balance_members[identifier] = tuple(positions[key] for key in keys)
+            if name.casefold() == "liquid cash assets":
+                default = self.accounts.count()
+            self.accounts.addItem(f"{name} (group)" if name in account_names else name, identifier)
+        for i, account in enumerate(history.balance_accounts):
+            self._balance_members[str(account.id)] = (i,)
             self.accounts.addItem(account.name, str(account.id))
         index = self.accounts.findData(self._account_id) if self._account_id else -1
         if self.accounts.count():
-            self.accounts.setCurrentIndex(max(0, index))
+            self.accounts.setCurrentIndex(index if index >= 0 else default)
             self._account_id = self.accounts.currentData()
         self.accounts.blockSignals(False)
         self._display_range(day, self.pinned and day is not None)
@@ -352,10 +365,12 @@ class AnalysisPage(QWidget):
         if index >= 0:
             self._account_id = self.accounts.currentData()
             self.accounts.setToolTip(self.accounts.currentText())
-            balances = tuple(p.account_balances[index] for p in self.points)
+            members = self._balance_members[self._account_id]
+            balances = tuple(sum((p.account_balances[i] for i in members), Decimal(0)) for p in self.points)
             self.asset.set_data(self._dates, (ChartTrace("heading", balances),),
                                 weekly=self.net.weekly,
-                                provisional=tuple(p.account_provisional[index] for p in self.points))
+                                provisional=tuple(any(p.account_provisional[i] for i in members)
+                                                  for p in self.points))
         self._readouts()
 
     def _daily_index(self, chart: HistoryChart, index: int) -> int:
@@ -435,12 +450,15 @@ class AnalysisPage(QWidget):
         account = self.accounts.currentIndex()
         note = "No balance sheet accounts are configured."
         if account >= 0:
-            amount = money(point.account_balances[account])
+            members = self._balance_members[self._account_id]
+            balances = self.asset.traces[0].values
+            amount = money(balances[self.selected])
             self.asset_value.setText(amount)
-            opening = self.points[0].account_balances[account]
-            self.account_delta.setText(_change(point.account_balances[account], opening))
-            note = _provisional(point.account_provisional[account], self.asset)
-            closes = _close_details(point.account_price_dates[account])
+            self.account_delta.setText(_change(balances[self.selected], balances[0]))
+            missing = {name for i in members for name in point.account_provisional[i]}
+            note = _provisional(tuple(sorted(missing)), self.asset)
+            member_closes = dict.fromkeys(close for i in members for close in point.account_price_dates[i])
+            closes = _close_details(tuple(member_closes))
             details = f"{self.accounts.currentText()}. {_date(day)}. Balance {amount}. {note}"
             self.asset.inspect(self.selected, f"{_date(day)} · {amount}", details, closes)
             self.asset_value.setToolTip(closes or self.asset.toolTip())

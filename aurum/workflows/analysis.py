@@ -15,7 +15,7 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # Aurum imports
 from aurum.finance.accounts import AccountRegistry, AccountType
@@ -80,6 +80,7 @@ class AnalysisHistory(BaseModel):
     cutoff: date
     first_posted: date | None = None
     balance_accounts: tuple[BalanceAccount, ...] = ()
+    asset_groups: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     daily: tuple[PositionPoint, ...] = ()
     monthly: tuple[AnalysisPoint, ...] = ()
 
@@ -140,7 +141,8 @@ def build_analysis_history(
         projection = project_budget_entry(entry, accounts, budget, opening=entry.id in openings)
         by_month[reporting_month(entry.date)].add(projection)
     if not posted:
-        return AnalysisHistory(month=period.month, cutoff=cutoff, balance_accounts=balance_accounts)
+        return AnalysisHistory(month=period.month, cutoff=cutoff, balance_accounts=balance_accounts,
+                               asset_groups=dict(settings.asset_groups))
 
     first = min(entry.date for entry in posted)
     dates = (date.fromordinal(ordinal) for ordinal in range(first.toordinal(), cutoff.toordinal() + 1))
@@ -160,7 +162,7 @@ def build_analysis_history(
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
     return AnalysisHistory(
         month=period.month, cutoff=cutoff, first_posted=first, balance_accounts=balance_accounts,
-        daily=tuple(positions.values()), monthly=tuple(monthly),
+        asset_groups=dict(settings.asset_groups), daily=tuple(positions.values()), monthly=tuple(monthly),
     )
 
 
