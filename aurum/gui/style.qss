@@ -28,10 +28,9 @@ QLabel#overviewQuoteText {
 }
 QLabel#overviewQuoteAttribution { font-size: 11px; color: #637a78; background: transparent; }
 QListWidget#navigation { border: none; outline: none; font-size: 14px; }
-QListWidget#navigation::item { padding: 7px 0; margin: 2px 0; border-radius: 7px; }
-QListWidget#navigation::item:selected { background: #32605e; color: white; }
-QListWidget#navigation::item:hover { background: #275251; }
-QListWidget#navigation::item:selected:hover { background: #32605e; color: white; }
+QListWidget#navigation::item { padding: 6px 12px; margin: 2px 0; background: transparent; }
+QListWidget#navigation::item:selected { background: transparent; color: white; }
+QListWidget#navigation::item:hover { background: transparent; }
 QListWidget#navigation::item:disabled { color: #8cafa7; background: transparent; padding: 18px 0 5px; }
 QFrame#sidebar QLineEdit#sidebarOwner {
     font-size: 13px; font-weight: 600; color: #e4efeb; background: transparent;
@@ -53,6 +52,7 @@ QLabel#editorError { color: #9b332c; }
 QFrame#card { background: #e7efeb; border: none; border-radius: 12px; padding: 12px; }
 QFrame#card QLabel { background: transparent; }
 QLabel#cardValue { font-family: "Geist Mono"; font-size: 29px; color: #235b58; }
+/* Action buttons fit their radius to their live size in controls.py. Embedded controls retain this default. */
 QPushButton, QToolButton {
     border: none;
     outline: none;
@@ -72,17 +72,21 @@ QPushButton[primary="true"]:focus, QToolButton[primary="true"]:focus { backgroun
 QPushButton[primary="true"]:disabled { background: #a6beb6; border-color: #a6beb6; }
 QPushButton#step { text-align: left; padding: 15px; background: white; }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox {
-    background: white;
-    border: 1px solid #d3ded9;
+    background: #edf2f0;
+    border: none;
     border-radius: 8px;
-    padding: 7px 9px;
+    padding: 8px 10px;
     selection-background-color: #3e7c70;
     selection-color: white;
 }
-QLineEdit:focus, QPlainTextEdit:focus { border-color: #367a6d; }
+QLineEdit:hover, QPlainTextEdit:hover, QTextEdit:hover,
+QDateEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover { background: #eaf2ee; }
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
+QDateEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { background: #e0ebe5; }
 QLineEdit:read-only { background: #edf2ef; color: #65766e; }
-QLineEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QDateEdit:disabled {
-    background: #edf1ef; border-color: #e1e7e3; color: #9ba8a1;
+QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled,
+QComboBox:disabled, QDateEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
+    background: #edf1ef; color: #9ba8a1;
 }
 QComboBox#workspaceSelect[savedDisplay="true"]:disabled { color: #243b3b; }
 QLabel:disabled { color: #9ba8a1; }
@@ -100,12 +104,15 @@ QCheckBox::indicator:checked, QListWidget#budgetAccountChecklist::indicator:chec
 QCheckBox::indicator:disabled { border-color: #b9c6bf; background: #e6ede8; }
 QCheckBox::indicator:checked:disabled { background: #94afa5; }
 QListWidget#budgetAccountChecklist { outline: none; }
-QComboBox::drop-down { width: 24px; border: none; }
-QComboBox { padding-right: 28px; border: none; border-radius: 9px; combobox-popup: 0; }
+QComboBox::drop-down { width: 0; border: none; }
+QComboBox { padding-left: 12px; padding-right: 12px; combobox-popup: 0; }
 QComboBox:hover { background: #edf3f0; }
 QComboBox:focus { background: #e3eee7; }
-QComboBox QLineEdit { border: none; background: transparent; padding: 0; }
-QComboBox::down-arrow { image: url("aurumui:chevron_down.svg"); width: 10px; height: 6px; }
+/* Cell editors keep their resting fill until editing or keyboard focus. */
+QTableWidget QLineEdit:enabled:!read-only:!focus:hover,
+QTableWidget QComboBox:enabled:!focus:hover { background: #edf2f0; }
+QComboBox QLineEdit, QAbstractSpinBox QLineEdit { border: none; background: transparent; padding: 0; }
+QComboBox::down-arrow { image: none; width: 0; height: 0; }
 QComboBox QAbstractItemView {
     background: transparent; border: none; border-radius: 12px; padding: 4px;
     selection-background-color: #e2ede7; selection-color: #204e48; color: #243b3b; outline: none;
@@ -138,13 +145,15 @@ QHeaderView::section {
     font-size: 11px;
     font-weight: 600;
 }
-QTableWidget[ledgerTable="true"] { border: none; border-radius: 12px; }
+QTableView QWidget#qt_scrollarea_vcontainer, QTableView QScrollBar:vertical { background: white; }
+QTableWidget[roundedTable="true"] { border-radius: 10px; }
+QWidget#tableHeaderGutter { background: #e0ebe5; border-bottom: 1px solid #d0ddd5; }
+QTableWidget[ledgerTable="true"] { border: none; border-radius: 10px; }
 QTableWidget[ledgerTable="true"]::item { border: none; border-bottom: 1px solid #d7e1dc; padding: 7px 8px; }
-QTableWidget[ledgerTable="true"]::item:hover { background: #eaf2ee; }
 QTableWidget[ledgerTable="true"]::item:selected { background: #d6e6df; color: #243b3b; }
-QTableWidget[ledgerTable="true"]::item:selected:hover { background: #d6e6df; color: #243b3b; }
 QTabWidget::pane { border: 1px solid #d4e0d9; background: #f5f7f6; border-radius: 6px; }
 QTabBar::tab { padding: 10px 18px; background: transparent; margin-right: 3px; }
+QTabBar::tab:enabled:!selected:hover { background: #e0ebe5; }
 QTabBar::tab:selected { background: #2e6a61; color: white; }
 QScrollArea { border: none; background: transparent; }
 QGroupBox {
@@ -156,7 +165,7 @@ QGroupBox {
 }
 QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
 QSplitter::handle { background: #d9e4dd; height: 4px; }
-QToolTip { background: #183f42; color: white; border: none; padding: 6px; }
+QToolTip { background: rgba(24, 63, 66, 240); color: white; border: none; border-radius: 9px; padding: 6px 10px; }
 
 /* Monthly navigation and Overview. */
 QLabel#overviewTitle, QLabel#setupTitle {
@@ -166,7 +175,7 @@ QLabel#overviewTitle, QLabel#setupTitle {
 QLabel#monthLabel { font-size: 20px; font-weight: 600; padding: 0; }
 QLabel#monthRange { font-size: 10px; font-weight: 400; color: #637a78; padding: 0; }
 QToolButton#monthArrow, QToolButton#workspaceRefresh {
-    background: transparent; border: none; border-radius: 6px; padding: 0;
+    background: transparent; border: none; padding: 0;
 }
 QToolButton#monthArrow:hover, QToolButton#workspaceRefresh:hover { background: #e0ebe5; }
 QToolButton#monthArrow:pressed, QToolButton#workspaceRefresh:pressed { background: #d1e1d8; }
@@ -196,7 +205,6 @@ QPushButton#overviewStage[tone="done"]:focus, QPushButton#overviewStage[tone="do
 QPushButton#overviewStage QLabel { background: transparent; }
 QPushButton#overviewStage[tone="done"] QLabel { color: white; }
 QLabel#overviewStageTitle { font-size: 13px; font-weight: 600; }
-QLabel#overviewStageTitle[emphasized="true"] { text-decoration: underline; }
 QLabel#overviewStageValue { font-size: 12px; font-weight: 400; }
 QLabel#overviewIcon { background: transparent; }
 QScrollArea#overviewScroll QScrollBar:vertical {
@@ -213,9 +221,9 @@ QScrollArea#overviewScroll QScrollBar::sub-page:vertical { background: transpare
 
 /* Setup sections, item editors and the fixed save bar. */
 QFrame#setupPalettePill { background: #ffffff; border: none; border-radius: 9px; }
-QComboBox#setupAppearance { font-size: 11px; padding: 0 24px 0 6px; border: none; }
+QComboBox#setupAppearance { font-size: 11px; padding: 0 12px; border: none; }
 QWidget#setupThemeControls { background: transparent; }
-QComboBox#setupTheme { background: transparent; border: none; padding: 0 24px 0 6px; }
+QComboBox#setupTheme { background: transparent; border: none; padding: 0 6px; }
 QComboBox#setupTheme:hover, QComboBox#setupAppearance:hover { background: #edf3f0; }
 QComboBox#setupTheme:focus, QComboBox#setupAppearance:focus { background: #e0ebe5; }
 QFrame#setupSummary { background: #e7efeb; border: none; border-radius: 12px; }
@@ -242,10 +250,13 @@ QLabel#setupConnectionDialogTitle {
     font-family: "Geist"; font-size: 18px; font-weight: 500; font-variant: normal;
 }
 QToolButton#jobDetails { border: none; background: transparent; padding: 0; }
-QToolButton#jobDetails:hover { background: #e0ebe5; }
+QToolButton#jobDetails:enabled:!checked:hover,
+QToolButton#manualDisclosure:enabled:hover, QComboBox#analysisAssetAccount:enabled:hover {
+    background: #e0ebe5;
+}
 QToolButton#jobDetails:checked { background: #d1e4da; }
 QToolButton#budgetAction, QToolButton#reportFolderButton {
-    border: none; background: transparent; padding: 5px; border-radius: 6px;
+    border: none; background: transparent; padding: 5px;
 }
 QToolButton#budgetCopy { border: none; background: transparent; padding: 0; }
 QToolButton#budgetCopy:hover { background: #dceae2; }
@@ -255,13 +266,13 @@ QToolButton#budgetAction:pressed, QToolButton#reportFolderButton:pressed { backg
 QToolButton#budgetAction:focus, QToolButton#reportFolderButton:focus { background: #dceae2; }
 QWidget#budgetControlCell { background: transparent; }
 QToolButton#catalogueAdd, QToolButton#catalogueRemove {
-    border: none; background: transparent; padding: 0; border-radius: 6px;
+    border: none; background: transparent; padding: 0;
 }
 QToolButton#catalogueAdd:hover, QToolButton#catalogueRemove:hover { background: #dceae2; }
 QToolButton#catalogueAdd:pressed, QToolButton#catalogueRemove:pressed { background: #c9dfd3; }
 QToolButton#catalogueAdd:focus, QToolButton#catalogueRemove:focus { background: #dceae2; }
 QToolButton#setupIconAction, QPushButton#chatGPTIconButton {
-    border: none; background: transparent; padding: 0; border-radius: 7px;
+    border: none; background: transparent; padding: 0;
 }
 QToolButton#setupIconAction:hover, QPushButton#chatGPTIconButton:hover { background: #dceae2; }
 QToolButton#setupIconAction:focus, QPushButton#chatGPTIconButton:focus { background: #dceae2; }
@@ -272,6 +283,12 @@ QToolButton#setupIconAction[primary="true"]:hover,
 QPushButton#chatGPTIconButton[primary="true"]:hover { background: #24594f; }
 QToolButton#setupIconAction[primary="true"]:disabled,
 QPushButton#chatGPTIconButton[primary="true"]:disabled { background: #c5d7ce; }
+/* Provider marks use their monochrome artwork on the same dark surface in every workspace. */
+QPushButton#providerConnection { background: rgb(10, 10, 10); border: none; border-radius: 14px; padding: 0; }
+QPushButton#providerConnection:hover { background: rgb(42, 42, 42); }
+QPushButton#providerConnection:focus { background: rgb(72, 72, 72); }
+QPushButton#providerConnection:pressed { background: rgb(27, 27, 27); }
+QPushButton#providerConnection:disabled { background: rgb(55, 55, 55); }
 QFrame#setupNotice { background: #e3eeea; border: none; border-radius: 8px; }
 QFrame#setupNotice QLabel { background: transparent; }
 QTabWidget#setupTabs::pane { border: none; background: transparent; }
@@ -295,6 +312,7 @@ QFrame#setupFooter { border: none; background: transparent; }
 QLabel#setupError { color: #9b332c; background: #f8ebe8; padding: 10px; border-radius: 6px; }
 QFrame#configGroup { background: #edf3f0; border: 1px solid #dce5e1; border-radius: 7px; }
 QFrame#configGroup QLabel, QFrame#configGroup QCheckBox { background: transparent; }
+QFrame#configGroup QCheckBox:enabled:hover { background: #e0ebe5; border-radius: 4px; }
 QLabel#configEmpty { color: #637a78; padding: 16px; }
 QListWidget#configList::item { padding: 8px 10px; }
 QToolButton#configDisclosure { border: none; background: transparent; padding: 5px 8px; }
@@ -313,26 +331,38 @@ QLabel#budgetSection {
     background: transparent;
 }
 QFrame#budgetAccountsPopup { background: white; border: none; border-radius: 12px; }
-QLineEdit#budgetAmount { padding: 6px 3px; }
-QLabel#budgetAutomatic { background: transparent; color: #637a78; font-size: 11px; }
+QLineEdit#budgetAmount { background: transparent; padding: 6px 3px; }
+QLineEdit#budgetAmount:focus { background: #e0ebe5; border-radius: 4px; }
+QLabel#budgetAutomatic { background: transparent; color: #637a78; }
 QToolButton#budgetAccountLink {
-    background: transparent; border: none; padding: 0; border-radius: 6px; font-size: 12px; font-weight: 400;
+    background: transparent; border: none; padding: 0; border-radius: 4px;
 }
-QToolButton#budgetAccountLink:hover, QToolButton#budgetAccountLink:focus { background: #dceae2; }
-QTableWidget#budgetCategoryTable, QTableWidget#reportInvestmentTable,
+QToolButton#budgetAccountLink:focus { background: #dceae2; }
+QTableWidget#budgetCategoryTable { border: none; border-radius: 10px; }
+QTableWidget#budgetCategoryTable QWidget#tableHeaderGutter { background: #eaf1ed; border: none; }
+QTableWidget#reportInvestmentTable,
 QTableWidget#reportAssetGroupTable { border: none; border-radius: 9px; }
 QTableWidget#budgetCategoryTable QHeaderView::section,
 QTableWidget#reportInvestmentTable QHeaderView::section,
 QTableWidget#reportAssetGroupTable QHeaderView::section {
     background: #eaf1ed; border: none; padding: 8px; font-size: 11px;
 }
+QTableWidget#budgetCategoryTable QHeaderView, QTableWidget#reportInvestmentTable QHeaderView,
+QTableWidget#reportAssetGroupTable QHeaderView { background: transparent; }
+QTableWidget#reportInvestmentTable QHeaderView::section:first,
+QTableWidget#reportAssetGroupTable QHeaderView::section:first { border-top-left-radius: 9px; }
+QTableWidget#reportInvestmentTable QHeaderView::section:last,
+QTableWidget#reportAssetGroupTable QHeaderView::section:last { border-top-right-radius: 9px; }
 QTableWidget#budgetCategoryTable QHeaderView::section { padding: 8px 3px; }
 QTableWidget#budgetCategoryTable::item { padding: 0; }
 QWidget#budgetAllocationChart { background: white; border-radius: 12px; }
 QListWidget#catalogueList { border: none; background: white; border-radius: 10px; }
-QListWidget#catalogueList::item { padding: 8px 10px; margin: 1px 4px; border-radius: 6px; }
+QListWidget#catalogueList::item {
+    height: 30px; padding: 0 12px; margin: 2px 4px; border-radius: 15px;
+}
+QListWidget#catalogueList::item:hover { background: #eaf2ee; }
 QListWidget#catalogueList::item:selected { background: #deebe4; color: #204e48; }
-QListWidget#catalogueList::item:disabled { color: #587469; background: white; padding-top: 15px; }
+QListWidget#catalogueList::item:disabled { background: #e3eeea; color: #355f58; }
 QScrollArea#catalogueDetails { border: none; background: transparent; }
 QLineEdit#catalogueBankField[emptyBankDetails="true"] { background: #edf1ef; color: #82958b; }
 QLineEdit#catalogueBankField[emptyBankDetails="true"]:focus { background: white; color: #243b3b; }
@@ -354,6 +384,10 @@ QLabel#workspacePageSubtitle {
     font-size: 13px; font-weight: 400; color: #637a78; padding: 0; margin: 0;
     min-height: 33px; max-height: 33px;
 }
+QTableWidget#journalPostingPreview { border: 1px solid #d7e1dc; border-radius: 8px; }
+QTableWidget#journalPostingPreview QHeaderView { background: transparent; }
+QTableWidget#journalPostingPreview QHeaderView::section:first { border-top-left-radius: 7px; }
+QTableWidget#journalPostingPreview QHeaderView::section:last { border-top-right-radius: 7px; }
 QTableWidget#journalPostingPreview::item { padding: 3px 4px; }
 QTableWidget#journalPostingPreview QHeaderView::section { padding: 5px; }
 QWidget#activityHeading { background: transparent; }
@@ -363,7 +397,7 @@ QFrame#statementImportPanel, QWidget#statementDetailPanel {
 }
 QFrame#statementImportPanel QLabel,
 QWidget#statementDetailPanel QLabel { background: transparent; }
-QToolButton#statementIconAction { border: none; background: transparent; padding: 0; border-radius: 7px; }
+QToolButton#statementIconAction { border: none; background: transparent; padding: 0; }
 QToolButton#statementIconAction:hover { background: #d4e5dc; }
 QToolButton#statementIconAction:checked { background: #c8ded2; }
 QToolButton#statementIconAction:focus { background: #d4e5dc; }
@@ -372,17 +406,16 @@ QLineEdit[searchField="true"] { border: none; outline: none; background: #eaf1ed
 QLineEdit[searchField="true"]:hover { background: #eaf2ee; }
 QLineEdit[searchField="true"]:focus { background: #e0ebe5; }
 QLineEdit[searchField="true"]:disabled { background: #edf1ef; color: #9ba8a1; }
-QPushButton#statementImportAction { padding: 0; border-radius: 8px; }
+QPushButton#statementImportAction { padding: 0; }
 QLabel#statementCount, QLabel#statementFactLabel { color: #637a78; font-size: 11px; }
 QLabel#statementFactValue { font-size: 13px; }
 QLabel#statementAmount { font-family: "Geist Mono"; font-size: 20px; font-weight: 500; }
 QWidget#statementDetailPanel QLabel#viewerStatus {
-    color: #285f53; background: #d2e6da; padding: 4px 9px; border-radius: 8px;
+    color: #285f53; background: #d2e6da; padding: 0 10px; border-radius: 12px;
 }
 QPlainTextEdit#statementDescription { border: none; background: transparent; padding: 0 0 0 10px; }
 QPlainTextEdit#reviewResponse { padding: 11px 23px; }
 QLabel#reviewQuestion { font-size: 14px; font-weight: 400; background: transparent; }
-QLabel#reviewResponseLabel { font-size: 13px; font-weight: 500; background: transparent; }
 QLabel#reviewDraftCount { font-size: 12px; font-weight: 400; color: #637a78; background: transparent; }
 QPlainTextEdit#statementImportResult { border: none; background: transparent; padding: 0; }
 QToolButton#manualIconAction { border: none; background: transparent; padding: 0; border-radius: 7px; }
@@ -390,10 +423,13 @@ QToolButton#manualIconAction:hover { background: #d4e5dc; }
 QToolButton#manualIconAction:focus { background: #d4e5dc; }
 QToolButton#manualIconAction::menu-indicator { image: none; width: 0; }
 QToolButton#manualDisclosure { border: none; background: transparent; padding: 6px 0; }
-QToolButton#manualDisclosure:hover { color: #2e6a61; }
+QToolButton#manualDisclosure:focus { background: #e0ebe5; }
+QToolButton#manualDisclosure:enabled:hover { color: #2e6a61; }
+QWidget#manualEntryEditor QPlainTextEdit, QWidget#journalEntryEditor QPlainTextEdit { border-radius: 10px; }
+QTabBar#manualEntryModes { background: #edf2ef; border-radius: 16px; }
 QTabBar#manualEntryModes::tab {
-    background: transparent; color: #41655d; border: none; border-radius: 8px;
-    margin-right: 5px; padding: 9px 18px;
+    background: transparent; color: #41655d; border: none; border-radius: 16px;
+    margin: 0; height: 32px; padding: 0 18px;
 }
 QTabBar#manualEntryModes::tab:hover { background: #dcebe3; }
 QTabBar#manualEntryModes::tab:selected { background: #2e6a61; color: white; }
@@ -402,8 +438,9 @@ QPlainTextEdit#manualOutcomePreview { background: transparent; border: none; pad
 QMenu { background: white; border: none; border-radius: 12px; padding: 6px; }
 QMenu::item { padding: 9px 15px; margin: 2px; border: none; border-radius: 7px; }
 QMenu::item:selected { background: #e6f0e9; color: #2e5147; }
-QToolButton#journalPostingAction { border: none; background: transparent; padding: 0; border-radius: 6px; }
+QToolButton#journalPostingAction { border: none; background: transparent; padding: 0; }
 QToolButton#journalPostingAction:hover { background: #d4e5dc; }
+QWidget#journalPostingActionCell QToolButton:!focus:!checked:!pressed:hover { background: transparent; }
 QToolButton#journalPostingAction:checked { background: #c8ded2; }
 QToolButton#journalPostingAction:focus { background: #d4e5dc; }
 QWidget#journalPostingDetails { background: #eaf1ed; border: none; border-radius: 10px; }
@@ -444,9 +481,9 @@ QLabel#viewerTitle {
 QLabel#viewerAmount { font-family: "Geist Mono"; font-size: 20px; font-weight: 500; color: #235b58; }
 QLabel#viewerLabel { color: #637a78; font-size: 11px; }
 QLabel#viewerValue { font-size: 13px; }
-QLabel#viewerStatus { color: #285f53; background: #dcebe3; border-radius: 7px; padding: 4px 8px; }
+QLabel#viewerStatus { color: #285f53; background: #dcebe3; border-radius: 12px; padding: 0 10px; }
 QToolButton#viewerIconAction, QToolButton#journalIconAction {
-    border: none; background: transparent; padding: 0; border-radius: 7px;
+    border: none; background: transparent; padding: 0;
 }
 QToolButton#viewerIconAction:hover, QToolButton#journalIconAction:hover { background: #d4e5dc; }
 QToolButton#viewerIconAction:focus, QToolButton#journalIconAction:focus { background: #d4e5dc; }
@@ -459,3 +496,20 @@ QTabWidget#statementTabs::tab-bar, QTabWidget#manualTabs::tab-bar, QTabWidget#ca
 QTabWidget#reportsTabs::tab-bar {
     alignment: left;
 }
+
+QFrame#analysisPosition { background: #e7efeb; border: none; border-radius: 16px; }
+QFrame#analysisSection { background: white; border: none; border-radius: 12px; }
+QFrame#analysisPosition QLabel, QFrame#analysisSection QLabel { background: transparent; }
+QFrame#analysisSection QLabel[headingLevel="2"], QLabel#analysisNetHeading[headingLevel="2"] {
+    font-variant: small-caps;
+}
+QLabel#analysisNetHeading[headingLevel="2"] { font-size: 30px; }
+QComboBox#analysisAssetAccount {
+    font: 400 11px "Geist"; color: #637a78; background: transparent;
+    min-height: 19px; padding: 0 12px; border: none;
+}
+QComboBox#analysisAssetAccount:focus { color: #235b58; text-decoration: underline; }
+QLabel#analysisBalance { font: 500 32px "Geist Mono"; color: #235b58; }
+QLabel#analysisChange { font-size: 12px; color: #4d7069; }
+QLabel#analysisPositionDetail { font-size: 13px; color: #637a78; }
+QLabel#analysisReadout { font-size: 12px; }

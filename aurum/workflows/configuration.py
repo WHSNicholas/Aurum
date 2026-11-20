@@ -111,32 +111,14 @@ def save_configurations(
     """
     if not changes:
         return {}
-    if set(changes) - set(documents) or set(changes) - set(CONFIGURATION_MODELS):
-        raise ValueError("Every changed configuration needs its original document.")
+    prepared = validate_configuration_changes(documents, changes)
     first = documents[next(iter(changes))]
     workspace, originals = first.workspace, first.originals
-    if any(
-        kind != document.kind or document.workspace != workspace or document.originals != originals
-        for kind, document in documents.items()
-    ):
-        raise ValueError("Configuration forms use different revisions. Reload before saving your changes.")
-    _check_originals(workspace, originals)
-    if any(content is None for content in originals.values()):
-        raise ValueError("Create the missing workspace files before saving configuration.")
-    proposed = _definitions(originals)
-    proposed.update(deepcopy(changes))
-    prepared, models = _validate(proposed)
     contents = {}
     for kind in CONFIGURATION_MODELS:
         if kind not in changes:
             continue
         document = documents[kind]
-        _protect_identities(document, prepared)
-        _protect_equity_roles(document, prepared)
-        try:
-            _protect_history(workspace, kind, document.data, prepared[kind], models)
-        except sqlite3.Error as error:
-            raise ValueError(f"Could not check saved accounting history: {error}") from None
         original = document.data
         if kind == "budget":
             original = _yaml().load(originals[kind].decode("utf-8"))
@@ -172,6 +154,43 @@ def save_configurations(
                 + "; reload and inspect these settings before continuing. " + str(error)
             ) from error
         raise
+
+
+def validate_configuration_changes(
+    documents: dict[str, ConfigurationDocument], changes: dict[str, Any],
+) -> dict:
+    """
+    Validate a complete configuration draft and its saved revision without replacing any files.
+
+    Remote provider checks can run after this local preflight. The eventual save repeats these checks so
+    external edits or accounting changes during a network request cannot bypass history protection.
+    """
+    if not changes:
+        return {}
+    if set(changes) - set(documents) or set(changes) - set(CONFIGURATION_MODELS):
+        raise ValueError("Every changed configuration needs its original document.")
+    first = documents[next(iter(changes))]
+    workspace, originals = first.workspace, first.originals
+    if any(
+        kind != document.kind or document.workspace != workspace or document.originals != originals
+        for kind, document in documents.items()
+    ):
+        raise ValueError("Configuration forms use different revisions. Reload before saving your changes.")
+    _check_originals(workspace, originals)
+    if any(content is None for content in originals.values()):
+        raise ValueError("Create the missing workspace files before saving configuration.")
+    proposed = _definitions(originals)
+    proposed.update(deepcopy(changes))
+    prepared, models = _validate(proposed)
+    for kind in changes:
+        document = documents[kind]
+        _protect_identities(document, prepared)
+        _protect_equity_roles(document, prepared)
+        try:
+            _protect_history(workspace, kind, document.data, prepared[kind], models)
+        except sqlite3.Error as error:
+            raise ValueError(f"Could not check saved accounting history: {error}") from None
+    return {kind: prepared[kind] for kind in changes}
 
 
 def initialise_workspace(workspace: Path) -> None:

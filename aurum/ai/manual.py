@@ -295,7 +295,7 @@ def manual_batch(
                 outcomes[case.submission.id] = ManualOutcome(
                     manual_id=case.submission.id, status="needs_review",
                     reason="Investment corrections must retain their units and carrying cost.",
-                    question="Supply the corrected holding, purchase, sale or withdrawal facts in Manual.",
+                    question="Enter the corrected holding, purchase, sale or withdrawal in Transactions.",
                     model=model, skill_version=skill.version,
                 )
                 continue

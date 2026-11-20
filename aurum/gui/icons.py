@@ -15,7 +15,7 @@ from PySide6.QtCore import QByteArray, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QApplication, QStyle, QStyleOptionToolButton, QStylePainter, QToolButton, QWidget,
+    QApplication, QPushButton, QStyle, QStyleOptionToolButton, QStylePainter, QToolButton, QWidget,
 )
 
 ICON_NAMES = (
@@ -23,6 +23,9 @@ ICON_NAMES = (
     "arrow_down_left", "arrow_up_right", "vault", "import", "process", "refresh", "chevron_left",
     "chevron_right", "folder", "person", "check", "error", "clock", "details", "add", "remove",
     "save", "login", "copy", "chevron_up", "chevron_down", "search", "close", "fit", "stop",
+    "analysis", "reports", "securities", "theme", "report_settings", "accounts", "budget", "connect_bank",
+    "sync_bank", "check_connection", "retry", "edit", "attach_evidence", "investment_disposal", "post",
+    "undo", "choose_pdf", "manual", "calendar",
 )
 # Switch to "outline" and restart Aurum to restore the unchanged original icons.
 ICON_SET = "solar_bold"
@@ -33,8 +36,8 @@ _ICON_SOURCES = {}
 _PIXMAP_SOURCES = {}
 _ALIASES = {
     "overview": "home", "setup": "settings", "chatgpt": "chat", "connection": "chat",
-    "statements": "document", "statement": "document", "review": "checklist",
-    "manual": "pen", "manual_entries": "pen", "journal": "ledger", "reports": "chart", "report": "chart",
+    "transactions": "document", "statements": "document", "statement": "document", "review": "checklist",
+    "manual_entries": "manual", "journal": "ledger", "report": "reports",
     "networth": "wallet", "net_worth": "wallet", "income": "arrow_down_left",
     "expenses": "arrow_up_right", "expense": "arrow_up_right", "savings": "vault",
     "progress": "clock", "left": "chevron_left", "right": "chevron_right", "workspace": "folder",
@@ -56,7 +59,10 @@ def icon_path(name: str) -> Path:
     if ICON_SET not in _ICON_FOLDERS:
         raise ValueError(f"Unknown desktop icon set: {ICON_SET}")
     # The stop square is an original Aurum asset shared by both icon sets.
-    folder = "ui" if name in _DISCLOSURE_ICONS or name == "stop" else _ICON_FOLDERS[ICON_SET]
+    folder = "ui" if name in _DISCLOSURE_ICONS or name in {"stop", "calendar"} else _ICON_FOLDERS[ICON_SET]
+    # The original bold pen already supplies Manual's pen-in-a-square design.
+    if name == "manual" and ICON_SET == "solar_bold":
+        name = "pen"
     return _ICON_ROOT / folder / f"{name}.svg"
 
 
@@ -79,6 +85,32 @@ def icon(name: str, colour: str = "#355653", size: int = 20) -> QIcon:
     if not tint.isValid():
         raise ValueError(f"Invalid icon colour: {colour}")
     return _LocalIcon(canonical, tint.name(QColor.NameFormat.HexArgb), size, colour)
+
+
+def connection_button(provider: str) -> QPushButton:
+    """
+    Show the provider's official mark on the shared dark connection button.
+    """
+    # The white Blossom SVG includes clear space around its mark. The Redbark asset is tightly framed.
+    filename, size = {
+        "Redbark": ("redbark-symbol.png", 14), "ChatGPT": ("openai-blossom-white.svg", 28),
+    }[provider]
+    button = QPushButton()
+    button.setObjectName("providerConnection")
+    button.setFixedSize(32, 28)
+    artwork = QIcon(str(_ICON_ROOT / "providers" / filename))
+    if provider == "Redbark":
+        mark = QPixmap(str(_ICON_ROOT / "providers" / filename))
+        painter = QPainter(mark)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(mark.rect(), Qt.GlobalColor.white)
+        painter.end()
+        artwork = QIcon(mark)
+    button.setIcon(artwork)
+    button.setIconSize(QSize(size, size))
+    button.setAccessibleName(f"Check {provider} connection")
+    button.setToolTip(button.accessibleName())
+    return button
 
 
 def recolour_icon(value: QIcon, colour: str) -> QIcon | None:

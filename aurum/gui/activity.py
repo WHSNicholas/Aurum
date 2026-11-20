@@ -14,22 +14,21 @@ requests to the application controller; these widgets never open the database, c
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
-from math import ceil
 
-from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFontMetrics, QPalette
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QFrame,
+    QAbstractItemView, QFileDialog, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem,
     QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QToolButton,
-    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget,
+    QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
 from aurum.gui.controls import (
-    EntryTable, HeaderActionButton, PageActionRow, SearchField, confirm_discard, wrapped_text_layout,
+    CentredComboBox, EntryTable, HeaderActionButton, PageActionRow, SearchField, confirm_discard,
 )
 from aurum.gui.icons import icon
 from aurum.gui.theme import gui_colour, monetary_font, monetary_text
@@ -44,7 +43,9 @@ class ActivityPage(QWidget):
     action_requested = Signal(str, object)
     dirty_changed = Signal(bool)
 
-    def __init__(self, title: str, explanation: str, columns: tuple, identity: str, parent=None):
+    def __init__(
+        self, title: str, explanation: str, columns: tuple, identity: str, parent=None, *, spacing: int = 10,
+    ):
         """
         Build the shared page layout and connect navigation without starting any workflow.
         """
@@ -58,7 +59,9 @@ class ActivityPage(QWidget):
         self._baseline = ""
         self._busy_buttons = {}
         self._busy = False
-        self.layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(spacing)
         self.heading_block = QWidget()
         self.heading_block.setObjectName("activityHeading")
         heading_layout = QVBoxLayout(self.heading_block)
@@ -78,7 +81,15 @@ class ActivityPage(QWidget):
         self.subtitle_row.addStrut(28)
         self.subtitle_row.addStretch(1)
         heading_layout.addLayout(self.subtitle_row)
-        self.layout.addWidget(self.heading_block)
+        outer.addWidget(self.heading_block)
+        self.activity_body = QStackedWidget()
+        content = QWidget()
+        self.activity_body.addWidget(content)
+        self.activity_body.addWidget(QWidget())
+        outer.addWidget(self.activity_body, 1)
+        self.layout = QVBoxLayout(content)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(spacing)
         self.toolbar = QHBoxLayout()
         self.search = SearchField("Search this table", self)
         self.toolbar.addWidget(self.search, 1)
@@ -180,6 +191,7 @@ class ActivityPage(QWidget):
         self.records = records
         self._loading = True
         self.table.setRowCount(len(records))
+        money_font = monetary_font(self.table.font())
         for row_index, record in enumerate(records):
             for column_index, (field, _) in enumerate(self.columns):
                 value = record.get(field, "")
@@ -193,12 +205,9 @@ class ActivityPage(QWidget):
                 item = QTableWidgetItem(display)
                 item.setToolTip(display if monetary else _text(value))
                 if monetary:
-                    item.setFont(monetary_font(self.table.font()))
+                    item.setFont(money_font)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_index, column_index, item)
-        self.table.resizeColumnsToContents()
-        for index in range(len(self.columns)):
-            self.table.setColumnWidth(index, min(360, max(90, self.table.columnWidth(index))))
         selected_index = next(
             (index for index, row in enumerate(records) if str(row.get(self.identity)) == selected), None,
         )
@@ -314,66 +323,22 @@ class PostingTable(QTableWidget):
 
 
 # %% 2. Statement Imports ------------------------------------------------------------------------------------
-class _StatementDelegate(QStyledItemDelegate):
+class _TransactionDelegate(QStyledItemDelegate):
     """
-    Wrap statement metadata while keeping the description as a compact, elided preview.
+    Present multiline source wording on one line while retaining the original text in the model.
     """
 
     def initStyleOption(self, option, index) -> None:
         """
-        Use the native table rendering with wrapping enabled for every field except Description.
+        Flatten explicit line breaks before Qt elides the visible cell text.
         """
         super().initStyleOption(option, index)
-        if index.column() == 2:
-            option.features &= ~QStyleOptionViewItem.ViewItemFeature.WrapText
-            option.textElideMode = Qt.TextElideMode.ElideRight
-        else:
-            option.features |= QStyleOptionViewItem.ViewItemFeature.WrapText
-            option.textElideMode = Qt.TextElideMode.ElideNone
-
-    def sizeHint(self, option, index) -> QSize:
-        """
-        Measure account and source text using the same wrap layout used for painting.
-        """
-        size = super().sizeHint(option, index)
-        if index.column() in {1, 4}:
-            styled = QStyleOptionViewItem(option)
-            self.initStyleOption(styled, index)
-            width = self.parent().columnWidth(index.column()) - 25
-            text = wrapped_text_layout(styled.text, styled.font, width, styled.displayAlignment)
-            size.setHeight(max(36, ceil(text.boundingRect().height()) + 16))
-        return size
-
-    def paint(self, painter, option, index) -> None:
-        """
-        Preserve native selection fills while drawing every character of account and source metadata.
-        """
-        if index.column() not in {1, 4}:
-            super().paint(painter, option, index)
-            return
-        styled = QStyleOptionViewItem(option)
-        self.initStyleOption(styled, index)
-        text = wrapped_text_layout(
-            styled.text, styled.font, styled.rect.width() - 24, styled.displayAlignment,
-        )
-        styled.text = ""
-        self.parent().style().drawControl(
-            QStyle.ControlElement.CE_ItemViewItem, styled, painter, self.parent(),
-        )
-        painter.save()
-        painter.setClipRect(styled.rect)
-        role = QPalette.ColorRole.HighlightedText if styled.state & QStyle.StateFlag.State_Selected else (
-            QPalette.ColorRole.Text
-        )
-        painter.setPen(styled.palette.color(role))
-        top = styled.rect.top() + (styled.rect.height() - text.boundingRect().height()) / 2
-        text.draw(painter, QPointF(styled.rect.left() + 12, top))
-        painter.restore()
+        option.text = " ".join(option.text.splitlines())
 
 
-class StatementsPage(ActivityPage):
+class TransactionsPage(ActivityPage):
     """
-    Collect local PDF files for import and show the immutable statement lines already stored.
+    Browse bank movements and manual history together, with their original import and edit actions.
     """
 
     def __init__(self, parent=None):
@@ -381,12 +346,12 @@ class StatementsPage(ActivityPage):
         Keep statement preparation, saved transactions and inline inspection in one monthly workspace.
         """
         super().__init__(
-            "Statements", "Sync your bank accounts or import PDFs, then inspect the transactions.",
+            "Transactions", "Inspect bank transactions and manual journal entries.",
             (
                 ("date", "Date"), ("account", "Account"), ("description", "Description"),
                 ("amount", "Amount"), ("source_file", "Source"), ("status", "Status"),
             ),
-            "transaction_id", parent,
+            "row_id", parent,
         )
         self.paths = []
         self._importing_paths = ()
@@ -397,20 +362,28 @@ class StatementsPage(ActivityPage):
         self._statement_folder = ""
         self._refresh_error = ""
         self.setAcceptDrops(True)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(10)
         self.layout.removeItem(self.toolbar)
         self.layout.removeWidget(self.splitter)
         self.layout.removeWidget(self.empty)
 
         self.bank_sync = HeaderActionButton("Connect", icon_only=True)
-        self.bank_sync.setIcon(icon("refresh", colour="#ffffff", size=16))
+        self.bank_sync.setIcon(icon("connect_bank", colour="#ffffff", size=16))
         self.bank_sync.setAccessibleName("Connect or sync bank accounts")
         self.bank_sync.clicked.connect(lambda: self.action_requested.emit(
             "redbark_sync" if self.snapshot.get("bank_feed", {}).get("configured")
             else "open_bank_settings", {},
         ))
+        self.subtitle_row.setSpacing(8)
         self.subtitle_row.insertWidget(0, self.bank_sync, 0, Qt.AlignmentFlag.AlignLeft)
+        self.new_button = HeaderActionButton("New entry", icon_only=True)
+        self.new_button.setIcon(icon("add", colour="#ffffff", size=16))
+        self.new_button.setAccessibleName("New manual entry")
+        self.new_button.setToolTip("Add a manual entry")
+        self.new_button.setEnabled(False)
+        self.new_button.clicked.connect(lambda: self.action_requested.emit(
+            "open_manual_editor", {"mode": "instruction"},
+        ))
+        self.subtitle_row.insertWidget(1, self.new_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.bank_status = QLabel()
         self.bank_status.setObjectName("workspaceHint")
         self.bank_status.setTextFormat(Qt.TextFormat.PlainText)
@@ -421,13 +394,13 @@ class StatementsPage(ActivityPage):
         queue = QFrame()
         self.pdf_panel = queue
         queue.setObjectName("statementImportPanel")
-        queue.setToolTip("Choose PDFs or drop them here. Preparation keeps a copy in this workspace.")
+        queue.setToolTip("Choose or drop PDFs")
         queue_layout = QVBoxLayout(queue)
         queue_layout.setContentsMargins(4, 10, 12, 10)
         queue_layout.setSpacing(6)
         queue_actions = QHBoxLayout()
         queue_actions.setSpacing(4)
-        self.choose_button = self._icon_button("Choose statement PDFs", "folder")
+        self.choose_button = self._icon_button("Choose statement PDFs", "choose_pdf")
         self.choose_button.clicked.connect(self._choose_files)
         queue_actions.addWidget(self.choose_button)
         self.queue_empty = QLabel("Choose PDFs")
@@ -437,10 +410,10 @@ class StatementsPage(ActivityPage):
         self.queue_count.setObjectName("workspaceStatus")
         queue_actions.addWidget(self.queue_count, 0, Qt.AlignmentFlag.AlignVCenter)
         queue_actions.addSpacing(16)
-        self.retry_stage_button = self._icon_button("Retry PDF preparation", "refresh")
+        self.retry_stage_button = self._icon_button("Retry PDF preparation", "retry")
         self.retry_stage_button.clicked.connect(self._retry_staging)
         queue_actions.addWidget(self.retry_stage_button)
-        self.clear_button = self._icon_button("Clear the PDF queue", "close")
+        self.clear_button = self._icon_button("Clear the PDF queue", "undo")
         self.clear_button.clicked.connect(self._clear_files)
         queue_actions.addWidget(self.clear_button)
         self.import_button = QPushButton()
@@ -469,7 +442,7 @@ class StatementsPage(ActivityPage):
         self.search.setPlaceholderText("Search transactions")
         self.search.setObjectName("statementSearch")
         self.search.setAccessibleName("Search transactions, accounts and statements")
-        self.pdf_toggle = self._icon_button("Choose PDFs", "document")
+        self.pdf_toggle = self._icon_button("Choose PDFs", "choose_pdf")
         self.pdf_toggle.setFixedSize(36, 36)
         self.pdf_toggle.clicked.connect(self._choose_files)
         self.toolbar.addWidget(self.pdf_toggle, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -478,8 +451,9 @@ class StatementsPage(ActivityPage):
         self.layout.addWidget(self.empty)
 
         self.table.setObjectName("statementTransactions")
-        self.table.setItemDelegate(_StatementDelegate(self.table))
-        self.table.setWordWrap(True)
+        self.table.setItemDelegate(_TransactionDelegate(self.table))
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._column_widths = None
         self._column_timer = QTimer(self)
@@ -488,13 +462,19 @@ class StatementsPage(ActivityPage):
         self.table.viewport().installEventFilter(self)
         self.table.horizontalHeaderItem(3).setToolTip("Amount in Australian dollars (AUD)")
         self.table.setMinimumHeight(120)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.verticalHeader().setMinimumSectionSize(36)
         self.table.verticalHeader().setDefaultSectionSize(36)
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.layout.addWidget(self.table, 1)
         self.detail.hide()
         self.splitter.hide()
-        self.transaction_details = TransactionDetails(self)
+        self.transaction_details = TransactionDetails(self, manual_postings=True)
+        self.table.doubleClicked.connect(lambda _index: self.transaction_details.edit_button.click())
+        self.transaction_details.review_button.clicked.connect(lambda: self.action_requested.emit(
+            "open_manual_review", {"manual_entry_id": self.current["manual_entry_id"]},
+        ))
         self.transaction_details.action_requested.connect(self.action_requested.emit)
         self.transaction_details.dismissed.connect(self._clear_selection)
         self.detail_layout.setContentsMargins(0, DETAIL_SECTION_GAP - self.layout.spacing(), 0, 0)
@@ -503,7 +483,8 @@ class StatementsPage(ActivityPage):
         self.layout.addWidget(self.detail)
         self._render_queue()
         self._filter_changed()
-        QWidget.setTabOrder(self.bank_sync, self.search)
+        QWidget.setTabOrder(self.bank_sync, self.new_button)
+        QWidget.setTabOrder(self.new_button, self.search)
 
     def refresh(self, snapshot: dict) -> None:
         """
@@ -515,6 +496,8 @@ class StatementsPage(ActivityPage):
         feed = snapshot.get("bank_feed", {})
         connected = bool(feed.get("configured"))
         self.bank_sync.setText("Sync" if connected else "Connect")
+        self.bank_sync.setIcon(icon("sync_bank" if connected else "connect_bank",
+                                   gui_colour(self, "on_accent", "#ffffff"), size=16))
         self.bank_sync.setAccessibleName("Sync bank accounts" if connected else "Connect bank accounts")
         self.bank_sync.setEnabled(not self._busy)
         mappings = [item for item in feed.get("mappings", []) if item.get("enabled")]
@@ -522,35 +505,38 @@ class StatementsPage(ActivityPage):
         if feed.get("connection_error"):
             errors.insert(0, str(feed["connection_error"]))
         checked = [str(item["last_success"]) for item in mappings if item.get("last_success")]
-        count = len(feed.get("conflicts", []))
-        self.bank_status.setText(
-            f"{count} bank import issue(s) in Review" if count else
-            "Bank sync needs attention" if errors else ""
-        )
-        self.bank_status.setVisible(bool(count or errors))
+        self.bank_status.setText("Bank sync needs attention" if errors else "")
+        self.bank_status.setVisible(bool(errors))
         self.bank_status.setToolTip("\n".join(errors) if errors else (
             "Last successful check: " + min(checked) + "\nRedbark may return cached bank activity."
             if checked else "Sync imports bank evidence. Process creates journal entries separately."
         ))
         self.bank_sync.setToolTip(
-            "Sync bank accounts\n" + self.bank_status.toolTip()
+            "Sync bank accounts"
             if connected else "Connect Redbark in Setup → Accounts."
         )
-        reviews = {row["transaction_id"]: row for row in snapshot.get("reviews", [])}
-        rows = []
-        for source in snapshot.get("transactions", []):
-            review = reviews.get(source["transaction_id"], {})
-            rows.append({
-                **source, "status": review.get("status") or "imported",
-                "review_status": review.get("review_status") or "",
-            })
-        self._set_records(rows)
+        available = snapshot.get("ready") and not snapshot.get("error")
+        self.new_button.setEnabled(bool(available and not self._busy))
+        previous = self.current or {}
+        self._set_records(_transaction_rows(snapshot))
+        if self.current is None and previous.get("row_id", "").startswith("manual:"):
+            for index, row in enumerate(self.records):
+                if self.table.isRowHidden(index) or row.get("manual_entry_id") != previous["manual_entry_id"]:
+                    continue
+                self.table.selectRow(index)
+                break
         for row, record in enumerate(self.records):
             source = str(record.get("source_file") or "")
-            self.table.item(row, 4).setText(
-                str(record.get("source_label")) if record.get("source_label")
-                else Path(source).name if source else ""
-            )
+            if record.get("source_label") == "Manual Journal":
+                amount_cell = self.table.item(row, 3)
+                amount_cell.setToolTip(
+                    f"{amount_cell.text()} · Total journal debits" if record.get("postings")
+                    else "Awaiting journal postings"
+                )
+            source_label = str(record.get("source_label") or Path(source).name)
+            self.table.item(row, 4).setText(source_label)
+            source_tip = f"{source_label}\n{source}" if source and source != source_label else source_label
+            self.table.item(row, 4).setToolTip(source_tip)
             for column in (3, 4, 5):
                 self.table.item(row, column).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self._column_widths = None
@@ -573,17 +559,22 @@ class StatementsPage(ActivityPage):
 
     def _size_columns(self) -> None:
         """
-        Measure saved text once per refresh, wrapping long names when the viewport cannot fit them inline.
+        Fit date, amount and status first, then share the remaining space with account and source.
         """
         available = self.table.viewport().width()
         if self._column_widths is None:
             widths = {}
             header_metrics = QFontMetrics(self.table.horizontalHeader().font())
+            option = QStyleOptionViewItem()
+            self.table.initViewItemOption(option)
             for column in (0, 1, 3, 4, 5):
                 width = header_metrics.horizontalAdvance(self.table.horizontalHeaderItem(column).text()) + 28
-                for row in range(self.table.rowCount()):
-                    item = self.table.item(row, column)
-                    width = max(width, QFontMetrics(item.font()).horizontalAdvance(item.text()) + 28)
+                if self.table.rowCount():
+                    styled = QStyleOptionViewItem(option)
+                    self.table.itemDelegate().initStyleOption(styled, self.table.model().index(0, column))
+                    metrics = QFontMetrics(styled.font)
+                    texts = {self.table.item(row, column).text() for row in range(self.table.rowCount())}
+                    width = max(width, max(metrics.horizontalAdvance(text) for text in texts) + 28)
                 widths[column] = width
             self._column_widths = widths
         widths = dict(self._column_widths)
@@ -595,9 +586,6 @@ class StatementsPage(ActivityPage):
             widths[1], widths[4] = account, flexible - account
         for column, width in widths.items():
             self.table.setColumnWidth(column, width)
-        self.table.resizeRowsToContents()
-        for row in range(self.table.rowCount()):
-            self.table.setRowHeight(row, max(36, self.table.rowHeight(row)))
 
     def set_statement_folder(self, folder: str) -> None:
         """
@@ -618,6 +606,8 @@ class StatementsPage(ActivityPage):
         """
         self._busy = busy
         self.bank_sync.setEnabled(not busy)
+        available = self.snapshot.get("ready") and not self._refresh_error and not self.snapshot.get("error")
+        self.new_button.setEnabled(bool(available and not busy))
         self._update_queue_controls()
         self.transaction_details.set_busy(busy)
         if not busy:
@@ -649,6 +639,7 @@ class StatementsPage(ActivityPage):
         """
         if action == "refresh":
             self._refresh_error = message
+            self.new_button.setEnabled(False)
             self.transaction_details.set_stale(True)
             self._filter_changed()
             return
@@ -811,16 +802,13 @@ class StatementsPage(ActivityPage):
 
     def _filter_changed(self) -> None:
         """
-        Show a useful result count and clear details when the selected transaction is filtered out.
+        Show availability errors and clear details when the selected transaction is filtered out.
         """
         super()._filter_changed()
-        shown = sum(not self.table.isRowHidden(row) for row in range(len(self.records)))
         if self._refresh_error or self.snapshot.get("error") or self.snapshot.get("ready") is False:
             message = "Transactions unavailable. Check Setup and refresh the workspace."
-        elif not shown:
-            message = ""
         else:
-            message = f"{shown} of {len(self.records)} transactions in this reporting month"
+            message = ""
         self.empty.setText(message)
         self.empty.setVisible(bool(message))
         if self.current:
@@ -957,16 +945,28 @@ class StatementsPage(ActivityPage):
         """
         Reveal the exact linked bank line and display its details below the saved-transaction table.
         """
-        if not super().select_record(identifier):
-            return False
-        self._selection_changed()
-        return bool(self.current and str(self.current.get(self.identity)) == str(identifier))
+        for row in self.records:
+            if identifier in (row["row_id"], row.get("transaction_id"), row.get("manual_entry_id")):
+                if super().select_record(row["row_id"]):
+                    self._selection_changed()
+                    return bool(self.current and self.current["row_id"] == row["row_id"])
+        return False
 
     def _show_record(self, record: dict | None) -> None:
         """
         Keep the bottom detail panel aligned with the selected source and current snapshot state.
         """
         self.transaction_details.update_record(record, self.snapshot)
+        manual = record if record and record.get("manual_entry_id") else {}
+        direct = manual.get("entry_mode") == "direct"
+        self.transaction_details.set_header_action(
+            ("Edit journal entry" if direct else "Edit instruction") if manual else None,
+            lambda: self.action_requested.emit("open_manual_editor", {
+                "manual_entry_id": manual["manual_entry_id"],
+                "journal_entry_id": manual.get("journal_entry_id"),
+                "mode": "direct" if direct else "instruction",
+            }),
+        )
         self.transaction_details.set_stale(bool(self._refresh_error or self.snapshot.get("error")))
         self.detail.setVisible(record is not None)
 
@@ -996,8 +996,6 @@ class ReviewPage(ActivityPage):
         self._processing = False
         self._bank_aliases = {}
         self._review_aliases = {}
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(10)
         self.process_button = HeaderActionButton("Process", icon_only=True)
         self.process_button.clicked.connect(lambda: self.action_requested.emit("process_journal", {}))
         self.subtitle_row.setSpacing(8)
@@ -1011,7 +1009,7 @@ class ReviewPage(ActivityPage):
         self.subtitle_row.insertWidget(2, self.draft_count)
         self.discard_changes_button = HeaderActionButton("Discard all unsaved responses", icon_only=True)
         self.discard_changes_button.setProperty("primary", False)
-        self.discard_changes_button.setIcon(icon("remove", size=16))
+        self.discard_changes_button.setIcon(icon("undo", size=16))
         self.discard_changes_button.clicked.connect(self._discard_local_changes)
         self.subtitle_row.insertWidget(3, self.discard_changes_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.save_status = QLabel()
@@ -1019,7 +1017,7 @@ class ReviewPage(ActivityPage):
         self.save_status.setWordWrap(True)
         self.save_status.setTextFormat(Qt.TextFormat.PlainText)
         self.save_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.layout.insertWidget(1, self.save_status)
+        self.layout.insertWidget(0, self.save_status)
         self.layout.removeItem(self.toolbar)
         self.layout.removeWidget(self.empty)
         self.splitter.setOrientation(Qt.Orientation.Horizontal)
@@ -1032,18 +1030,12 @@ class ReviewPage(ActivityPage):
         queue_layout.setContentsMargins(0, 0, 0, 0)
         queue_layout.setSpacing(8)
         self.search.setPlaceholderText("Search reviews")
-        self.filter = QComboBox()
+        self.filter = CentredComboBox()
         self.filter.setObjectName("reviewFilter")
         self.filter.setView(QListView(self.filter))
         self.filter.setAccessibleName("Review work status")
         self.filter.addItems(["Posted", "Review", "Ready", "All"])
         self.filter.setCurrentIndex(1)
-        arrow = (Path(__file__).parent / "assets" / "chevron_down.svg").as_posix()
-        self.filter.setStyleSheet(
-            "QComboBox { padding-right: 28px; }"
-            "QComboBox::drop-down { width: 28px; border: none; }"
-            f'QComboBox::down-arrow {{ image: url("{arrow}"); width: 12px; height: 12px; }}'
-        )
         self.filter.currentIndexChanged.connect(self._status_filter_changed)
         self.filter.setFixedWidth(112)
         self.toolbar.addWidget(self.filter)
@@ -1133,12 +1125,6 @@ class ReviewPage(ActivityPage):
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(6)
         editor_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        response_heading = QHBoxLayout()
-        response_heading.setContentsMargins(DETAIL_TEXT_INSET, 0, 14, 0)
-        label = QLabel("Response")
-        label.setObjectName("reviewResponseLabel")
-        response_heading.addWidget(label)
-        response_heading.addStretch()
         self.discard_button = QToolButton()
         self.discard_button.setObjectName("viewerIconAction")
         self.discard_button.setIcon(icon("remove", size=16))
@@ -1147,19 +1133,17 @@ class ReviewPage(ActivityPage):
         self.discard_button.setAccessibleName("Discard saved pending response")
         self.discard_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.discard_button.clicked.connect(self._discard_pending)
-        response_heading.addWidget(self.discard_button)
-        editor_layout.addLayout(response_heading)
+        editor_layout.addWidget(self.discard_button, 0, Qt.AlignmentFlag.AlignRight)
         self.answer = QPlainTextEdit()
         self.answer.setObjectName("reviewResponse")
         self.answer.document().setDocumentMargin(0)
         self.answer.setFixedHeight(128)
         self.answer.setAccessibleName("Response")
-        self.answer.setPlaceholderText("Write your response")
         self._response_help = (
             "Save #remember followed by a reusable rule to share it with both AI workflows. "
             "A trailing #remember keeps the whole response. Edit or remove the tag to update memory."
         )
-        self.answer.setToolTip(self._response_help)
+        self._set_response_prompt("")
         editor_layout.addWidget(self.answer)
         section_layout.addWidget(self.response_panel, 0, Qt.AlignmentFlag.AlignTop)
         self.other_panel = QWidget()
@@ -1301,8 +1285,9 @@ class ReviewPage(ActivityPage):
             candidates = completed.get(identifier, [])
             if identifier in blocked:
                 representative = blocked[identifier]
-            elif (start and str(entry.get("date") or "") < start) or (
-                end and str(entry.get("date") or "") > end
+            elif not snapshot.get("activity_all") and (
+                (start and str(entry.get("date") or "") < start)
+                or (end and str(entry.get("date") or "") > end)
             ):
                 continue
             else:
@@ -1367,10 +1352,20 @@ class ReviewPage(ActivityPage):
         rows = self._queue_rows(snapshot)
         by_id = {row[self.identity]: row for row in rows}
         for identifier, draft in self._drafts.items():
-            by_id[identifier] = draft["record"]
+            day = draft["record"].get("date", "")
+            in_period = snapshot.get("period_start", "") <= day <= snapshot.get("period_end", "9999")
+            if identifier in by_id or snapshot.get("activity_all") or in_period:
+                by_id[identifier] = draft["record"]
         rows = list(by_id.values())
         selected = self.current.get(self.identity) if self.current else None
-        if selected and selected not in self._drafts:
+        if selected not in by_id and selected in self._drafts:
+            self.current = None
+            self._loading = True
+            self.table.clearSelection()
+            self.table.setCurrentCell(-1, -1)
+            self._loading = False
+            self._show_record(None)
+        elif selected and selected not in self._drafts:
             selected = selected if selected in by_id else self._review_aliases.get(selected, selected)
             self.current = by_id.get(selected)
         self._set_records(rows)
@@ -1395,7 +1390,8 @@ class ReviewPage(ActivityPage):
             )
         month = snapshot.get("month") or "the selected reporting month"
         dates = f"{snapshot.get('period_start', '')} to {snapshot.get('period_end', '')}"
-        self.process_button.setToolTip(
+        self.process_button.setToolTip(f"Process {snapshot.get('month') or 'selected month'}")
+        self.process_button.setAccessibleDescription(
             f"Process saved manual instructions, bank answers and bank transactions for {month} ({dates}), "
             "including complete linked events outside the month. Classify investment movements separately."
         )
@@ -1685,11 +1681,8 @@ class ReviewPage(ActivityPage):
         self.table.set_empty(not sum(counts.values()) and not retained)
         if self._refresh_error or self.snapshot.get("error") or self.snapshot.get("ready") is False:
             message = "Reviews unavailable. Refresh the workspace after resolving the error."
-        elif not sum(counts.values()):
-            message = ""
         else:
-            count = sum(counts.values())
-            message = f"{count} item{'s' if count != 1 else ''}"
+            message = ""
         if retained:
             message = "\n".join(filter(None, (message, "Your edited response is kept visible.")))
         self.empty.setText(message)
@@ -1731,7 +1724,7 @@ class ReviewPage(ActivityPage):
         if record and not bank:
             self._show_other(record)
             if responds:
-                self._set_response_prompt(self.question.text(), str(record.get("error") or ""))
+                self._set_response_prompt(str(record.get("question") or ""), self.question.text())
                 self.question.hide()
             self._update_controls()
             return
@@ -1740,18 +1733,12 @@ class ReviewPage(ActivityPage):
         else:
             owned = record.get("manual_entry_id")
             blocking = record.get("blocking_manual_entry_id")
-            question = str(record.get("question") or record.get("review_result") or "")
+            question = str(record.get("question") or "")
             if owned:
                 question = "This event belongs to a manual instruction. Make its correction there."
             elif blocking:
                 question = (
                     "A pending manual instruction claims this transaction. Resolve that instruction first."
-                )
-            elif not question:
-                question = (
-                    "Review the current postings. Explain a correction only if one is needed."
-                    if record.get("status") == "posted" else
-                    "Add guidance if needed, or process the month to categorise this transaction."
                 )
             self._set_response_prompt(question, str(record.get("review_result") or ""))
         self._update_controls()
@@ -1761,8 +1748,8 @@ class ReviewPage(ActivityPage):
         Show saved guidance as a placeholder while keeping it available after a response has been entered.
         """
         question = question.strip()
-        self.answer.setPlaceholderText(question or "Write your response")
-        self.answer.setAccessibleDescription(question)
+        self.answer.setPlaceholderText(question or "Review the transactions")
+        self.answer.setAccessibleDescription(self.answer.placeholderText())
         guidance = "\n\n".join(dict.fromkeys(value for value in (question, detail) if value))
         self.answer.setToolTip("\n\n".join(value for value in (guidance, self._response_help) if value))
 
@@ -1824,7 +1811,7 @@ class ReviewPage(ActivityPage):
         record = self.current
         if not record or record.get("kind") == "feed" or self._active_details is None:
             return
-        symbol = "pen"
+        symbol = "edit"
         if record["kind"] == "bank":
             if record.get("manual_entry_id") or record.get("blocking_manual_entry_id"):
                 label, callback = "Edit the owning manual instruction", self._open_manual
@@ -1878,14 +1865,14 @@ class ReviewPage(ActivityPage):
             sections = [str(record.get("message") or record.get("reason") or (
                 "Your saved transaction and posted entries have not changed. Keep the saved record only "
                 "after checking the bank evidence; any accounting adjustment belongs in the journal."
-                if changed else "Import this separate Redbark transaction now, or sync Statements to "
+                if changed else "Import this separate Redbark transaction now, or sync Transactions to "
                 "import it when Redbark returns it again."
             ))]
             if changed:
-                for saved in record.get("candidate_records", []):
-                    amount = _aud(saved.get("amount"), code=False)
-                    sections.insert(0, "Saved record\n" + str(saved.get("date") or "") + " · "
-                                    + amount + "\n" + str(saved.get("description") or ""))
+                sections[:0] = [
+                    f"{field}\nSaved: {before or '—'}\nIncoming: {after or '—'}"
+                    for field, (before, after) in record.get("differences", {}).items()
+                ]
             self.other_action.setText("Keep saved record" if changed else "Import transaction")
             self.other_action.setToolTip("Resolve this source conflict without overwriting posted entries.")
         elif record["kind"] == "manual":
@@ -2135,14 +2122,12 @@ class JournalPage(ActivityPage):
         self._refresh_error = ""
         self._processing = False
         self.viewer = None
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(10)
         self.process_button = HeaderActionButton("Process", icon_only=True)
         self.process_button.clicked.connect(lambda: self._request_action("process_journal"))
         self.subtitle_row.insertWidget(0, self.process_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.search.setPlaceholderText("Search journal")
         self.layout.removeWidget(self.empty)
-        self.layout.insertWidget(2, self.empty)
+        self.layout.insertWidget(1, self.empty)
         self.empty.setObjectName("workspaceHint")
         self.empty.setWordWrap(True)
         self.table.setObjectName("journalTransactions")
@@ -2194,7 +2179,8 @@ class JournalPage(ActivityPage):
                 f"{row.get('description', '')}\nDebit accounts: {row['debit_accounts'] or '-'}\n"
                 f"Credit accounts: {row['credit_accounts'] or '-'}"
             )
-        self.process_button.setToolTip(
+        self.process_button.setToolTip(f"Process {snapshot.get('month') or 'selected month'}")
+        self.process_button.setAccessibleDescription(
             f"Process bank transactions, saved answers and manual instructions for "
             f"{snapshot.get('month') or 'the selected month'}, including failed work "
             "and complete linked events."
@@ -2263,10 +2249,9 @@ class JournalPage(ActivityPage):
 
     def _filter_changed(self) -> None:
         """
-        Count matching entries and hide details when the selected event leaves the visible results.
+        Show availability errors and hide details when the selected event leaves the visible results.
         """
         super()._filter_changed()
-        shown = sum(not self.table.isRowHidden(index) for index in range(len(self.records)))
         selected = next((index for index, row in enumerate(self.records)
                          if self.current and row.get(self.identity) == self.current.get(self.identity)), None)
         if selected is None or self.table.isRowHidden(selected):
@@ -2280,12 +2265,8 @@ class JournalPage(ActivityPage):
             message = "Journal could not refresh. The previous saved snapshot remains available to inspect."
         elif self.snapshot.get("error") or self.snapshot.get("ready") is False:
             message = "Journal unavailable. Check Setup and refresh the workspace."
-        elif not shown:
-            message = ""
         else:
-            message = (
-                f"{shown} entries" if shown == len(self.records) else f"{shown} of {len(self.records)} entries"
-            )
+            message = ""
         self.empty.setText(message)
         self.empty.setToolTip(self._refresh_error)
         self.empty.setVisible(bool(message))
@@ -2370,6 +2351,72 @@ def _posting_accounts(postings: list[dict], side: str) -> str:
     return "; ".join(dict.fromkeys(
         row.get("account", "") for row in postings if Decimal(str(row.get(side) or "0")) > 0
     ))
+
+
+def _transaction_rows(snapshot: dict) -> list[dict]:
+    """
+    Show each bank movement once and add manual history that has no bank-backed posting.
+    """
+    sources = {row["transaction_id"]: row for row in snapshot.get("transactions", [])}
+    reviews = {row["transaction_id"]: row for row in snapshot.get("reviews", [])}
+    entries = {row["journal_entry_id"]: row for row in snapshot.get("entries", [])}
+    manuals = {row["manual_entry_id"]: row for row in snapshot.get("manuals", [])}
+    rows = []
+    for identifier, source in sources.items():
+        review = reviews.get(identifier, {})
+        record = {**source, "row_id": f"bank:{identifier}", "status": review.get("status") or "imported",
+                  "review_status": review.get("review_status") or ""}
+        if review.get("manual_entry_id") and review.get("journal_entry_id"):
+            record["show_review"] = _manual_review_available(manuals.get(review["manual_entry_id"], {}))
+            record.update({key: review.get(key) for key in (
+                "manual_entry_id", "entry_mode", "journal_entry_id", "postings",
+            )})
+        rows.append(record)
+
+    for manual in manuals.values():
+        entry = entries.get(manual.get("journal_entry_id"), {})
+        postings = entry.get("postings") or manual.get("postings") or []
+        if any(line.get("transaction_id") for line in postings):
+            continue
+        accounts = list(dict.fromkeys(line["account"] for line in postings if line.get("account")))
+        if not accounts:
+            accounts = list(dict.fromkeys(
+                sources[key]["account"] for key in manual.get("source_transactions", []) if key in sources
+            ))
+        status = manual.get("status")
+        posted = bool(manual.get("journal_entry_id") and postings)
+        description = entry.get("description") or next(
+            (line["description"] for line in postings if line.get("description")), "",
+        )
+        if manual.get("entry_mode") != "direct" and manual.get("instruction"):
+            description = manual["instruction"]
+        display_status = "posted" if posted else (
+            "ready" if status in {"pending", "submitted", "ready"} else
+            "review" if status in {"needs_review", "unsupported", "failed", "error", "requesting"} else status
+        )
+        rows.append({
+            **manual, "row_id": "manual:" + manual["manual_entry_id"],
+            "date": entry.get("date") or manual["date"],
+            "description": description or manual.get("instruction") or "", "account": ", ".join(accounts),
+            "amount": _posting_total(postings) or "—", "source_label": "Manual Journal",
+            "status": display_status,
+            "show_review": _manual_review_available(manual),
+            "postings": postings if posted else [],
+        })
+    if not snapshot.get("activity_all") and snapshot.get("period_start") and snapshot.get("period_end"):
+        rows = [row for row in rows if snapshot["period_start"] <= row["date"] <= snapshot["period_end"]]
+    return sorted(rows, key=lambda row: row["date"])
+
+
+def _manual_review_available(record: dict) -> bool:
+    """
+    Keep the Review conversation accessible for outstanding work and saved responses.
+    """
+    if record.get("question") or record.get("human_response") or record.get("error"):
+        return True
+    return bool(record and record.get("entry_mode") != "direct" and record.get("status") not in {
+        "applied", "posted", "superseded", "withdrawn",
+    })
 
 
 def _posting_total(postings: list[dict]) -> str | None:

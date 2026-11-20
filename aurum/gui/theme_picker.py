@@ -14,12 +14,12 @@ from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QListView, QSizePolicy, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QToolTip,
+    QStyleOptionViewItem,
 )
 
 # Aurum imports
 from aurum.gui.icons import icon
-from aurum.gui.controls import prepare_combo_popup
+from aurum.gui.controls import prepare_combo_popup, show_tooltip
 from aurum.gui.theme import gui_colour
 
 
@@ -104,7 +104,7 @@ class ThemeComboBox(QComboBox):
 
     def paintEvent(self, event) -> None:
         """
-        Centre the displayed name over the whole control with equal space beside the right-hand chevron.
+        Centre the theme name across the full selector.
         """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -112,16 +112,14 @@ class ThemeComboBox(QComboBox):
         if self.isEnabled() and (self.underMouse() or self.hasFocus()):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(gui_colour(self, "hover", "#e3eee7")))
-            painter.drawRoundedRect(background, 6, 6)
-        text_rect = self.rect().adjusted(24, 0, -24, 0)
+            painter.drawRoundedRect(background, background.height() / 2, background.height() / 2)
+        text_rect = self.rect().adjusted(10, 0, -10, 0)
         text = self.fontMetrics().elidedText(
             self.currentText(), Qt.TextElideMode.ElideRight, text_rect.width(),
         )
         colour = gui_colour(self, "text" if self.isEnabled() else "disabled", "#31584e")
         painter.setPen(QColor(colour))
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
-        arrow = QRect(self.width() - 20, (self.height() - 12) // 2, 12, 12)
-        icon("chevron_down", colour, 12).paint(painter, arrow)
 
     def _refresh_selection(self) -> None:
         """
@@ -179,7 +177,7 @@ class _ThemeDelegate(QStyledItemDelegate):
         preview_width = count * 9 + max(0, count - 1) * 3
         right = option.rect.right() - 13
         if count:
-            painter.setBrush(QColor("#ffffff"))
+            painter.setBrush(QColor(gui_colour(self.combo, "swatch_backing", "#ffffff")))
             backing = QRectF(right - preview_width - 4, option.rect.center().y() - 9, preview_width + 8, 18)
             painter.drawRoundedRect(backing, 9, 9)
         for number in range(count):
@@ -204,6 +202,6 @@ class _ThemeDelegate(QStyledItemDelegate):
         Keep the complete theme name available when a narrow menu row elides its visible text.
         """
         if event.type() == QEvent.Type.ToolTip and index.isValid():
-            QToolTip.showText(event.globalPos(), str(index.data(Qt.ItemDataRole.DisplayRole)), view)
+            show_tooltip(event.globalPos(), str(index.data(Qt.ItemDataRole.DisplayRole)), view)
             return True
         return super().helpEvent(event, view, option, index)

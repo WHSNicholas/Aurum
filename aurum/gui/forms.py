@@ -46,7 +46,7 @@ LABELS = {
     "light_group": "Light mode group highlight", "dark_group": "Dark mode group highlight",
     "primary": "Main heading bands", "highlight": "Highlighted summary card",
     "bar_text_dark": "Dark chart value text", "bar_text_light": "Light chart value text",
-    "output_directory": "Save reports in",
+    "output_directory": "Outputs",
 }
 
 
@@ -255,12 +255,6 @@ class FieldEditor(QWidget):
             self.control = QComboBox()
             self.control.setObjectName("configSelect")
             self.control.setView(QListView(self.control))
-            arrow = (Path(__file__).parent / "assets" / "chevron_down.svg").as_posix()
-            self.control.setStyleSheet(
-                'QComboBox { padding-right: 28px; } '
-                f'QComboBox::down-arrow {{ image: url("{arrow}"); width: 10px; height: 6px; }} '
-                'QComboBox:disabled { background: #edf2ef; color: #9baaa6; border-color: #dde5e2; }'
-            )
             self.control.addItem("Choose…", "")
             items = references or {option: str(option).replace("_", " ").title() for option in options or []}
             for identifier, label in items.items():
@@ -313,7 +307,7 @@ class FieldEditor(QWidget):
         workspace = Path(self.choices.get("workspace", Path.cwd())).resolve()
         value = Path(self.control.text() or "data/reports").expanduser()
         current = value if value.is_absolute() else workspace / value
-        selected = QFileDialog.getExistingDirectory(self, "Save reports in", str(current))
+        selected = QFileDialog.getExistingDirectory(self, "Outputs", str(current))
         if selected:
             path = Path(selected).resolve()
             try:
@@ -403,8 +397,8 @@ class FieldEditor(QWidget):
             button = QToolButton()
             button.setObjectName("setupIconAction")
             button.setFixedSize(30, 30)
-            button.setIcon(icon(symbol, size=14))
-            button.setIconSize(QSize(14, 14))
+            button.setIcon(icon(symbol, size=22))
+            button.setIconSize(QSize(22, 22))
             button.setToolTip(label)
             button.setAccessibleName(label)
             button.clicked.connect(lambda checked=False, direction=offset: self._move(direction))

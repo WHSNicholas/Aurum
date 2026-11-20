@@ -18,6 +18,7 @@ evidence for ambiguity. Snapshots expose saved facts without making AI calls mer
 # Imports
 from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack
+from functools import cache
 from pathlib import Path
 import sqlite3
 from uuid import UUID
@@ -36,10 +37,11 @@ from aurum.database.journal import (
 from aurum.database.transactions import load_transactions
 from aurum.database.memory import load_explicit_memory
 from aurum.database.manual import (
-    load_manual_entries, manual_claims, manual_context_revision, manual_owner_ids, manual_response_token,
+    load_manual_entries, manual_claims, manual_display_revisions, manual_owner_ids, manual_response_token,
 )
 from aurum.finance.accounts import Account, AccountRegistry, AccountType
 from aurum.finance.budget import BudgetSettings, project_budget_entry
+from aurum.finance.dates import working_month_end
 from aurum.finance.journal import AccountInvestmentDetails, JournalEntry, JournalLine
 from aurum.finance.securities import SecurityRegistry
 from aurum.finance.transaction import Transaction, match_transfers as _match_transfers
@@ -53,7 +55,7 @@ from aurum.workflows.review import (
 from aurum.workflows.manual import (
     coordinate_manuals, prepare_manuals, process_manuals,
 )
-from aurum.finance.reports import ReportPeriod, ReportSettings
+from aurum.finance.reports import ReportPeriod, ReportSettings, resolve_period
 
 DEFAULT_MODEL = "gpt-6-luna"
 TRANSFER_REVIEW_REASON = "A possible internal transfer has no unique eligible counterpart."
@@ -245,9 +247,20 @@ def journal_snapshot(
     records = load_review_cases(connection)
     latest = {row.transaction_id: record for record in records for row in record["case"].transactions}
     review_session = prepare_reviews(connection, accounts, budget=budget)
+
+    @cache
+    def display_month_scope(year: int, month: int) -> set[UUID]:
+        """
+        Resolve linked instructions once per month with competing claims, including future saved dates.
+        """
+        closing_day = working_month_end(year, month)
+        selected_period = resolve_period((), f"{year:04d}-{month:02d}", today=closing_day)
+        return _processing_scope(connection, accounts, selected_period)[1]
+
     manual_session = prepare_manuals(
         connection, accounts, securities=securities, budget=budget,
         manual_ids=manual_ids, persist_questions=False,
+        display_month_scope=display_month_scope if period is None else None,
     )
     ready = {row.transaction_id for case in review_session.cases for row in case.transactions}
     owners = manual_owner_ids(connection)
@@ -312,9 +325,20 @@ def journal_snapshot(
         })
     manuals = []
     entry_by_id = {entry.id: entry for entry in entries}
-    for record in load_manual_entries(connection):
-        if manual_ids is not None and record["manual_id"] not in manual_ids:
-            continue
+    all_manuals = load_manual_entries(connection)
+    manual_records = [
+        record for record in all_manuals if manual_ids is None or record["manual_id"] in manual_ids
+    ]
+    # A bank line and its owning manual event may be displayed in different reporting months.
+    owner_modes = {
+        str(record["manual_id"]): "direct" if record["outcome"] and record["outcome"].origin == "human"
+        else "instruction" for record in all_manuals if record["journal_entry_id"]
+    }
+    for row in review_rows:
+        if row["manual_entry_id"]:
+            row["entry_mode"] = owner_modes[row["manual_entry_id"]]
+    manual_revisions = manual_display_revisions(connection, manual_records, transactions, entries)
+    for record in manual_records:
         submission = record["submission"]
         entry = entry_by_id.get(record["journal_entry_id"])
         outcome = record["outcome"]
@@ -328,7 +352,7 @@ def journal_snapshot(
             "status": "needs_review" if submission.id in manual_session.messages else record["status"],
             "question": manual_session.messages.get(submission.id, record["question"] or ""),
             "error": record["error"] or "",
-            "context_revision": manual_context_revision(connection, submission.id, accounts),
+            "context_revision": manual_revisions[submission.id],
             "answer_token": manual_response_token(record),
             "journal_entry_id": str(entry.id) if entry else "",
             "postings": _posting_rows(entry, by_account) if entry else [],
@@ -617,7 +641,7 @@ def _classify_transactions(
             ):
                 question = (
                     "Is this a transfer to brokerage cash or a security purchase? "
-                    "Confirm the account and actual units or trade facts in Manual."
+                    "Confirm the account and actual units or trade facts in a manual entry in Transactions."
                 )
             entry = _classification_entry(row, decision, accounts, budget=budget)
             issues = project_budget_entry(entry, accounts, budget).issues if budget is not None else ()

@@ -91,18 +91,23 @@ def feed_snapshot(connection: sqlite3.Connection) -> dict:
         )
     ]
     mappings = {item["external_account_id"]: item for item in result["mappings"]}
-    for external_id, transaction_id, payload in connection.execute(
-        "SELECT external_account_id, transaction_id, payload FROM bank_feed_transactions"
+    for external_id, transaction_id, raw, accepted in connection.execute(
+        "SELECT external_account_id, transaction_id, payload, accepted_payload FROM bank_feed_transactions"
     ):
-        evidence = json.loads(payload)
+        evidence = json.loads(raw)
+        if raw != accepted and not _extended(evidence):
+            baseline = json.loads(accepted)
+            if not _fact_differences(evidence, baseline):
+                evidence = _with_extended_description(evidence, baseline)
         evidence.update(
             source_label="Redbark · " + mappings[external_id]["name"], provider="redbark",
             external_account_id=external_id,
         )
         result["provenance"].setdefault(transaction_id, evidence)
     conflict_rows = connection.execute(
-        "SELECT id, external_account_id, external_transaction_id, kind, payload, candidates, revision "
-        "FROM bank_feed_conflicts ORDER BY created_at, id"
+        "SELECT c.id, c.external_account_id, c.external_transaction_id, c.kind, c.payload, c.candidates, "
+        "c.revision, t.accepted_payload FROM bank_feed_conflicts c LEFT JOIN bank_feed_transactions t "
+        "USING (external_account_id, external_transaction_id) ORDER BY c.created_at, c.id"
     ).fetchall()
     sources = {
         str(item.transaction_id): item for item in load_transactions(connection)
@@ -118,6 +123,8 @@ def feed_snapshot(connection: sqlite3.Connection) -> dict:
         result["conflicts"].append({
             "id": row[0], "external_account_id": row[1], "external_transaction_id": row[2],
             "kind": row[3], "payload": payload, "candidates": candidates, "revision": row[6],
+            "differences": _fact_differences(json.loads(row[7]), payload)
+            if row[3] == "changed" and row[7] else {},
             "candidate_records": [
                 {"transaction_id": key, "date": sources[key].date.isoformat(),
                  "description": sources[key].description, "amount": str(sources[key].amount),
@@ -229,32 +236,43 @@ def classify_feed_records(connection: sqlite3.Connection, mapping: dict, records
     Equal amounts, descriptions and overlapping dates do not establish that two bank records are the same.
     """
     links = {
-        row[0]: (row[1], json.loads(row[2])) for row in connection.execute(
-            "SELECT external_transaction_id, transaction_id, accepted_payload "
-            "FROM bank_feed_transactions WHERE external_account_id = ?", (mapping["external_account_id"],),
+        key: (linked, json.loads(saved), json.loads(pending) if pending else None)
+        for key, linked, saved, pending in connection.execute(
+            "SELECT t.external_transaction_id, t.transaction_id, t.accepted_payload, c.payload "
+            "FROM bank_feed_transactions t LEFT JOIN bank_feed_conflicts c "
+            "ON c.external_account_id = t.external_account_id AND c.external_transaction_id = "
+            "t.external_transaction_id AND c.kind = 'changed' WHERE t.external_account_id = ?",
+            (mapping["external_account_id"],),
         )
     } if _has_tables(connection) else {}
     handover = date.fromisoformat(mapping["handover_date"])
-    seen = {}
-    result = []
+    observations = {}
     for payload in records:
-        item = transaction_from_feed(mapping, payload)
+        transaction_from_feed(mapping, payload)
         external_id = payload["id"]
-        signature = _economic_facts(payload)
-        if external_id in seen:
-            if seen[external_id] != signature:
-                raise ValueError("Redbark returned contradictory versions of one transaction.")
-            continue
-        seen[external_id] = signature
+        previous = observations.get(external_id)
+        if previous is not None and _fact_differences(previous, payload):
+            raise ValueError("Redbark returned contradictory versions of one transaction.")
+        observations[external_id] = _with_extended_description(previous or payload, payload)
+
+    result = []
+    for external_id, payload in observations.items():
         if external_id in links:
-            linked_id, accepted = links[external_id]
-            kind = "existing" if _economic_facts(accepted) == signature else "changed"
-            result.append({"kind": kind, "payload": payload, "candidates": [linked_id]})
-            continue
-        if item.date < handover:
-            result.append({"kind": "ignored", "payload": payload, "candidates": []})
-            continue
-        result.append({"kind": "new", "payload": payload, "candidates": []})
+            linked_id, accepted, pending = links[external_id]
+            # A sparse repeat cannot settle a previously reported disagreement about optional wording.
+            if pending and not _fact_differences(pending, payload):
+                payload = _with_extended_description(payload, pending)
+            if pending and not _fact_differences(accepted, pending):
+                accepted = _with_extended_description(accepted, pending)
+            kind = "changed" if _fact_differences(accepted, payload) else "existing"
+            outcome = {"kind": kind, "payload": payload, "candidates": [linked_id]}
+            if kind == "existing" and not _extended(accepted) and _extended(payload):
+                outcome["enriched"] = _with_extended_description(accepted, payload)
+            result.append(outcome)
+        else:
+            booking = date.fromisoformat(payload.get("post_date") or payload["date"])
+            result.append({"kind": "ignored" if booking < handover else "new",
+                           "payload": payload, "candidates": []})
     return result
 
 
@@ -264,9 +282,28 @@ def apply_feed_records(
     """
     Add new evidence and conflicts within the caller's transaction, leaving every existing source unchanged.
     """
-    outcomes = classify_feed_records(connection, mapping, records)
+    account = mapping["external_account_id"]
+    # Old warnings can outlive the provider's sync window. Recheck their saved evidence on account sync.
+    for key, raw, candidates, linked_id, accepted in connection.execute(
+        "SELECT c.external_transaction_id, c.payload, c.candidates, t.transaction_id, t.accepted_payload "
+        "FROM bank_feed_conflicts c JOIN bank_feed_transactions t USING "
+        "(external_account_id, external_transaction_id) WHERE c.external_account_id = ? "
+        "AND c.kind = 'changed'",
+        (account,),
+    ).fetchall():
+        if json.loads(candidates) != [linked_id]:
+            continue
+        incoming, saved = json.loads(raw), json.loads(accepted)
+        if _fact_differences(saved, incoming):
+            continue
+        if not _extended(saved) and _extended(incoming):
+            _save_accepted_payload(connection, account, _with_extended_description(saved, incoming))
+        connection.execute(
+            "DELETE FROM bank_feed_conflicts WHERE external_account_id = ? AND external_transaction_id = ?",
+            (account, key),
+        )
     counts = {"new_count": 0, "existing_count": 0, "conflict_count": 0, "ignored_count": 0}
-    for outcome in outcomes:
+    for outcome in classify_feed_records(connection, mapping, records):
         kind, payload = outcome["kind"], outcome["payload"]
         if kind == "changed":
             counts["conflict_count"] += 1
@@ -277,6 +314,8 @@ def apply_feed_records(
             _link_transaction(connection, mapping, payload, str(item.transaction_id))
             counts["new_count"] += 1
         elif kind == "existing":
+            if "enriched" in outcome:
+                _save_accepted_payload(connection, account, outcome["enriched"])
             counts["existing_count"] += 1
         else:
             counts["ignored_count"] += 1
@@ -323,11 +362,12 @@ def resolve_feed_conflict(
                 raise ValueError(
                     "Changed bank facts cannot replace a saved transaction. Keep the saved record."
                 )
-            connection.execute(
-                "UPDATE bank_feed_transactions SET accepted_payload = ? WHERE external_account_id = ? "
-                "AND external_transaction_id = ?",
-                (_json(payload), mapping["external_account_id"], payload["id"]),
-            )
+            saved = connection.execute(
+                "SELECT accepted_payload FROM bank_feed_transactions WHERE external_account_id = ? "
+                "AND external_transaction_id = ?", (mapping["external_account_id"], payload["id"]),
+            ).fetchone()
+            payload = _with_extended_description(payload, json.loads(saved[0]))
+            _save_accepted_payload(connection, mapping["external_account_id"], payload)
         elif action == "import":
             item = transaction_from_feed(mapping, payload)
             _insert_transaction(connection, item)
@@ -475,16 +515,15 @@ def _save_conflict(connection: sqlite3.Connection, mapping: dict, outcome: dict)
     """
     payload = outcome["payload"]
     existing = connection.execute(
-        "SELECT payload, candidates FROM bank_feed_conflicts "
+        "SELECT payload, candidates, kind FROM bank_feed_conflicts "
         "WHERE external_account_id = ? AND external_transaction_id = ?",
         (mapping["external_account_id"], payload["id"]),
     ).fetchone()
     candidates = _json(outcome["candidates"])
-    if (
-        existing and _economic_facts(json.loads(existing[0])) == _economic_facts(payload)
-        and existing[1] == candidates
-    ):
-        return
+    if existing and existing[1] == candidates and existing[2] == outcome["kind"]:
+        previous = json.loads(existing[0])
+        if not _fact_differences(previous, payload) and bool(_extended(previous)) == bool(_extended(payload)):
+            return
     connection.execute(
         "INSERT INTO bank_feed_conflicts "
         "(id, external_account_id, external_transaction_id, kind, payload, candidates, revision, created_at) "
@@ -497,18 +536,62 @@ def _save_conflict(connection: sqlite3.Connection, mapping: dict, outcome: dict)
     )
 
 
-def _economic_facts(payload: dict) -> tuple:
+def _extended(payload: dict) -> str:
     """
-    Compare validated bank facts without treating text casing or numeric presentation as a change.
+    Treat an omitted, null or whitespace-only optional description as absent.
     """
-    amount = payload.get("amount") or {}
-    return (
-        payload.get("account"), payload.get("date"), payload.get("post_date"), payload.get("value_date"),
-        str(payload.get("description") or "").casefold(),
-        (Decimal(str(amount["amount"])), str(amount.get("currency", "")).casefold()),
-        payload.get("direction"), payload.get("reference"),
-        str(payload.get("extended_description") or "").casefold(),
+    return (payload.get("extended_description") or "").strip()
+
+
+def _with_extended_description(primary: dict, other: dict) -> dict:
+    """
+    Retain available optional wording while preserving the primary observation's other facts.
+    """
+    if not _extended(primary) and _extended(other):
+        return {**primary, "extended_description": other["extended_description"]}
+    return primary
+
+
+def _save_accepted_payload(connection: sqlite3.Connection, account: str, payload: dict) -> None:
+    """
+    Update the comparison baseline while retaining the original source and posted accounting.
+    """
+    connection.execute(
+        "UPDATE bank_feed_transactions SET accepted_payload = ? WHERE external_account_id = ? "
+        "AND external_transaction_id = ?", (_json(payload), account, payload["id"]),
     )
+
+
+def _bank_facts(payload: dict) -> dict:
+    """
+    Name comparable provider facts and express signed cents as a readable dollar amount.
+    """
+    amount = payload["amount"]
+    return {
+        "Account": payload.get("account"), "Transaction date": payload.get("date"),
+        "Booking date": payload.get("post_date"), "Effective date": payload.get("value_date"),
+        "Description": payload.get("description"), "Amount": format(Decimal(amount["amount"]) / 100, ".2f"),
+        "Currency": amount.get("currency"), "Direction": payload.get("direction"),
+        "Reference": payload.get("reference"), "Extended description": _extended(payload),
+    }
+
+
+def _fact_differences(saved: dict, incoming: dict) -> dict:
+    """
+    Return the differing known facts and the actual values used to explain each conflict in Review.
+    """
+    differences = {}
+    current = _bank_facts(incoming)
+    for field, before in _bank_facts(saved).items():
+        after = current[field]
+        if field == "Extended description" and not (before and after):
+            continue
+        if field in {"Description", "Extended description", "Currency"}:
+            if (before or "").casefold() == (after or "").casefold():
+                continue
+        if before != after:
+            differences[field] = (before, after)
+    return differences
 
 
 def _json(value: object) -> str:

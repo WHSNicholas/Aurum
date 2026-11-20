@@ -16,10 +16,11 @@ from html import escape
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPainterPath
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QWidget
 
 # Aurum imports
-from aurum.gui.theme import BUDGET_COLOURS, gui_colour, monetary_font, monetary_html
+from aurum.gui.controls import hide_tooltip, show_tooltip
+from aurum.gui.theme import budget_colour, gui_colour, monetary_font, monetary_html
 
 
 # %% 1. Allocation Chart -------------------------------------------------------------------------------------
@@ -54,7 +55,7 @@ class BudgetAllocationChart(QWidget):
             for name, _, amount in rows
         ]
         text = "\n".join(descriptions) or "Add categories and enter monthly amounts."
-        self.setToolTip(text)
+        self.setToolTip("Monthly budget allocation")
         self.setAccessibleDescription(text)
         self.update()
 
@@ -136,10 +137,16 @@ class BudgetAllocationChart(QWidget):
                 painter.save()
                 painter.setClipPath(pill)
                 rows = groups[kind]
-                for index, (name, amount) in enumerate(rows):
+                amounts = dict.fromkeys(amount for _, amount in rows)
+                steps = max(1, len(amounts) - 1)
+                shades = {
+                    amount: QColor(budget_colour(self, kind, tint=rank / steps))
+                    for rank, amount in enumerate(amounts)
+                }
+                for name, amount in rows:
                     segment = float(amount / totals[kind]) * span
                     rectangle = QRectF(offset, y, segment, 36)
-                    painter.setBrush(_shade(self, kind, index, len(rows)))
+                    painter.setBrush(shades[amount])
                     painter.drawRect(rectangle)
                     tooltip = escape(name) + "<br>" + monetary_html(_money(amount))
                     self._regions.append((rectangle, tooltip))
@@ -148,6 +155,7 @@ class BudgetAllocationChart(QWidget):
                     self._hit_regions.append((pill.intersected(region), tooltip))
                     offset += segment
                 painter.restore()
+
     def event(self, event) -> bool:
         """
         Keep ordinary hover help on actual segments, including no amount tooltip in the allocation gap.
@@ -155,9 +163,9 @@ class BudgetAllocationChart(QWidget):
         if event.type() == QEvent.Type.ToolTip:
             for path, text in self._hit_regions:
                 if path.contains(QPointF(event.pos())):
-                    QToolTip.showText(event.globalPos(), text, self)
+                    show_tooltip(event.globalPos(), text, self)
                     return True
-            QToolTip.hideText()
+            hide_tooltip()
             return True
         return super().event(event)
 
@@ -167,16 +175,16 @@ class BudgetAllocationChart(QWidget):
         """
         for path, text in self._hit_regions:
             if path.contains(event.position()):
-                QToolTip.showText(event.globalPosition().toPoint(), text, self)
+                show_tooltip(event.globalPosition().toPoint(), text, self)
                 return
-        QToolTip.hideText()
+        hide_tooltip()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:
         """
         Clear segment hover text when the pointer leaves the chart.
         """
-        QToolTip.hideText()
+        hide_tooltip()
         super().leaveEvent(event)
 
     def focusInEvent(self, event) -> None:
@@ -184,7 +192,7 @@ class BudgetAllocationChart(QWidget):
         Make the complete amount description available without a mouse.
         """
         super().focusInEvent(event)
-        QToolTip.showText(self.mapToGlobal(QPoint(8, self.height())), self.toolTip(), self)
+        show_tooltip(self.mapToGlobal(QPoint(8, self.height())), self.toolTip(), self)
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
@@ -213,21 +221,6 @@ def _draw_total(
     painter.setFont(monetary_font(painter.font()))
     painter.drawText(QPointF(x + body.horizontalAdvance(prefix), baseline), _money(amount))
     painter.restore()
-
-
-def _shade(widget: QWidget, kind: str, index: int, count: int) -> QColor:
-    """
-    Sample distinct blue, red or green hues with a saturated dark-to-light progression.
-    """
-    role = "budget_expenses" if kind == "expense" else "budget_" + kind
-    base = QColor(gui_colour(widget, role, BUDGET_COLOURS[kind]))
-    first = base
-    last = QColor(*(round(channel + (255 - channel) * 0.35) for channel in base.getRgb()[:3]))
-    fraction = index / max(1, count - 1)
-    return QColor(*(
-        round(start + (end - start) * fraction)
-        for start, end in zip(first.getRgb()[:3], last.getRgb()[:3])
-    ))
 
 
 def _money(value: Decimal) -> str:

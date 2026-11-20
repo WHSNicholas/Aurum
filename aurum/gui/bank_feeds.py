@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 # Aurum imports
 from aurum.finance.dates import parse_input_date
 from aurum.gui.controls import DateField, confirm_discard
-from aurum.gui.icons import icon
+from aurum.gui.icons import connection_button, icon
 from aurum.gui.theme import gui_colour
 
 
@@ -78,12 +78,12 @@ class BankConnectionPanel(QFrame):
         self.key.setMinimumWidth(200)
         self.key.setMaximumWidth(300)
         self.key.setAccessibleName("Redbark API key")
-        self.key.setToolTip("A saved key is never displayed. Enter a replacement to check and configure it.")
+        self.key.setToolTip("Leave empty to check the saved key, or enter a new API key.")
         self.key.textEdited.connect(self._key_changed)
         self.key.returnPressed.connect(self._check)
         row.addWidget(self.key, 1)
         row.addStretch()
-        self.check = _icon_button("Check Redbark connection", "login")
+        self.check = connection_button("Redbark")
         self.check.clicked.connect(self._check)
         row.addWidget(self.check)
         self.configure = _icon_button("Set up Redbark accounts", "settings")
@@ -108,7 +108,7 @@ class BankConnectionPanel(QFrame):
         self.status.setText(status)
         self.status.setToolTip(detail)
         self.status.setAccessibleDescription(detail)
-        self.key.setPlaceholderText("Saved key · replacement" if configured else "API key")
+        self.key.setPlaceholderText("Saved API key" if configured else "API key")
         label = "Set up Redbark accounts" if configured else "Connect Redbark"
         self.configure.setAccessibleName(label)
         self.configure.setToolTip(label)

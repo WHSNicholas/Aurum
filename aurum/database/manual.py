@@ -144,12 +144,42 @@ def manual_context_revision(
     saved = _latest(connection, manual_id)
     if saved is None:
         return ""
-    sources = set(saved["submission"].source_transactions)
-    if saved["case"] is not None:
-        sources.update(item.transaction_id for item in saved["case"].transactions)
-    snapshot = _live_context(connection, sources, {saved["journal_entry_id"]}, accounts)
-    snapshot = _with_savings(connection, manual_id, snapshot)
-    return _digest({"input_revision": str(saved["input_revision"]), "context": snapshot})
+    return manual_display_revisions(
+        connection, [saved], load_transactions(connection), load_journal_entries(connection, accounts),
+    )[manual_id]
+
+
+def manual_display_revisions(connection, records, transactions, entries) -> dict[UUID, str]:
+    """
+    Hash each displayed instruction against the complete linked evidence from one accounting read.
+    """
+    if not records:
+        return {}
+    sources = {item.transaction_id: item for item in transactions}
+    by_entry = {entry.id: entry for entry in entries}
+    by_source = {
+        line.transaction_id: entry.id for entry in entries for line in entry.lines if line.transaction_id
+    }
+    allocations = load_savings_allocations(connection)
+    revisions = {}
+    for record in records:
+        identifier = record["manual_id"]
+        source_ids = set(record["submission"].source_transactions)
+        if record["case"] is not None:
+            source_ids.update(item.transaction_id for item in record["case"].transactions)
+        entry_ids = {by_source[key] for key in source_ids if key in by_source}
+        if record["journal_entry_id"] is not None:
+            entry_ids.add(record["journal_entry_id"])
+        if not entry_ids <= by_entry.keys():
+            raise ValueError("An existing manual event is no longer in the journal")
+        linked = [by_entry[key] for key in entry_ids]
+        snapshot = _linked_context(source_ids, sources, linked)
+        if identifier in allocations:
+            snapshot["savings"] = allocations[identifier].model_dump(mode="json")
+        revisions[identifier] = _digest({
+            "input_revision": str(record["input_revision"]), "context": snapshot,
+        })
+    return revisions
 
 
 def manual_response_token(record: dict) -> str:
@@ -575,6 +605,13 @@ def _live_context(
     ]
     if not entry_ids <= {entry.id for entry in entries}:
         raise ValueError("An existing manual event is no longer in the journal")
+    return _linked_context(source_ids, sources, entries)
+
+
+def _linked_context(source_ids: set, sources: dict, entries: list) -> dict:
+    """
+    Expand complete events to their bank evidence and canonicalise the displayed accounting.
+    """
     for entry in entries:
         source_ids.update(line.transaction_id for line in entry.lines if line.transaction_id is not None)
     if not source_ids <= sources.keys():
@@ -618,7 +655,7 @@ def _check_claims(connection: sqlite3.Connection, case: ManualCase) -> None:
     sources = {item.transaction_id for item in case.transactions}
     owners = manual_owner_ids(connection)
     if any(owners.get(identifier, case.submission.id) != case.submission.id for identifier in sources):
-        raise ValueError("An affected transaction belongs to another manual entry; edit that entry in Manual")
+        raise ValueError("An affected transaction belongs to another manual entry. Edit it in Transactions.")
     for record in load_manual_entries(connection):
         if record["manual_id"] == case.submission.id:
             continue

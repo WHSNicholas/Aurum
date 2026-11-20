@@ -11,18 +11,22 @@ handle presentation, while buttons use a background change instead of the macOS 
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
+from collections.abc import Callable
+
 from PySide6.QtCore import (
-    QDate, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
+    QDate, QEasingCurve, QEvent, QObject, QPoint, QPointF, QPropertyAnimation, Property,
+    QRect, QRectF, QSize, Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QRegion, QTextCharFormat, QTextLayout, QTextOption,
+    QAccessibilityHints, QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QRegion,
+    QTextCharFormat, QTextLayout, QTextOption,
 )
 from PySide6.QtWidgets import (
-    QAbstractButton, QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDialog, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QListView,
-    QMenu, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate, QStyleFactory, QStyleOptionButton,
+    QAbstractButton, QAbstractItemView, QAbstractSpinBox, QApplication, QButtonGroup, QCalendarWidget,
+    QComboBox, QDialog, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListView, QMenu, QPlainTextEdit,
+    QPushButton, QSizePolicy, QStyle, QStyledItemDelegate, QStyleFactory, QStyleOptionButton,
     QStyleOptionComboBox,
-    QStyleOptionViewItem, QStylePainter, QTableWidget, QToolButton, QVBoxLayout, QWidget,
+    QStyleOptionViewItem, QStylePainter, QTableView, QTableWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
@@ -30,8 +34,32 @@ from aurum.finance.dates import parse_input_date
 from aurum.gui.icons import icon
 from aurum.gui.theme import gui_colour
 
+# Tool buttons also serve as text-field affordances and menu controls. Only standalone actions get pills.
+_PILL_TOOL_ACTIONS = {
+    "budgetAction", "budgetCopy", "catalogueAdd", "catalogueRemove",
+    "jobDetails", "jobStop", "journalPostingAction", "manualIconAction", "monthArrow",
+    "reportFolderButton", "securitySuggestionAction", "setupIconAction", "statementIconAction",
+    "viewerIconAction", "workspaceRefresh",
+}
+
 
 # %% 1. Shared Control Setup ---------------------------------------------------------------------------------
+def reduced_motion(widget: QWidget) -> bool:
+    """
+    Respect the desktop accessibility preference and explicit motion reductions on a control or its window.
+    """
+    preference = _motion_hints().motionPreference()
+    return (preference == Qt.MotionPreference.ReducedMotion
+            or bool(widget.property("reducedMotion") or widget.window().property("reducedMotion")))
+
+
+def watch_reduced_motion(snap: Callable[[], None]) -> None:
+    """
+    Settle an active effect when the desktop motion preference changes. Pass a bound widget method.
+    """
+    _motion_hints().motionPreferenceChanged.connect(snap)
+
+
 def install_controls(application: QApplication) -> None:
     """
     Install presentation defaults once, including controls created later in dialogs and configuration forms.
@@ -43,6 +71,24 @@ def install_controls(application: QApplication) -> None:
     application.installEventFilter(styling)
     for widget in application.allWidgets():
         styling.prepare(widget)
+
+
+def show_tooltip(position: QPoint, text: str, owner: QWidget) -> None:
+    """
+    Display hover help on a translucent window shared by charts, editors and ordinary controls.
+    """
+    app = QApplication.instance()
+    install_controls(app)
+    app._aurum_controls.tip.present(position, text, owner)
+
+
+def hide_tooltip() -> None:
+    """
+    Dismiss the current hover help when inspection ends.
+    """
+    style = getattr(QApplication.instance(), "_aurum_controls", None)
+    if style is not None:
+        style.tip.hide()
 
 
 def confirm_discard(parent: QWidget, *, question: str = "Discard unsaved changes?") -> bool:
@@ -165,6 +211,220 @@ class CentredComboBox(QComboBox):
         super().mouseReleaseEvent(event)
 
 
+class SegmentedControl(QWidget):
+    """
+    Select one of a short list of options with an accessible animated pill.
+    """
+
+    currentIndexChanged = Signal(int)
+
+    def __init__(
+        self, labels: tuple[str, ...], name: str, width: int, parent=None, *, label_suffix: str = "",
+    ) -> None:
+        """
+        Give each option an equal share of the control and support keyboard and pointer selection.
+        """
+        super().__init__(parent)
+        self._labels = labels
+        self._preferred_width = width
+        self.setAccessibleName(name)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(28)
+        self.setMinimumWidth(width - 16)
+        self._index = 0
+        self._selection_rect = QRectF()
+        self._buttons = []
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._animation = QPropertyAnimation(self, b"selectionRect", self)
+        self._animation.setDuration(160)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(3, 3, 3, 3)
+        row.setSpacing(0)
+        for index, label in enumerate(labels):
+            button = _SegmentButton(label, self)
+            button.setFixedHeight(22)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            button.setStyleSheet(
+                "QPushButton { background: transparent; border: none; padding: 0; min-height: 0; }"
+            )
+            button.setCheckable(True)
+            button.setAccessibleName(label + label_suffix)
+            button.setFocusPolicy(Qt.FocusPolicy.StrongFocus if index == 0 else Qt.FocusPolicy.ClickFocus)
+            button.clicked.connect(lambda _checked=False, selected=index: self.setCurrentIndex(selected))
+            button.installEventFilter(self)
+            self._buttons.append(button)
+            self._group.addButton(button, index)
+            row.addWidget(button, 1)
+        self._buttons[0].setChecked(True)
+        self.setFocusProxy(self._buttons[0])
+        watch_reduced_motion(self._snap_indicator)
+
+    def currentIndex(self) -> int:
+        """
+        Return the index of the selected option.
+        """
+        return self._index
+
+    def currentText(self) -> str:
+        """
+        Return the visible label of the selected option.
+        """
+        return self._labels[self._index]
+
+    def count(self) -> int:
+        """
+        Return the number of available options.
+        """
+        return len(self._labels)
+
+    def setCurrentIndex(self, index: int) -> None:
+        """
+        Update content immediately while retargeting the moving capsule from its current position.
+        """
+        if not 0 <= index < self.count() or index == self._index:
+            return
+        self._index = index
+        self._buttons[index].setChecked(True)
+        for position, button in enumerate(self._buttons):
+            button.setFocusPolicy(
+                Qt.FocusPolicy.StrongFocus if position == index else Qt.FocusPolicy.ClickFocus
+            )
+            button.update()
+        self.setFocusProxy(self._buttons[index])
+        self._move_indicator(animate=True)
+        self.currentIndexChanged.emit(index)
+
+    def sizeHint(self) -> QSize:
+        """
+        Fit the supplied labels in equal, compact pointer targets.
+        """
+        return QSize(self._preferred_width, 28)
+
+    def eventFilter(self, watched, event) -> bool:
+        """
+        Move through segments with arrow keys and keep ordinary button activation available.
+        """
+        if event.type() == QEvent.Type.KeyPress and watched in self._buttons:
+            key = event.key()
+            offset = -1 if key in {Qt.Key.Key_Left, Qt.Key.Key_Up} else (
+                1 if key in {Qt.Key.Key_Right, Qt.Key.Key_Down} else 0
+            )
+            if offset:
+                index = (self._index + offset) % self.count()
+                self.setCurrentIndex(index)
+                self._buttons[index].setFocus(Qt.FocusReason.OtherFocusReason)
+                return True
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event) -> None:
+        """
+        Snap the indicator to resized segment geometry rather than animating a layout change.
+        """
+        super().resizeEvent(event)
+        self.layout().activate()
+        self._move_indicator(animate=False)
+
+    def showEvent(self, event) -> None:
+        """
+        Start from the selected segment without an entrance animation or a blank initial indicator.
+        """
+        super().showEvent(event)
+        self.layout().activate()
+        self._move_indicator(animate=False)
+
+    def paintEvent(self, event) -> None:
+        """
+        Draw one theme-coloured capsule and its contrasting moving selection beneath native buttons.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(gui_colour(self, "accent", "#4d6a6d")))
+        painter.drawRoundedRect(QRectF(self.rect()), self.height() / 2, self.height() / 2)
+        painter.setBrush(QColor(gui_colour(self, "surface", "#ffffff")))
+        rectangle = self._selection_rect
+        painter.drawRoundedRect(rectangle, rectangle.height() / 2, rectangle.height() / 2)
+
+    def _move_indicator(self, *, animate: bool) -> None:
+        """
+        Respect an explicit reduced-motion preference and coalesce rapid selections into one animation.
+        """
+        target = QRectF(self._buttons[self._index].geometry())
+        self._animation.stop()
+        if not animate or not self.isVisible() or reduced_motion(self):
+            self._set_selection_rect(target)
+            return
+        self._animation.setStartValue(self._selection_rect if not self._selection_rect.isEmpty() else target)
+        self._animation.setEndValue(target)
+        self._animation.start()
+
+    def _snap_indicator(self) -> None:
+        """
+        Settle the selection immediately when the system motion preference changes.
+        """
+        self._move_indicator(animate=False)
+
+    def _get_selection_rect(self) -> QRectF:
+        """
+        Supply the current capsule rectangle to Qt's property animation.
+        """
+        return self._selection_rect
+
+    def _set_selection_rect(self, rectangle: QRectF) -> None:
+        """
+        Repaint the capsule without changing button layout or selection.
+        """
+        self._selection_rect = rectangle
+        self.update()
+
+    selectionRect = Property(QRectF, _get_selection_rect, _set_selection_rect)
+
+
+class ReportSegmentedControl(SegmentedControl):
+    """
+    Present the four saved report types in their established order and compact width.
+    """
+
+    LABELS = ("Balance", "Income", "Budget", "Investment")
+
+    def __init__(self, parent=None) -> None:
+        """
+        Keep the report index and accessible report names used throughout the Reports page.
+        """
+        super().__init__(self.LABELS, "Report type", 376, parent, label_suffix=" report")
+        self.setObjectName("reportSegments")
+
+
+class _SegmentButton(QPushButton):
+    """
+    Retain native checkable-button semantics while drawing text over the shared capsule.
+    """
+
+    def paintEvent(self, event) -> None:
+        """
+        Keep labels readable against both selected and unselected theme surfaces without an outline.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        owner = self.parentWidget()
+        if self.isEnabled() and (self.hasFocus() or self.underMouse()):
+            fill = QColor(gui_colour(self, "hover" if self.isChecked() else "accent_hover", "#dceae2"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            rectangle = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+            painter.drawRoundedRect(rectangle, rectangle.height() / 2, rectangle.height() / 2)
+        role = "text" if self.isChecked() else "on_accent"
+        painter.setPen(QColor(gui_colour(owner, role, "#243b3b" if self.isChecked() else "#ffffff")))
+        font = QFont("Geist")
+        font.setPixelSize(12)
+        font.setWeight(QFont.Weight.Medium if self.isChecked() else QFont.Weight.Normal)
+        painter.setFont(font)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+
+
 class PageActionRow(QHBoxLayout):
     """
     Align primary actions within the compact row beneath each page title.
@@ -259,6 +519,7 @@ class EntryTable(QTableWidget):
         self.empty_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_message.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.empty_message.hide()
+        self._corners = _EntryTableCorners(self)
 
     def set_empty(self, visible: bool) -> None:
         """
@@ -270,10 +531,49 @@ class EntryTable(QTableWidget):
 
     def resizeEvent(self, event) -> None:
         """
-        Keep the empty message centred in the available table viewport as the page changes size.
+        Fit the outer corners and keep the empty message centred in the available viewport.
         """
         super().resizeEvent(event)
         self.empty_message.setGeometry(self.viewport().rect())
+        self._corners.setGeometry(self.rect())
+        self._corners.raise_()
+
+
+class _EntryTableCorners(QWidget):
+    """
+    Smooth the four outer corners over the header, body and scrollbar at the display's pixel density.
+    """
+
+    RADIUS = 10
+
+    def __init__(self, table: EntryTable) -> None:
+        """
+        Let pointer events reach the underlying header and scroll controls.
+        """
+        super().__init__(table)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def resizeEvent(self, event) -> None:
+        """
+        Restrict this overlay to four small squares so scrolling can repaint the viewport directly.
+        """
+        rect = self.rect()
+        radius = self.RADIUS
+        corners = QRegion(rect).subtracted(QRegion(rect.adjusted(radius, 0, -radius, 0)))
+        self.setMask(corners.subtracted(QRegion(rect.adjusted(0, radius, 0, -radius))))
+
+    def paintEvent(self, event) -> None:
+        """
+        Paint the page outside one continuous rounded outline, including fractional edge pixels.
+        """
+        path = QPainterPath()
+        bounds = QRectF(self.rect())
+        path.addRect(bounds)
+        path.addRoundedRect(bounds, self.RADIUS, self.RADIUS)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillPath(path, QColor(gui_colour(self, "page", "#f5f7f6")))
 
 
 class SearchField(QLineEdit):
@@ -320,13 +620,13 @@ class DateField(QLineEdit):
         super().__init__(text, parent)
         self.setAccessibleName("Accounting date")
         self.setPlaceholderText("YYYY-MM-DD or DD-MM-YYYY")
-        self.setToolTip("Accounting date · type YYYY-MM-DD or DD-MM-YYYY, or choose a day")
+        self.setToolTip("Accounting date · YYYY-MM-DD or DD-MM-YYYY")
         self.setTextMargins(0, 0, 28, 0)
         self.calendar_button = QToolButton(self)
         self.calendar_button.setObjectName("manualIconAction")
         self.calendar_button.setFixedSize(28, 28)
-        self.calendar_button.setIcon(icon("chevron_down", size=12))
-        self.calendar_button.setIconSize(QSize(12, 12))
+        self.calendar_button.setIcon(icon("calendar", size=16))
+        self.calendar_button.setIconSize(QSize(16, 16))
         self.calendar_button.setToolTip("Choose accounting date")
         self.calendar_button.setAccessibleName("Choose accounting date")
         self.calendar_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -595,6 +895,84 @@ class _PopupSurface(QWidget):
         painter.drawRoundedRect(QRectF(self.rect()), 12, 12)
 
 
+class _HoverTip(QLabel):
+    """
+    Paint a rounded, non-activating tooltip with transparent corners on macOS.
+    """
+
+    def __init__(self) -> None:
+        """
+        Create the transparent native backing before its first show.
+        """
+        super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.NoDropShadowWindowHint | Qt.WindowType.WindowTransparentForInput)
+        self.setObjectName("aurumHoverTip")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAutoFillBackground(False)
+        self.setContentsMargins(10, 6, 10, 6)
+        self.setWordWrap(True)
+        self.owner = None
+        self.surface = QColor()
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.hide)
+
+    def present(self, position: QPoint, text: str, owner: QWidget) -> None:
+        """
+        Size the text and keep the entire bubble inside the pointer's screen.
+        """
+        if not text:
+            self.hide()
+            return
+        self.owner = owner
+        self.position = position
+        self.surface = QColor(gui_colour(owner, "sidebar", "#183f42"))
+        self.surface.setAlpha(242)
+        ink = gui_colour(owner, "sidebar_text", "#ffffff")
+        style = f"QLabel#aurumHoverTip {{ background: transparent; border: none; color: {ink}; }}"
+        if self.styleSheet() != style:
+            self.setStyleSheet(style)
+        self.setFont(QApplication.font("QToolTip"))
+        self.setText(text)
+        screen = QApplication.screenAt(position) or owner.screen()
+        bounds = screen.availableGeometry()
+        limit = min(420, bounds.width())
+        self.setMaximumWidth(limit)
+        self.setWordWrap(False)
+        if self.sizeHint().width() >= limit:
+            self.setWordWrap(True)
+        self.adjustSize()
+        x = min(position.x() + 12, bounds.right() - self.width() + 1)
+        y = position.y() + 18
+        if y + self.height() > bounds.bottom():
+            y = position.y() - self.height() - 6
+        self.move(max(bounds.left(), x), max(bounds.top(), y))
+        self.show()
+        self.timer.start(9000)
+
+    def hideEvent(self, event) -> None:
+        """
+        Release the source widget after the tooltip closes.
+        """
+        self.owner = None
+        self.timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event) -> None:
+        """
+        Draw the curved surface once and let the label lay out plain or rich text.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.surface)
+        painter.drawRoundedRect(QRectF(self.rect()), 9, 9)
+        painter.end()
+        super().paintEvent(event)
+
+
 class _ControlStyle(QObject):
     """
     Apply shared presentation when Qt finishes constructing controls, without replacing their behavior.
@@ -605,21 +983,66 @@ class _ControlStyle(QObject):
         Keep the presentation filter alive without sharing widget-owned Qt style objects.
         """
         super().__init__(application)
+        self.tip = _HoverTip()
 
     def eventFilter(self, watched, event) -> bool:
         """
         Prepare newly polished controls and refresh rounded popup masks after geometry changes.
         """
+        if watched is self.tip:
+            return False
+        if event.type() == QEvent.Type.ToolTip and isinstance(watched, QWidget):
+            tip = watched.toolTip()
+            view = watched.parentWidget()
+            if isinstance(view, QHeaderView) and watched is view.viewport():
+                index = view.logicalIndexAt(event.pos())
+                if index >= 0 and view.model() is not None:
+                    tip = view.model().headerData(index, view.orientation(), Qt.ItemDataRole.ToolTipRole) or tip
+            elif isinstance(view, QAbstractItemView) and watched is view.viewport():
+                tip = view.indexAt(event.pos()).data(Qt.ItemDataRole.ToolTipRole) or tip
+            if tip and watched.objectName() != "budgetAllocationChart":
+                self.tip.present(event.globalPos(), str(tip), watched)
+                return True
+        if self.tip.owner is watched and event.type() == QEvent.Type.ToolTipChange and watched.toolTip():
+            self.tip.present(self.tip.position, watched.toolTip(), watched)
+            return False
+        if self.tip.owner is not None and (
+            event.type() in {
+                QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress, QEvent.Type.ApplicationDeactivate,
+            }
+            or watched is self.tip.owner and event.type() in {
+                QEvent.Type.Hide, QEvent.Type.Leave, QEvent.Type.ToolTipChange, QEvent.Type.Close,
+            }
+        ):
+            self.tip.hide()
+        if event.type() in {QEvent.Type.Show, QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Hide}:
+            if isinstance(watched, QTableView) and event.type() in {QEvent.Type.Show, QEvent.Type.Resize}:
+                if watched.property("roundedTable"):
+                    _round_popup_window(watched, 10)
+                _align_table_scrollbar(watched)
+            elif isinstance(watched, QWidget) and isinstance(watched.parentWidget(), QTableView):
+                table = watched.parentWidget()
+                if watched is table.viewport() or watched is table.horizontalHeader():
+                    _align_table_scrollbar(table)
+        if event.type() in {QEvent.Type.Show, QEvent.Type.Resize, QEvent.Type.StyleChange}:
+            if isinstance(watched, (QPushButton, QToolButton, QComboBox)):
+                self._fit_pill(watched)
+            elif isinstance(watched, (QLineEdit, QPlainTextEdit, QTextEdit)):
+                self._fit_field(watched)
         if event.type() == QEvent.Type.Polish:
             self.prepare(watched)
-        elif event.type() in {QEvent.Type.Show, QEvent.Type.Resize} and isinstance(watched, QMenu):
-            _round_menu(watched)
+        elif event.type() in {QEvent.Type.Show, QEvent.Type.Resize} and (
+            isinstance(watched, QMenu) or isinstance(watched, QLabel) and watched.isWindow()
+            and watched.windowType() == Qt.WindowType.ToolTip
+        ):
+            radius = 12 if isinstance(watched, QMenu) else 9
+            _round_popup_window(watched, radius)
             if event.type() == QEvent.Type.Show:
-                QTimer.singleShot(0, watched, lambda: _round_menu(watched))
+                QTimer.singleShot(0, watched, lambda: _round_popup_window(watched, radius))
         elif event.type() in {QEvent.Type.Show, QEvent.Type.Resize} and watched.property("aurumComboPopup"):
             combo = getattr(watched, "_aurum_combo", None)
             if combo is not None:
-                if event.type() == QEvent.Type.Show and combo.objectName() != "themePicker":
+                if event.type() == QEvent.Type.Show and combo.view().objectName() != "themePickerList":
                     width = max((combo.fontMetrics().horizontalAdvance(combo.itemText(index))
                                  for index in range(combo.count())), default=0)
                     padding = 78 if combo.property("centredChoices") else 58
@@ -634,8 +1057,16 @@ class _ControlStyle(QObject):
         """
         Remove native button outlines and give every ordinary combo the shared menu rows.
         """
-        if isinstance(widget, (QAbstractButton, QComboBox)):
+        if isinstance(widget, (
+            QAbstractButton, QAbstractSpinBox, QComboBox, QLineEdit, QPlainTextEdit, QTextEdit,
+        )):
             widget.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        if isinstance(widget, (QPushButton, QToolButton, QComboBox)):
+            self._fit_pill(widget)
+        if isinstance(widget, QLabel) and widget.isWindow() and widget.windowType() == Qt.WindowType.ToolTip:
+            widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            widget.setAutoFillBackground(False)
+            return
         if isinstance(widget, QMenu):
             widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             widget.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
@@ -672,9 +1103,53 @@ class _ControlStyle(QObject):
             "QListView QScrollBar::add-line:vertical, QListView QScrollBar::sub-line:vertical { height: 0; }"
         )
         listing.viewport().setAutoFillBackground(False)
-        if widget.objectName() != "themePicker":
+        if listing.objectName() != "themePickerList":
             listing.setItemDelegate(_ChoiceDelegate(widget))
         prepare_combo_popup(widget)
+
+    @staticmethod
+    def _fit_field(control: QLineEdit | QPlainTextEdit | QTextEdit) -> None:
+        """
+        Fit search, Setup and single-line entry fields to their actual bounds.
+        """
+        if not control.isVisible() or control.objectName() == "budgetAmount":
+            return
+        if not control.property("searchField") and control.objectName() != "connectionControl":
+            parent = control.parentWidget()
+            surfaces = {"setupTabs", "reportGroupsDialog", "budgetAccountsPopup"}
+            if isinstance(control, QLineEdit):
+                surfaces.update({"journalEntryEditor", "manualEntryEditor", "bankEvidencePicker"})
+            while parent and parent.objectName() not in surfaces:
+                parent = parent.parentWidget()
+            if parent is None:
+                return
+        radius = min(control.width(), control.height()) // 2
+        selector = "QLineEdit" if isinstance(control, QLineEdit) else control.metaObject().className()
+        padding = "" if isinstance(control, QLineEdit) else f" padding: 8px {max(12, radius // 2)}px;"
+        rule = f"\n{selector} {{ border-radius: {radius}px;{padding} }}"
+        _replace_pill_rule(control, rule)
+
+    @staticmethod
+    def _fit_pill(control: QPushButton | QToolButton | QComboBox) -> None:
+        """
+        Fit a standalone action or closed selector's fill to its bounds without changing the hit area.
+        """
+        if not control.isVisible():
+            return
+        selector = "QAbstractButton"
+        if isinstance(control, QComboBox):
+            if control.view().objectName() == "themePickerList" or control.isEditable():
+                return
+            selector = "QComboBox"
+        elif type(control) is not QPushButton and not isinstance(control, HeaderActionButton):
+            # Custom push buttons also render workflow cards and selector segments.
+            if control.objectName() not in _PILL_TOOL_ACTIONS or isinstance(
+                control.parent(), (DateField, _DatePopup),
+            ):
+                return
+        radius = min(control.width(), control.height()) // 2
+        rule = f"\n{selector} {{ border-radius: {radius}px; }}"
+        _replace_pill_rule(control, rule)
 
 
 class _ChoiceDelegate(QStyledItemDelegate):
@@ -739,6 +1214,16 @@ class _ChoiceDelegate(QStyledItemDelegate):
 
 
 # %% 3. Helpers ----------------------------------------------------------------------------------------------
+def _motion_hints() -> QAccessibilityHints:
+    """
+    Keep the parent Qt style hints wrapper alive for the lifetime of its accessibility signals.
+    """
+    application = QApplication.instance()
+    if not hasattr(application, "_aurum_style_hints"):
+        application._aurum_style_hints = application.styleHints()
+    return application._aurum_style_hints.accessibility()
+
+
 class _DiscardDialog(QDialog):
     """
     Centre a short draft question and explicit decisions without native message-box icon spacing.
@@ -810,7 +1295,7 @@ class _DiscardDialog(QDialog):
             "QPushButton#discardCancel, QPushButton#discardAccept, QPushButton#discardSave { color: "
             + colour("text", "#243b3b")
             + "; background: " + colour("panel", "#e3eeea")
-            + "; border: none; border-radius: 8px; padding: 0; font-size: 13px; font-weight: 400; }"
+            + "; border: none; padding: 0; font-size: 13px; font-weight: 400; }"
             "QPushButton#discardCancel:focus, QPushButton#discardAccept:focus, "
             "QPushButton#discardSave:focus { background: "
             + colour("focus", "#d6e6df") + "; }"
@@ -848,10 +1333,49 @@ class _DiscardDialog(QDialog):
         self.cancel_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
 
-def _round_menu(menu: QMenu) -> None:
+def _align_table_scrollbar(table: QTableView) -> None:
     """
-    Clip the native action-menu window to its rounded stylesheet surface without changing its actions.
+    Reserve the header's actual height above a table's scroll track, including after header resizing.
+    """
+    if not table.isVisible() or table.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff:
+        return
+    bar = table.verticalScrollBar()
+    container = bar.parentWidget()
+    if container is None:
+        return
+    inset = max(0, table.viewport().mapTo(table, QPoint()).y() - container.mapTo(table, QPoint()).y())
+    spacer = getattr(table, "_header_spacer", None)
+    if spacer is None:
+        if not inset:
+            return
+        spacer = QWidget(table)
+        spacer.setObjectName("tableHeaderGutter")
+        spacer.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        spacer.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        table._header_spacer = spacer
+        spacer.setFixedHeight(inset)
+        table.addScrollBarWidget(spacer, Qt.AlignmentFlag.AlignTop)
+    elif spacer.height() != inset:
+        spacer.setFixedHeight(inset)
+
+
+def _replace_pill_rule(control: QWidget, rule: str) -> None:
+    """
+    Update only the measured corner treatment, preserving widget-specific style rules.
+    """
+    style = control.styleSheet()
+    if not style.endswith(rule):
+        previous = control.property("aurumPillRule") or ""
+        control.setProperty("aurumPillRule", rule)
+        control.setStyleSheet(style.replace(previous, "", 1) + rule)
+
+
+def _round_popup_window(widget: QWidget, radius: int) -> None:
+    """
+    Clip a table or popup and its child surfaces at their shared outer corners.
     """
     path = QPainterPath()
-    path.addRoundedRect(QRectF(menu.rect()), 12, 12)
-    menu.setMask(QRegion(path.toFillPolygon().toPolygon()))
+    path.addRoundedRect(QRectF(widget.rect()), radius, radius)
+    widget.setMask(QRegion(path.toFillPolygon().toPolygon()))
+    if widget.windowType() == Qt.WindowType.ToolTip:
+        widget.setWindowOpacity(1.0)

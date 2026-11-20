@@ -218,6 +218,125 @@
       "path": "icons/SVG/Bold/Video, Audio, Sound/Full Screen.svg",
       "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Video%2C%20Audio%2C%20Sound/Full%20Screen.svg",
       "original_sha256": "93f0795d1c6be88508297f8ddcf72fa27f5dcb9abf6a67a37c39b0caee75d9d8"
+    },
+    {
+      "role": "analysis",
+      "name": "Graph Up",
+      "path": "icons/SVG/Bold/Business, Statistic/Graph Up.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Business%2C%20Statistic/Graph%20Up.svg",
+      "original_sha256": "3711d4ef6dc424cf386fbb162aa4e0bd538f1be148da49abe49d95f0e0976d9e"
+    },
+    {
+      "role": "reports",
+      "name": "Documents",
+      "path": "icons/SVG/Bold/Notes/Documents.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Notes/Documents.svg",
+      "original_sha256": "851ac8b1fd58c4f7cc675e6e1eb0a697cb5db87087f57cda999ec2bc1015229b"
+    },
+    {
+      "role": "securities",
+      "name": "Case Minimalistic",
+      "path": "icons/SVG/Bold/School/Case Minimalistic.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/School/Case%20Minimalistic.svg",
+      "original_sha256": "25a603faf4a571e0d0df0e2abe535e6e784a03303791914fc5cd07e7079c0b69"
+    },
+    {
+      "role": "theme",
+      "name": "Palette",
+      "path": "icons/SVG/Bold/Design, Tools/Palette.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Design%2C%20Tools/Palette.svg",
+      "original_sha256": "d5b98009babaa893515c56e8e82e0d62fe96f5d15d847096666428e9a85aeff5"
+    },
+    {
+      "role": "report_settings",
+      "name": "Tuning Square",
+      "path": "icons/SVG/Bold/Settings, Fine Tuning/Tuning Square.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Settings%2C%20Fine%20Tuning/Tuning%20Square.svg",
+      "original_sha256": "79bdbd4ded3b8349bca113be18c8be7d147fd48bd0c05f37bddd7c7fc9f64126"
+    },
+    {
+      "role": "accounts",
+      "name": "Cardholder",
+      "path": "icons/SVG/Bold/Money/Cardholder.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Money/Cardholder.svg",
+      "original_sha256": "1bbbba168c6ed7dd1c6f575ee5eda4816ae05c6c7fb8ab9c85b1a0df9fea7e31"
+    },
+    {
+      "role": "budget",
+      "name": "Pie Chart",
+      "path": "icons/SVG/Bold/Business, Statistic/Pie Chart.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Business%2C%20Statistic/Pie%20Chart.svg",
+      "original_sha256": "34be69e0784b6bdc207df26ccc7e329ea27bc0727a4d94cb93d1eb7bb4afe03a"
+    },
+    {
+      "role": "connect_bank",
+      "name": "Plug Circle",
+      "path": "icons/SVG/Bold/Electronic, Devices/Plug Circle.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Electronic%2C%20Devices/Plug%20Circle.svg",
+      "original_sha256": "f911458725f0b76cf7e6b1a30c774057851c221107467572823eb8366ba3bc5f"
+    },
+    {
+      "role": "sync_bank",
+      "name": "Transfer Horizontal",
+      "path": "icons/SVG/Bold/Arrows/Transfer Horizontal.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows/Transfer%20Horizontal.svg",
+      "original_sha256": "f2c09e30c367c1818645f18b31519a95907a04979c2653e67b532c5654feb910"
+    },
+    {
+      "role": "check_connection",
+      "name": "Shield Check",
+      "path": "icons/SVG/Bold/Security/Shield Check.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Security/Shield%20Check.svg",
+      "original_sha256": "98904fd478e8ef4332066f5bf5b2104e2f8168bb1b8f23e62e0edd6ce9a38ad1"
+    },
+    {
+      "role": "retry",
+      "name": "Restart Square",
+      "path": "icons/SVG/Bold/Arrows/Restart Square.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows/Restart%20Square.svg",
+      "original_sha256": "66cac0c89cf49079919ab44f66523ad94c257b04adce77bbd2ceff380fe55365"
+    },
+    {
+      "role": "edit",
+      "name": "Pen",
+      "path": "icons/SVG/Bold/Messages, Conversation/Pen.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Messages%2C%20Conversation/Pen.svg",
+      "original_sha256": "3fa120aecb59052cedc717cdad09a5bc9ef8595df95c780043d3d1789aeb0d86"
+    },
+    {
+      "role": "attach_evidence",
+      "name": "Paperclip",
+      "path": "icons/SVG/Bold/Messages, Conversation/Paperclip.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Messages%2C%20Conversation/Paperclip.svg",
+      "original_sha256": "abe9541b6f00d08c6e954a07204091794d2eca7bc968aac22479044bfaf96382"
+    },
+    {
+      "role": "investment_disposal",
+      "name": "Hand Money",
+      "path": "icons/SVG/Bold/Hands/Hand Money.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Hands/Hand%20Money.svg",
+      "original_sha256": "d4a539f35e579565e0454c2a3beb06f48b65c83215993beb041205031ee3224e"
+    },
+    {
+      "role": "post",
+      "name": "Bill Check",
+      "path": "icons/SVG/Bold/Money/Bill Check.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Money/Bill%20Check.svg",
+      "original_sha256": "a7e8d5be0a9338f6435fc007242acd372b1ea83d33730e31eda1037b3b171726"
+    },
+    {
+      "role": "undo",
+      "name": "Undo Left Round",
+      "path": "icons/SVG/Bold/Arrows Action/Undo Left Round.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Arrows%20Action/Undo%20Left%20Round.svg",
+      "original_sha256": "03c7e5943d5ff7df9545867a4d2b47152de0b9cab3722b64f535202ba80b3365"
+    },
+    {
+      "role": "choose_pdf",
+      "name": "File",
+      "path": "icons/SVG/Bold/Files/File.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Files/File.svg",
+      "original_sha256": "42f2ec66cdf81705bb8509635d8583a7d4da8d60120a76940b83af35ff7dcc63"
     }
   ]
 }

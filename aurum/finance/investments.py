@@ -864,13 +864,8 @@ def fetch_yahoo_quote(security: Security, requested_date: date) -> PriceQuote:
             price_date = timestamp.date()
             if not 0 <= (requested_date - price_date).days <= 7:
                 continue
-            if security.security_type == SecurityType.CRYPTO:
-                if now < timestamp.to_pydatetime().astimezone(UTC) + timedelta(days=1):
-                    continue
-            elif price_date >= now.astimezone(timestamp.tzinfo).date():
-                close = metadata.get("currentTradingPeriod", {}).get("regular", {}).get("end")
-                if close is None or now.timestamp() < close:
-                    continue
+            if not completed_yahoo_bar(timestamp, security.security_type, metadata, now):
+                continue
             price = Decimal(str(row["Close"]))
             if price.is_finite() and price > 0:
                 return PriceQuote(
@@ -888,3 +883,21 @@ def fetch_yahoo_quote(security: Security, requested_date: date) -> PriceQuote:
         "No completed AUD close is available within seven days; "
         "enter an AUD unit price in the Manual response"
     )
+
+
+def completed_yahoo_bar(timestamp: datetime, kind: SecurityType, metadata: dict, now: datetime) -> bool:
+    """
+    Accept a timezone-aware daily bar only after its exchange session or full UTC crypto day has ended.
+    """
+    if timestamp.utcoffset() is None:
+        raise PriceUnavailable("The provider omitted the quote timezone.")
+    if kind == SecurityType.CRYPTO:
+        return now >= timestamp.astimezone(UTC) + timedelta(days=1)
+    today = now.astimezone(timestamp.tzinfo).date()
+    if timestamp.date() != today:
+        return timestamp.date() < today
+    close = metadata.get("currentTradingPeriod", {}).get("regular", {}).get("end")
+    if not close:
+        return False
+    session_end = datetime.fromtimestamp(close, timestamp.tzinfo)
+    return session_end.date() == today and now >= session_end

@@ -12,7 +12,7 @@ The catalogue was reviewed on SVG Repo. Its HTML download pages returned HTTP 42
 SVG artwork was downloaded from the creator's original repository. Per-icon paths, download URLs and
 original file SHA-256 hashes are recorded in `sources.json`.
 
-Aurum adapts the single fixed fill colour to `currentColor` and removes fixed width/height attributes
+Aurum adapts the single artwork colour in fills and strokes to `currentColor` and removes fixed dimensions
 so icons follow workspace colours and control sizes. The chat icon's original paths are combined with even-odd
 fill to make its three white dots transparent cutouts, readable with both light and dark icon tints.
 Path coordinates and their 24×24 coordinate system are preserved. Month/disclosure arrows keep the original
@@ -25,9 +25,15 @@ retained in `sources.json`. Copy that file back to `refresh.svg` to restore that
 
 ## Restore the original icons
 
-The original set remains unchanged in `../ui/`; the two legacy stylesheet SVGs in `../` are retained too.
+The original outline files remain in `../ui/`, alongside the Solar outline artwork for newer roles.
+The two legacy stylesheet SVGs are in `../`.
 Set `ICON_SET = "outline"` in `aurum/gui/icons.py` and restart Aurum to restore that set throughout the GUI.
 Set it back to `"solar_bold"` to use this set. Report PDF artwork is independent of this desktop choice.
+
+The new outline files use the same designs and pinned author revision as their bold counterparts.
+`manual` uses Pen New Square in both sets, reusing the original bold `pen.svg` and a dedicated outline SVG.
+`investment_disposal` uses the author's Linear version of Hand Money. The per-file source paths and hashes
+are recorded in the [outline manifest](../ui/solar-sources.json). Both variants use the licence above.
 
 ## Role mapping
 
@@ -63,3 +69,20 @@ Set it back to `"solar_bold"` to use this set. Report PDF artwork is independent
 | `search` | Magnifer |
 | `close` | Close Circle |
 | `fit` | Full Screen |
+| `analysis` | Graph Up |
+| `reports` | Documents |
+| `securities` | Case Minimalistic |
+| `theme` | Palette |
+| `report_settings` | Tuning Square |
+| `accounts` | Cardholder |
+| `budget` | Pie Chart |
+| `connect_bank` | Plug Circle |
+| `sync_bank` | Transfer Horizontal |
+| `check_connection` | Shield Check |
+| `retry` | Restart Square |
+| `edit` | Pen |
+| `attach_evidence` | Paperclip |
+| `investment_disposal` | Hand Money |
+| `post` | Bill Check |
+| `undo` | Undo Left Round |
+| `choose_pdf` | File |

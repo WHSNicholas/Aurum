@@ -25,6 +25,16 @@ the same sidebar icon spins throughout refresh, sync and other background jobs. 
 the stop-square icon requests a stop
 after the current safe step.
 Routine bank-sync results are available through the information icon's activity log. Errors remain visible.
+Hover over a transparent button or selector outside tables to highlight its clickable area.
+Inside tables, selection and keyboard focus identify the active row or control.
+The rising graph opens Analysis. The stacked documents open Reports. The sliders under Setup open report
+settings.
+
+On **Transactions**, **Review** and **Journal**, use **1M** beneath the month selector to see
+the selected reporting month. Choose **All** to browse every saved date. These pages share this choice
+until you close the window. The month above the pill still sets the working month for Process, new entries
+and report generation. Review's status filter works within either date range. Switching ranges keeps your
+unsaved responses, including responses to rows outside the visible range.
 
 ## Setup
 
@@ -43,10 +53,16 @@ This one setting supplies the sidebar name and generated report headers and foot
 Enter the personal name only; reports add **Aurum |** automatically.
 Regenerate reports to apply a changed name to saved PDFs.
 
-Choose a theme in the **THEME** card. Save, then refresh the workspace to apply its colours to the app.
-Fixed themes retain their own appearance; adjustable themes offer Light/Dark.
-Palette previews sit on a white rounded background in the card and theme menu so every shade is visible.
-All eleven themes ship with Aurum: Teal, Navy Blue, Plum Purple, Forest Green, Burgundy, Copper,
+Choose a theme in the **THEME** card and click **Save**. The app and previously generated reports on screen
+adopt the saved colours immediately. Adjustable themes offer Light/Dark. The swatches in the card and theme
+menu have a white backing in light workspaces and a black backing in dark workspaces.
+In Sunset Hues, deep teal highlights the main report figure, with softer teal behind the Net Worth chart.
+Soft sage marks report sections such as Assets, Liabilities and Equity. Supporting cards use cool grey-green.
+Blue-grey bands mark column headings and totals. Cash Flow and the other secondary charts share the
+table background, and a dusty-rose tint groups related rows.
+The desktop uses a shared light canvas, and PDFs use the
+configured paper colour. Generate a report again to apply the colours to its saved PDFs.
+Aurum ships with ten themes including Teal, Navy Blue, Plum Purple, Forest Green, Burgundy,
 Tranquil Earth, Warm Neutrals, Velvet Neutrals, Twilight Mauve and Sunset Hues. They are available in
 new and cloned workspaces without copying personal configuration. Existing workspace colour overrides
 still take precedence.
@@ -65,15 +81,17 @@ Create missing workspace files with Setup's explicit create action. Existing fil
 New workspaces start with the fixed Capital, Retained Earnings and Unrealised Capital Gains equity accounts.
 
 Accounts are grouped as assets, liabilities, equity, income and expenses. Select an account to edit it.
-Use the adjacent plus and bin icons to add or remove definitions. Keep accounts needed by saved history;
-use the closing date when an account closes. Dates accept `YYYY-MM-DD` or `DD-MM-YYYY`.
+In both Accounts and Securities, use the plus and bin icons above the list to add or remove a definition.
+The up and down arrows move the selected item within its type. Save to keep the new order.
+Account notes use a single line. Existing multiline notes keep their formatting until you edit the note.
+For an account with saved history, enter a closing date when it closes. Dates accept `YYYY-MM-DD` or `DD-MM-YYYY`.
 Deleting an account referenced by saved accounting is blocked with its name and closing-date guidance;
 unused accounts can be removed. Closing an account preserves its postings and report history.
 Completed processing snapshots alone do not block removal after the current postings have been reassigned.
 Their original evidence is retained. Unfinished work and current accounting still protect referenced accounts.
 
 For a bank starting balance, save the account first, then enter the amount and date in its **Opening balance**
-row. Click that row's post icon to record it against Capital. This changes the balance sheet without adding
+row. Click the checked bill to post it against Capital. This changes the balance sheet without adding
 budget income or expenses; the bottom Setup save icon only saves configuration. Negative balances are supported;
 zero needs no entry. Editing the row corrects the same opening entry. Complex existing openings use the journal
 edit icon instead. Other asset and liability accounts keep their existing transaction workflows.
@@ -92,13 +110,18 @@ Save a new account first to enable its budget setting.
 Add equities and cryptocurrencies under Securities. Stable account/security identifiers are saved automatically.
 Changing a display name does not change its identity. System equity names and roles are fixed.
 
+Saving a new security or changing its type, symbol, market or **Price symbol** checks the ticker with
+Yahoo Finance. If Yahoo rejects it, the edits stay open. Apply a suggestion to fill **Price symbol**, or
+edit the field yourself, then save again. A rename or reorder alone skips the lookup. If Yahoo is
+unavailable or rate-limits the check, Aurum saves the settings with a warning.
+
 ### Connect ANZ Plus with Redbark
 
 Set up your bank connection in Redbark first and create an API key with **data:read** access.
 Then, in Aurum:
 
 1. Save your ANZ Plus bank accounts in **Setup → Accounts**, including BSB and account number.
-2. Under **Connections**, enter the API key in Redbark's masked field and use the check icon.
+2. Under **Connections**, enter the API key in Redbark's masked field and click the Redbark symbol.
 3. In the setup dialog, link each returned account to its Aurum account. Check the masked account number carefully.
 4. Choose a **handover date** for each account. PDFs cover dates before it; Redbark covers booking dates
    from that date onward. The suggested date follows existing imported activity.
@@ -112,7 +135,7 @@ Aurum stays just inside Redbark's approximate seven-year history limit and shows
 handover when an older date is selected.
 
 Connected workspaces sync automatically once when opened. Ordinary refresh does not start another sync.
-You can also click **Sync** on Statements. Syncing imports settled bank transactions; it does not run AI
+You can also click **Sync** on Transactions. Syncing imports settled bank transactions; it does not run AI
 or post journal entries. Click **Process** separately when you want to prepare the journal.
 Redbark may return cached bank activity, so a successful check does not guarantee a live bank refresh.
 
@@ -128,14 +151,15 @@ the saved source: **Keep saved record** acknowledges the observation while retai
 Make any required accounting adjustment explicitly in the journal.
 Setup shows connection status beneath Redbark and ChatGPT. **Needs attention** indicates an actual connection
 or sync error; bank-fact questions remain in Review without adding a count to the connection row.
-Repeated Redbark IDs ignore description casing and numeric presentation differences. Genuine changed facts
-still require review, while different provider IDs remain separate transactions. A successful sync clears
-any held conflict caused only by these presentation differences without changing saved postings.
+Redbark sometimes omits an extended description it supplied earlier. Aurum retains the wording already
+received and recognises the transaction by its provider ID. A successful account sync clears older warnings
+caused by this omission, even if Redbark no longer returns that transaction. For genuine changes, Review
+shows each differing field with its last accepted value and the incoming value.
 
 PDF imports remain available for earlier dates and other accounts. PDFs overlapping a Redbark-owned period
 are rejected to avoid duplicate accounting, including after a local disconnect. Handovers are retained with
-the imported history. Leave the key field empty and use the check icon to check the saved connection inline.
-Enter a replacement key or use the setup icon to review mappings and handover dates.
+the imported history. When the field shows **Saved API key**, leave it empty and click the Redbark symbol
+to check the saved connection. Enter a new key to check it, or use the setup icon to review account mappings.
 Connection actions save independently of Setup's save icon. Refresh preserves an entered key; leaving
 Accounts with an unused key asks whether to discard it.
 If Keychain refuses access, allow access and retry; the inline error explains any recovery needed.
@@ -145,19 +169,22 @@ Redbark balances do not become opening entries automatically.
 
 ### Budget
 
-The budget follows the shared reporting month. Enter monthly amounts directly, or use the copy icon to
-stage last month's budget. Copying does not save automatically.
+Enter the selected month's targets in whole dollars. An older target with cents shows its exact value
+so you can choose the whole-dollar amount before saving that month's budget. To reuse last month's
+targets, click the clock icon, review the amounts and save.
 
 The Setup Budget card shows whole dollars without thousands separators, such as **$5000**, with Savings
 on its second line. Hover for exact amounts including cents; rounding does not change the saved targets or
 number formatting elsewhere.
 
-The chart shows income above expenses and savings. Blue represents income, clear red expenses and emerald green
-savings, consistently across GUI themes.
-Segments run from largest allocation to smallest; hover for category amounts. Income, Expenses and Savings
-stay side by side, each with its own vertical scroll while the chart remains fixed above them.
-Use plus/bin icons to add or remove categories. Each table has **Category**, **Amount** and **Links** columns.
-Links shows the full linked account names. Click the names or chevron to open the searchable dropdown.
+The chart shows income above expenses and savings. Blue represents income, red represents expenses and
+green represents savings. The same colours identify the Cash Flow bars in Analysis and the Budget Report's
+progress fills. In both light and dark mode, the largest allocation uses the base colour and smaller
+allocations use progressively lighter shades. Equal amounts share a shade. Hover for category amounts.
+Income, Expenses and Savings stay side by side, each with its own vertical scroll while the chart remains fixed above them.
+Use the plus and bin on the left to add or remove categories. The arrows on the right move the selected
+category within its section. Each table has three equal-width columns for **Category**, **Amount** and **Links**.
+Links shows the full linked account names. Click anywhere in the link field to open the searchable dropdown.
 Long names wrap, and amount inputs remain compact within taller rows.
 Click an account row to check or uncheck it. Each change updates the unsaved Setup draft immediately, and the
 dropdown stays open for further choices. Escape or clicking outside closes it without undoing those changes.
@@ -177,7 +204,7 @@ when you draw on earlier savings. There are no savings pots or per-entry budget 
 
 ### Reports
 
-Choose the output folder and assign asset accounts through the **Account / Report Group** table.
+Choose the report folder under **Outputs** and assign asset accounts through the **Account / Report Group** table.
 **Other Assets** leaves an account ungrouped. Asset Groups and Account-based Investments share one page.
 The settings icon beside Asset Groups opens group management. Double-click a group name, or press F2,
 to rename it. Plus adds an editable row without opening another dialog. Enter finishes editing; Escape
@@ -185,17 +212,20 @@ cancels the edit. Use the save icon to apply group changes to the Setup draft, t
 The close icon cancels the dialog. Reordering keeps each group's accounts; removing a group leaves them ungrouped.
 
 Account-based investments track contribution cost for assets such as superannuation without requiring units.
+For UniSuper, choose **Capital in / out** for contributions, contribution tax, fund administration fees
+and rebates. Fees deducted inside the fund reduce cost basis, and rebates add it back. Choose **Return or
+fee** for the posted investment return. The investment report then shows cumulative posted fund returns.
 Investment display labels change report labels without renaming accounts.
 Use the theme card above the page for report appearance.
 
 ### ChatGPT
 
 Find ChatGPT under **Setup → Accounts → Connections**.
-Use the sign-in icon and authorise Aurum in the browser, then select a model and use the row's save icon.
+Click the ChatGPT logo and authorise Aurum in the browser, then select a model and use the row's save icon.
 This saves only the model; unrelated Setup edits remain untouched.
 A failed save leaves the selected model and draft available to retry.
 The picker shows the saved model before a connection check. **Not checked** means saved access has not been
-verified this session; use the connection refresh icon to check it and load available models.
+verified this session. Click the ChatGPT logo again to check the connection and load available models.
 Changing the model reveals Save and Discard icons; the picker tooltip retains the saved choice. Refresh keeps
 the draft, and leaving Accounts or closing Aurum protects an unsaved model choice. An unavailable model remains
 visible until you explicitly choose a replacement.
@@ -216,8 +246,8 @@ Overview reads posted accounting only:
 - **Net Worth** uses the balance sheet's calculation and the latest valid saved market prices on or before
   the cutoff. The card shows As of today's date for the current month, or the cutoff for an earlier month.
   Prices carry forward when a new day's quote is unavailable; their dates stay in the tooltip.
-  Refresh never downloads prices. **Provisional** means some holdings retain their recorded value;
-  hover for details and Generate reports to check prices or required
+  Refreshing Overview reads prices already saved in the workspace. **Provisional** means some holdings
+  retain their recorded value. Hover for details and Generate reports to check prices or required
   investment review.
 - **Income** and **Expenses** follow posted movements involving configured Cash accounts and signed refunds.
   Their counts include each contributing journal event once per side, including manual events.
@@ -232,7 +262,7 @@ throughout the interface use the same number font as the reports.
 
 The four workflow cards show Sources → Journal → Review → Reports. Completed stages retain their icons and gain a
 dark background and tick; unfinished stages share a lighter background. Each stage shows its heading and
-count; hover for supporting details. Click a stage to open its page—Sources opens Statements.
+count; hover for supporting details. Click a stage to open its page—Sources opens Transactions.
 There is no separate Workflow heading or next-step message. Actual workspace errors remain visible.
 The Reports card completes when earlier stages are complete and all four report PDFs exist for the month.
 Card tooltips explain pending final statements or source-file issues. A valid imported final statement takes
@@ -241,16 +271,56 @@ precedence over its retained list. Refresh checks the files again. The quote rem
 These indicators describe saved activity; they do not prove that every expected bank account was supplied
 or that saved reports include later accounting changes.
 
-## Statements
+## Analysis
 
-Use the circular-arrow icon beneath the Statements title (**Sync** in its tooltip) for connected bank accounts.
+Open **Analysis** beneath **Reports** in the sidebar to explore posted history through the selected
+month's cutoff.
+The page opens on **6M**. The daily charts cover 28 days for **4W**, 84 days for **12W**, or the
+reporting months included in **6M**, **1Y** and **All**. History begins with the first posted entry.
+Short ranges mark Sundays on the daily charts. Longer ranges mark the first of each calendar month.
+Exact dollar amounts on Analysis use two decimals and ungrouped digits, such as **$12500.00**.
+
+- **Net Worth** plots each day's closing balance, with Assets and Liabilities centred below the chart.
+  The right-hand figures show the dollar and percentage change since the first visible day. Hover over
+  a day to see its date beside the change.
+  A dash means the starting balance was zero and a percentage cannot be calculated.
+- **Cash Flow** shows monthly Income, Expenses and Savings side by side, with a legend below the bars.
+  Hover over a bar to see the month on a vertical guide and its value on a horizontal guide. The month
+  appears above the bars, with all
+  three amounts in the centred legend below.
+  **4W** shows the selected reporting month, **12W** shows the last three, and the longer ranges show
+  six, twelve or all months.
+- **Account Balances**, directly below Cash Flow, shows the daily balance of any asset, liability or equity
+  account. Select its name to switch accounts. The change beneath the amount is measured from the first
+  visible day. Equity includes the same earnings rollover and market adjustments as the balance sheet.
+  For investment accounts the line includes both cash in the account and the market value of its holdings.
+- **Spending by Category** shows the selected month's breakdown alongside Cash Flow and Account Balances.
+  In a narrow window it appears below them. Each category includes its amount and share of total expenses.
+  Refunds reduce the category total.
+
+Hover over a day or a set of monthly bars to inspect its reporting month. Click or press Enter to pin
+it and use the arrow keys to explore. Click the pinned day again or press Escape to return to the workspace
+month. Turning on Reduce Motion in your system settings makes chart and navigation feedback immediate.
+
+Analysis shows saved figures immediately. Opening the page, refreshing it or extending the range checks
+Yahoo for missing completed AUD market closes. The chart carries the last available close across
+non-trading days. Hover over the balance amount for the underlying market close dates, or read the
+accessible chart details. If Yahoo skips a past weekday, opening or refreshing Analysis after 15 minutes
+checks that date again. A provisional holding uses its recorded value. Price retrieval errors appear in the
+activity log.
+Overview and newly generated reports can use the same saved closes.
+
+## Transactions
+
+Use the plug beneath the Transactions title to connect a bank. Once connected, the paired arrows sync its
+transactions.
 Sync, Process and Generate are icon-only throughout the app. The PDF icon beside search opens
 the file chooser for backup imports from other accounts and earlier dates.
-The **Source** column distinguishes Redbark activity from PDFs. Selecting a feed transaction shows its booking
+The **Source** column shows Redbark, the PDF filename or **Manual Journal**. Selecting a feed transaction shows its booking
 date and full description. Descriptions display in uppercase; saved wording and copied source evidence
 remain unchanged. The source tooltip retains the additional bank evidence.
-Table amounts always include two decimal places. Columns fit the window: long account names and source
-filenames wrap, while Description uses the remaining width and may be shortened.
+Table amounts always include two decimal places. Each transaction occupies one row. Hover over a shortened
+cell to read its full value, or select the transaction to see its details. Search includes the full wording.
 When Redbark corroborates a transaction already imported from a PDF, its original PDF source and statement
 date stay visible. The additional Redbark dates and references appear in the source tooltip.
 
@@ -293,33 +363,32 @@ an error instead of risking duplicate accounting. An older differing list cannot
 At month end, import the final statements and Process any new transactions. The retained lists do not prevent
 completion once the corresponding valid final statements are imported.
 
-## Manual
+### Add a manual entry
 
-Use the plus icon beneath Manual's title (**New entry**) to open **Manual Entry**. It starts with an instruction;
-switch to **Journal entry** inside
-the popup while keeping each method's text or journal rows. Both methods share the date and selected bank
-transactions, and the window keeps the same size. The main page lists all saved instructions and direct entries,
-with search; outstanding questions are handled in Review.
-Direct entries show their first posting description in the list and detail card. Instruction entries show
-their instruction text. Displayed descriptions are uppercase; the saved wording is retained.
+Use the plus beside **Sync** to open **Manual Entry**. It starts in **Instruction** mode.
+Switch to **Journal entry** in the popup for direct posting. Both modes share the date and selected bank
+transactions and retain their own drafts.
 
-The columns are **Date, Description, Amount, Source, Status**. Source identifies
-**Instruction** or **Manual journal**. Posted amounts show the entry's total debits without a direction;
-unknown instruction amounts show **—**. Account information remains in tooltips and the selected entry's details.
+Standalone entries appear in Transactions with **Manual Journal** as their source. Their amount is the
+total of posted debits, or **—** while the amount is unknown. When a manual event posts against imported
+bank transactions, each bank movement keeps its own row, date, signed amount and source. Select any of those
+rows to see the complete event's debit and credit lines alongside the transaction details. **1M** uses the
+bank date for each movement. **All** includes both sides of transfers that cross reporting months.
 
 For an instruction, choose a date from the calendar or type it, then describe the event, amount and counterpart.
-Choose supporting **Bank Transactions** where relevant. Use the save icon, then open **Review** and click
+Use the paperclip beside **Bank Transactions** to link supporting transactions. Use the save icon,
+then open **Review** and click
 **Process**. AI questions and responses belong in Review; **Open Review** takes you to the selected instruction.
-Editing an instruction in Manual preserves its existing response.
+Editing an instruction in Transactions preserves its existing response.
 
-For a direct journal entry, enter balanced debit and credit lines and save to post immediately without AI.
+For a direct journal entry, enter balanced debit and credit lines and select the checked bill to post.
 Click anywhere in an account field to choose from its dropdown. The plus in the table's last header cell adds
 a posting; the aligned bin icons remove editable rows. Enter a description for each posting; missing details
 are highlighted when you try to save. Bank activity needs linked imported evidence; record a bank's initial
 balance through **Setup → Accounts → Opening balance**.
 
-Unposted instructions show their saved input. Posted entries show the unsigned event amount, description,
-accounting date, bank transactions and posting table. Journal uses the same card.
+Unposted instructions show their saved wording. The posted manual viewer shows Statement date, Effective date,
+Account, Reference and Source. For a standalone event, Statement date is the journal date.
 The pen icon at the top right of the details opens the appropriate instruction or journal editor.
 Closing an edited popup asks **Discard unsaved changes?** Choose Cancel to keep editing or Discard to close.
 Switching methods retains both drafts. Changing bank selection asks before replacing edited journal rows.
@@ -365,7 +434,7 @@ Investment instructions and accepted reviews use the same checked calculations.
 
 For a linked incoming bank receipt, the journal editor also offers an **Investment disposal** icon.
 Choose the holding and realised-return income account, then enter actual units sold or the confirmed fund
-value before withdrawal. The form previews released cost and gain/loss. Its save icon posts the complete
+value before withdrawal. The form previews released cost and gain/loss. Its checked bill posts the complete
 calculated event; cancelling leaves the journal draft intact. Ordinary journal rows cannot bypass disposal
 cost checks. Sales whose proceeds remain in brokerage cash can be entered as a Manual instruction.
 The holding chooser includes non-bank investments only; assigning a bank account the Investment budget
@@ -394,20 +463,21 @@ Completed events appear once. A posted event with unresolved work stays in Revie
 show the unsigned entry total; standalone bank transactions retain signed amounts. Links from elsewhere
 select the relevant item without hiding other kinds of review work.
 
-For bank and manual items, type **Response** and move between rows without saving each one. The save icon beside
+For bank and manual items, enter your response and move between rows without saving each one. The save icon beside
 Process saves
 all edited responses together. A changed instruction, question, accounting record or saved response rejects the
 whole stale batch. Refresh retains drafts so you can compare or discard them. Saving queues the responses;
 it does not call AI or change posted accounting.
 
-The question appears inside an empty Response box. Once you type, it remains available in the box's tooltip;
-it is never saved as your answer. Issues resolved through Edit retain their instructions beside the details.
+The empty box shows the saved question or **Review the transactions**. Once you type, the question stays in
+the tooltip. Only the text you enter is saved as your answer. Issues resolved through Edit retain their
+instructions beside the details.
 The posting badge/table shows whether accounting is posted.
 The pen icon in the detail header opens the journal editor for bank accounting or the original manual instruction.
 Investment items open the relevant posting's treatment controls. **All** includes completed manual
 conversations, whose responses remain readable without being editable.
-The unsaved count beside Save includes responses hidden by a filter. Discard-all affects those local drafts;
-discarding an already-saved pending response remains a separate action beside that response. Failed saves keep
+The unsaved count beside Save includes responses hidden by a filter. The Undo arrow discards those local
+drafts. The bin beside a saved pending response withdraws that response. Failed saves keep
 their error visible when you select another item.
 
 Click **Process** after saving answers. It handles saved manual instructions and reviews before ordinary bank
@@ -430,7 +500,7 @@ Readable guidance remains under `data/ai/categorisation_guidelines.md`.
 
 ## Journal
 
-Journal shows saved monthly events and the same compact detail card used in Manual.
+Select a saved event in Journal to see its details and postings.
 The card shows Accounting date, Source and linked bank Account names, without a bank-transaction count.
 Sources distinguish manual entries/instructions, Redbark and PDF filenames; multiple names wrap in the card.
 Use **Edit** for a complete balanced correction, retaining imported bank facts and source identities.
@@ -453,9 +523,16 @@ There are no CSV import/export controls; enter and review work in the app.
 
 ## Reports
 
-Choose a report type to preview its saved PDF. The play icon beneath the title (**Generate** in its tooltip)
-creates and saves all four reports. Hover to see the output folder.
+Select **Balance**, **Income**, **Budget** or **Investment** in the switcher. With the switcher focused,
+use the left and right arrow keys to change reports. Each report keeps its reading position while you switch.
+Scroll through the cards, charts and tables, hover over a chart for exact amounts or select table cells to copy.
+In a wide window, Balance, Income and Budget line up the totals at the foot of both columns.
+In a narrow window, the sections stack and use only the space their rows need.
+The play icon beneath the title (**Generate** in its tooltip) updates all four dashboard reports and saves
+the same four PDFs. Hover to see the output folder and any draft reasons for the selected report.
 Report settings live in Setup, and accounting issues live in Review.
+Total Savings uses a safe, Total Invested uses banknotes, Market or Portfolio Value uses a price tag, and
+Investment P&L uses a plus/minus symbol. Generate again to include these icons in previously saved PDFs.
 
 Reports are stored under the configured output folder's monthly subfolder, by default `data/reports/YYYY-MM/`:
 
@@ -466,14 +543,22 @@ Reports are stored under the configured output folder's monthly subfolder, by de
 
 Generating renders all four before replacing saved outputs. Reports use posted accounting and do not process
 responses or call AI. Outstanding accounting or unavailable required prices produces a labelled draft.
-Saved PDFs are snapshots: regenerate after changing accounting, names or report settings.
-Report headings show the month and year without a month-to-date suffix. Current-month figures still stop
-at the reporting cutoff.
+The dashboard shows the last generated figures using your current saved theme. **Generate** updates the
+figures after accounting or report configuration changes and applies the saved theme to the PDF files.
+The monthly report folder also contains a private hidden ".aurum-report-view.json" file holding the last
+generated dashboard figures and their presentation. Reopening a month or refreshing the workspace loads
+that saved result without recalculating it, downloading prices or writing files. Existing months need one
+Generate to create the dashboard view. A report icon appears in the empty view until the first generation.
+Aurum shows an error for unreadable dashboard data. Changed or missing PDFs leave the last valid dashboard
+view available with a warning to regenerate.
+Failed generation retains the last valid dashboard view and reports the error.
+The shared month selector identifies the dashboard period. PDF headings include the month and year.
+Current-month figures stop at the reporting cutoff.
 
 The balance sheet and investment report revalue supported security holdings using completed AUD closes.
 Generate checks for a fresh close and falls back to the latest valid saved close on or before the cutoff.
-Older saved prices remain usable, with their actual dates shown in the balance-sheet footer and beside
-investment prices. If no valid price exists, recorded value is retained with a draft warning.
+Older saved prices remain usable, with their actual dates shown in the balance-sheet PDF footer.
+If no valid price exists, recorded value is retained with a draft warning.
 Overview uses the same calculation and saved prices. Refresh after generation to see updated valuations.
 An older saved PDF can still differ after later accounting changes; regenerate it to update its snapshot.
 
@@ -499,7 +584,7 @@ The app manages these private locations:
 | `data/legacy_csv/` | Retired CSV files preserved for reference; never read as app inputs |
 
 No manual/review input folders are created. The former terminal utilities and Rename Statements.command
-are retired; PDF preparation in Statements performs the same naming and validation through the GUI.
+are retired; PDF preparation in Transactions performs the same naming and validation through the GUI.
 Keep financial data and credentials local and manage your own backups before changing or replacing a database.
 
 ## If something needs attention

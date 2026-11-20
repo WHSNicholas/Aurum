@@ -16,21 +16,25 @@ from datetime import date
 from pathlib import Path
 import sqlite3
 
-from PySide6.QtCore import QDate, QEvent, QRect, QSize, QThreadPool, QTimer, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import (
+    QDate, QEasingCurve, QEvent, QRect, QSize, QThreadPool, QTimer, Qt, QVariantAnimation, Signal,
+)
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget,
-    QStyledItemDelegate, QStyleOptionViewItem, QToolButton, QVBoxLayout, QWidget,
+    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
-from aurum.gui.activity import JournalPage, ReviewPage, StatementsPage
+from aurum.gui.activity import ActivityPage, JournalPage, ReviewPage, TransactionsPage
+from aurum.gui.analysis import AnalysisPage
 from aurum.gui.background import Job, error_message
-from aurum.gui.controls import QuoteBlock, confirm_unsaved
+from aurum.gui.controls import (
+    QuoteBlock, SegmentedControl, confirm_unsaved, reduced_motion, watch_reduced_motion,
+)
 from aurum.gui.editor import JournalEditor
 from aurum.gui.icons import RefreshButton, icon
-from aurum.gui.manual import ManualPage
 from aurum.gui.manual_editor import ManualEditor
 from aurum.gui.services import WorkspaceService
 from aurum.gui.setup import SetupPage
@@ -38,6 +42,10 @@ from aurum.gui.theme import apply_gui_theme, gui_colour
 from aurum.gui.workspace import OverviewPage, ReportsPage
 from aurum.finance.reports import ReportSettings, resolve_period
 from aurum.workflows.configuration import read_configuration
+
+_SETUP_ICONS = {
+    "accounts": "accounts", "securities": "securities", "budget": "budget", "reports": "report_settings",
+}
 
 
 # %% 1. Desktop Window ---------------------------------------------------------------------------------------
@@ -60,6 +68,9 @@ class MainWindow(QMainWindow):
         self.pool.setMaxThreadCount(1)
         self.job = None
         self.snapshot = {}
+        self._all_activity = False
+        self._activity_history = None
+        self._activity_link = None
         self._active_action = ""
         self._busy = False
         self._owner_document = None
@@ -69,10 +80,12 @@ class MainWindow(QMainWindow):
         self._continuation = None
         self._closing = False
         self._selected_page = 0
-        self._selected_navigation_row = -1
         self.editor = None
         self._last_message = "Workspace ready."
         self._startup_sync_pending = True
+        self._analysis_pending = False
+        self._analysis_has_securities = False
+        self._analysis_price_start = None
         try:
             self.month = self.service.default_month()
         except (OSError, ValueError, RuntimeError, sqlite3.Error):
@@ -98,7 +111,7 @@ class MainWindow(QMainWindow):
         brand_header.addWidget(brand)
         tagline = QLabel("PERSONAL FINANCE")
         tagline.setObjectName("tagline")
-        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tagline.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         brand_header.addWidget(tagline)
         side.addLayout(brand_header)
         side.addSpacing(16)
@@ -108,22 +121,18 @@ class MainWindow(QMainWindow):
         self.navigation.setIconSize(QSize(18, 18))
         self.navigation.setSpacing(2)
         self.names = [
-            "Overview", "Statements", "Manual entries", "Review", "Journal", "Reports", "Setup",
+            "Overview", "Transactions", "Review", "Journal", "Reports", "Analysis", "Setup",
         ]
         self._navigation_rows = {}
         self._setup_rows = {}
         for name in self.names:
-            label = "Manual" if name == "Manual entries" else name
-            item = QListWidgetItem(icon(name, colour="#cfe1da", size=18), label)
+            item = QListWidgetItem(icon(name, colour="#cfe1da", size=18), name)
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setSizeHint(QSize(0, 40))
             self._navigation_rows[name] = self.navigation.count()
             self.navigation.addItem(item)
             if name == "Setup":
-                for kind, symbol in (
-                    ("accounts", "wallet"), ("securities", "chart"),
-                    ("budget", "savings"), ("reports", "document"),
-                ):
+                for kind, symbol in _SETUP_ICONS.items():
                     label = kind.title()
                     child = QListWidgetItem(icon(symbol, colour="#aac9bd", size=16), label)
                     child.setData(Qt.ItemDataRole.UserRole, "Setup")
@@ -200,11 +209,17 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.next_month, 0, 2)
         self._update_month_controls()
         bar.addWidget(self.month_range, 1, 0, Qt.AlignmentFlag.AlignRight)
+        self.activity_scope = SegmentedControl(("1M", "All"), "Activity date range", 108, self)
+        self.activity_scope.setToolTip("View the selected reporting month or all saved activity.")
+        self.activity_scope._buttons[0].setAccessibleName("Selected reporting month")
+        self.activity_scope._buttons[1].setAccessibleName("All saved dates")
+        self.activity_scope.currentIndexChanged.connect(self._activity_scope_changed)
+        self.activity_scope.hide()
         self.stack = QStackedWidget()
         self.pages = {
-            "Overview": OverviewPage(), "Setup": SetupPage(workspace),
-            "Statements": StatementsPage(), "Review": ReviewPage(),
-            "Manual entries": ManualPage(), "Journal": JournalPage(), "Reports": ReportsPage(),
+            "Overview": OverviewPage(), "Analysis": AnalysisPage(), "Setup": SetupPage(workspace),
+            "Transactions": TransactionsPage(), "Review": ReviewPage(),
+            "Journal": JournalPage(), "Reports": ReportsPage(),
         }
         for name in self.names:
             page = self.pages[name]
@@ -212,7 +227,7 @@ class MainWindow(QMainWindow):
             if hasattr(page, "action_requested"):
                 page.action_requested.connect(self._action)
         self.pages["ChatGPT"] = self.pages["Setup"].chatgpt
-        self.pages["Statements"].set_statement_folder(str(self.service.data / "bank_statements"))
+        self.pages["Transactions"].set_statement_folder(str(self.service.data / "bank_statements"))
         self.pages["ChatGPT"].action_requested.connect(self._action)
         self.pages["ChatGPT"].cancel_requested.connect(self._stop)
         self.pages["Setup"].bank_connection.action_requested.connect(self._action)
@@ -223,6 +238,7 @@ class MainWindow(QMainWindow):
         self.pages["Setup"].section_labels_changed.connect(self._setup_section_labels)
         self.pages["Setup"].set_reporting_month(self.month)
         self.pages["Overview"].navigate.connect(self.navigate)
+        self.pages["Analysis"].ranges.currentIndexChanged.connect(self._load_analysis_if_needed)
         body.addWidget(self.stack, 1)
         self.navigation.currentRowChanged.connect(self._navigate_index)
         self.navigation.setCurrentRow(self._navigation_rows["Overview"])
@@ -291,14 +307,83 @@ class MainWindow(QMainWindow):
         if self.job is not None:
             return
         month = self.month
+        self._analysis_pending = False
+        self._analysis_has_securities = False
+        self._analysis_price_start = None
         self._start("refresh", lambda progress, cancelled: self.service.snapshot(month))
+
+    def _load_analysis_if_needed(self) -> None:
+        """
+        Present the cached history first and fill price gaps as the visible date range expands.
+        """
+        page = self.pages["Analysis"]
+        if self.job is not None or self._closing or self.stack.currentWidget() is not page:
+            return
+        month = self.month
+        if self._analysis_pending:
+            self._analysis_pending = False
+            if page.history is None:
+                page.set_loading()
+            self._start("load_analysis", lambda progress, cancelled: self.service.run(
+                "load_analysis", {}, month, progress, cancelled,
+            ))
+            return
+        if not self._analysis_has_securities or page.history is None or page.history.month != month:
+            return
+        bounds = page.history.daily_bounds(page.HORIZONS[page.ranges.currentIndex()])
+        if not bounds or (self._analysis_price_start is not None and self._analysis_price_start <= bounds[0]):
+            return
+        start, _ = bounds
+        self._analysis_price_start = start
+        self._start("update_analysis_prices", lambda progress, cancelled: self.service.run(
+            "update_analysis_prices", {"start": start}, month, progress, cancelled,
+        ))
+
+    def _activity_scope_changed(self, index: int) -> None:
+        """
+        Change the shared browsing scope, retaining the reporting month and any hidden Review drafts.
+        """
+        self._activity_link = None
+        self._all_activity = bool(index)
+        self._show_activity_page()
+
+    def _show_activity_page(self) -> None:
+        """
+        Populate the visible activity page and load a full history only when first needed after refresh.
+        """
+        page = self.stack.currentWidget()
+        if not isinstance(page, ActivityPage):
+            return
+        wants_history = self._all_activity and self.snapshot.get("ready") and not self.snapshot.get("error")
+        reading = wants_history and self._activity_history is None
+        page.activity_body.setCurrentIndex(1 if reading else 0)
+        view = self._activity_history if wants_history else self.snapshot
+        if self._active_action == "refresh" and self._failed:
+            # Each page's failure handler retains its last inspectable facts and disables stale actions.
+            view = page.snapshot
+            wants_history = view.get("activity_all")
+        self.activity_scope.blockSignals(True)
+        self.activity_scope.setCurrentIndex(int(bool(wants_history)))
+        self.activity_scope.blockSignals(False)
+        if view and page.snapshot is not view:
+            page.table.setUpdatesEnabled(False)
+            try:
+                page.refresh(view)
+            finally:
+                page.table.setUpdatesEnabled(True)
+        if reading and self.job is None and not self._closing:
+            month = self.month
+            self._start("load_activity_history", lambda progress, cancelled: self.service.run(
+                "load_activity_history", {}, month, progress, cancelled,
+            ))
 
     def _configuration_saved(self) -> None:
         """
         Mark existing reports for regeneration before refreshing the saved workspace settings.
         """
         self.pages["Reports"].mark_stale("Settings changed. Regenerate reports to include them.")
-        QTimer.singleShot(0, self.refresh)
+        if not (self._busy and self._active_action == "save_setup"):
+            QTimer.singleShot(0, self.refresh)
 
     def _begin_owner_edit(self) -> None:
         """
@@ -352,7 +437,7 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.StandardButton.Yes:
                 self._closing = True
                 self._continuation = None
-                self.pages["Statements"].defer_preparation()
+                self.pages["Transactions"].defer_preparation()
                 self._stop()
             event.ignore()
             return
@@ -379,7 +464,7 @@ class MainWindow(QMainWindow):
         item = self.navigation.item(index)
         name = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         section = item.data(Qt.ItemDataRole.UserRole + 1) if item is not None else None
-        previous = self._selected_navigation_row
+        previous = self.navigation.accepted_row
         if previous < 0:
             previous = self._navigation_rows["Overview"]
         if name not in self.pages:
@@ -389,7 +474,7 @@ class MainWindow(QMainWindow):
             return
         if not self._guard_changes(lambda: self.navigation.setCurrentRow(index)):
             self.navigation.blockSignals(True)
-            self.navigation.setCurrentRow(self._selected_navigation_row)
+            self.navigation.setCurrentRow(self.navigation.accepted_row)
             self.navigation.blockSignals(False)
             return
         if name == "Setup" and section and not self.pages["Setup"].select_section(section):
@@ -398,12 +483,24 @@ class MainWindow(QMainWindow):
             self.navigation.blockSignals(False)
             return
         self._selected_page = self.names.index(name)
-        self._selected_navigation_row = index
+        self.navigation.accept_row(index)
         self.stack.setCurrentWidget(self.pages[name])
         self.pages[name].title_row.addWidget(self.month_bar, 0, Qt.AlignmentFlag.AlignVCenter)
         self.month_bar.show()
+        page = self.pages[name]
+        if isinstance(page, ActivityPage):
+            page.subtitle_row.addWidget(self.activity_scope, 0, Qt.AlignmentFlag.AlignRight)
+        self.activity_scope.setVisible(isinstance(page, ActivityPage))
+        if self._activity_link and self._activity_link[0] != name:
+            self._activity_link = None
+        self._show_activity_page()
         if hasattr(self, "status_bar"):
             self._update_status_visibility()
+        if name == "Analysis":
+            if self._active_action != "update_analysis_prices" or self.job is None:
+                self._analysis_price_start = None
+            if not self._busy:
+                self._load_analysis_if_needed()
 
     def _sync_setup_section(self, kind: str) -> None:
         """
@@ -412,7 +509,7 @@ class MainWindow(QMainWindow):
         if self.stack.currentWidget() is not self.pages["Setup"]:
             return
         row = self._setup_rows[kind]
-        self._selected_navigation_row = row
+        self.navigation.accept_row(row)
         self.navigation.blockSignals(True)
         self.navigation.setCurrentRow(row)
         self.navigation.blockSignals(False)
@@ -479,16 +576,12 @@ class MainWindow(QMainWindow):
         """
         Update explicit sidebar item colours and the rich-text month from the saved window theme.
         """
-        symbols = {
-            "accounts": "wallet", "securities": "chart", "budget": "savings",
-            "reports": "document",
-        }
         for row in range(self.navigation.count()):
             item = self.navigation.item(row)
             section = item.data(Qt.ItemDataRole.UserRole + 1)
             role = "sidebar_muted" if section else "sidebar_text"
             colour = gui_colour(self, role, "#bdd6cc" if section else "#cfe1da")
-            name = symbols[section] if section else item.data(Qt.ItemDataRole.UserRole)
+            name = _SETUP_ICONS[section] if section else item.data(Qt.ItemDataRole.UserRole)
             item.setForeground(QColor(colour))
             item.setIcon(icon(name, colour=colour, size=16 if section else 18))
         self._update_month_controls()
@@ -511,6 +604,7 @@ class MainWindow(QMainWindow):
         if not self._guard_changes(lambda: self._month_changed(value)):
             return
         self.month = requested
+        self.pages["Analysis"].clear_history()
         self.pages["Setup"].set_reporting_month(self.month)
         self._update_month_controls()
         self.refresh()
@@ -519,7 +613,7 @@ class MainWindow(QMainWindow):
         """
         Offer save, discard and cancel for the current editable page before leaving it.
         """
-        if self._continuation is not None:
+        if self._continuation is not None or (self.job is not None and self._active_action == "save_setup"):
             return False
         page = self.stack.currentWidget()
         if isinstance(page, SetupPage) and not page.guard_connection_changes():
@@ -533,10 +627,11 @@ class MainWindow(QMainWindow):
             page.discard_changes()
             return True
         if answer == "save":
-            if isinstance(page, SetupPage):
-                return page.save_changes()
             self._continuation = continuation
-            page.save_changes()
+            saved = page.save_changes()
+            if isinstance(page, SetupPage) and saved:
+                self._continuation = None
+                return True
             if self.job is None:
                 self._continuation = None
         return False
@@ -552,7 +647,7 @@ class MainWindow(QMainWindow):
             self._open_record("Review", f"manual:{payload['manual_entry_id']}")
             return
         if action in {"open_manual", "open_review"}:
-            name = "Manual entries" if action == "open_manual" else "Review"
+            name = "Transactions" if action == "open_manual" else "Review"
             key = "manual_entry_id" if action == "open_manual" else "transaction_id"
             self._open_record(name, payload[key])
             return
@@ -561,7 +656,7 @@ class MainWindow(QMainWindow):
                 self._open_review_kind(payload["kind"])
                 return
             self.navigate({
-                "show_review": "Review", "show_manual": "Manual entries", "show_journal": "Journal",
+                "show_review": "Review", "show_manual": "Transactions", "show_journal": "Journal",
             }[action])
             return
         if action == "open_report_settings":
@@ -583,6 +678,7 @@ class MainWindow(QMainWindow):
             return
         if action not in {
             "save_review", "save_reviews", "save_manual", "save_bank_opening", "discard_review",
+            "save_setup",
             "apply_journal_edit",
             "reload_entry_editor",
             "reload_manual_editor",
@@ -590,21 +686,8 @@ class MainWindow(QMainWindow):
             "redbark_check", "redbark_enable",
             "redbark_disconnect",
         }:
-            continuation_payload = payload
-            if action == "open_entry_editor" and payload.get("from_manual_form"):
-                continuation_payload = {
-                    **payload, "manual_entry_id": payload.get("draft_manual_entry_id"),
-                }
-            if not self._guard_changes(lambda: self._action(action, continuation_payload)):
+            if not self._guard_changes(lambda: self._action(action, payload)):
                 return
-        if action == "open_entry_editor" and payload.get("from_manual_form"):
-            current = self.pages["Manual entries"].current or {}
-            manual_id = payload.get("manual_entry_id") or current.get("manual_entry_id")
-            payload = {
-                "manual_entry_id": manual_id,
-                "journal_entry_id": current.get("journal_entry_id")
-                if current.get("manual_entry_id") == manual_id else None,
-            }
         if action == "process_journal":
             outside = self.snapshot.get("counts", {}).get("linked_outside_month", 0)
             if outside:
@@ -624,23 +707,44 @@ class MainWindow(QMainWindow):
             action, payload, month, progress, cancelled,
         ))
 
-    def _open_record(self, name: str, identifier: str) -> None:
+    def _open_record(self, name: str, identifier: str, *, by_kind: bool = False) -> None:
         """
         Retain a linked record's destination when saving the current form delays navigation.
         """
-        if not self._guard_changes(lambda: self._open_record(name, identifier)):
+        if not self._guard_changes(lambda: self._open_record(name, identifier, by_kind=by_kind)):
             return
         self.navigate(name)
         if self.stack.currentWidget() is self.pages[name]:
-            if not self.pages[name].select_record(identifier):
-                item = "manual instruction" if name == "Manual entries" or identifier.startswith(
-                    "manual:"
-                ) else "transaction"
-                QMessageBox.information(
-                    self, "Linked item unavailable",
-                    f"The linked {item} is not available in this month's saved list. "
-                    "Choose its reporting month and open it from the list there.",
-                )
+            self._activity_link = (name, identifier, by_kind)
+            self._reveal_activity_link()
+
+    def _reveal_activity_link(self) -> None:
+        """
+        Reveal a linked identity after loading its destination, widening the date range if needed.
+        """
+        if self._activity_link is None or self.job is not None:
+            return
+        name, identifier, by_kind = self._activity_link
+        page = self.pages[name]
+        if self.stack.currentWidget() is not page:
+            self._activity_link = None
+            return
+        self._activity_link = None
+        if by_kind:
+            page.select_kind(identifier)
+            return
+        if page.select_record(identifier):
+            return
+        if not self._all_activity and self.snapshot.get("ready") and not self.snapshot.get("error"):
+            self._all_activity = True
+            self._activity_link = (name, identifier, False)
+            self._show_activity_page()
+            if self.job is None:
+                self._reveal_activity_link()
+            return
+        QMessageBox.information(
+            self, "Linked item unavailable", "The linked item is unavailable in saved activity.",
+        )
 
     def _open_report_settings(self) -> None:
         """
@@ -682,11 +786,17 @@ class MainWindow(QMainWindow):
         activity = {
             "refresh": "Refreshing workspace", "redbark_sync": "Syncing bank accounts",
             "process_journal": "Processing entries", "generate_reports": "Generating reports",
+            "load_analysis": "Reading financial history",
+            "load_activity_history": "Reading activity history",
+            "update_analysis_prices": "Updating closing prices",
         }.get(self._active_action, "Workspace operation in progress")
         self.refresh_button.set_loading(busy or keep_activity, activity=activity)
         self.stop_button.setVisible(busy and self._active_action != "refresh")
         self.stop_button.setEnabled(busy)
         self._update_month_controls(busy)
+        self.activity_scope.setEnabled(
+            bool(self.snapshot.get("ready")) and (not busy or self._active_action == "load_activity_history")
+        )
         self.refresh_button.setEnabled(not busy)
         self.owner_label.setEnabled(not busy)
         for page in self.pages.values():
@@ -738,11 +848,19 @@ class MainWindow(QMainWindow):
         Keep entered answers in place and report why the action did not complete.
         """
         self._failed = True
-        self._status_error = True
+        self._status_error = self._active_action != "update_analysis_prices"
         self._continuation = None
         self._progress(message)
         if self._active_action == "refresh":
+            self.snapshot = {**self.snapshot, "ready": False, "error": message}
             self.pages["Overview"].refresh({"ready": False, "error": message})
+        if self._active_action in {"load_activity_history", "refresh"}:
+            self._activity_history = None
+            self._activity_link = None
+            if self._active_action == "load_activity_history":
+                self._all_activity = False
+        if self._active_action in {"refresh", "load_analysis"}:
+            self.pages["Analysis"].show_error(message)
         if self._active_action.startswith("redbark_"):
             self.pages["Setup"].bank_connection.deliver_error(self._active_action, message)
             if self._active_action in {"redbark_sync", "redbark_disconnect"}:
@@ -763,11 +881,15 @@ class MainWindow(QMainWindow):
         next_step = None
         resume_controls = False
         self.job = None
+        if action == "save_setup" and self._failed:
+            self._closing = False
         if self._closing:
-            self.pages["Statements"].defer_preparation()
+            self.pages["Transactions"].defer_preparation()
         if not self._failed and result is not None:
             if action == "refresh":
                 self.snapshot = result
+                self._activity_history = None
+                self._analysis_pending = bool(result.get("ready") and not result.get("error"))
                 theme = result.get("gui_theme") if result.get("ready") and not result.get("error") else None
                 if theme and theme != self.property("aurumGuiTheme"):
                     apply_gui_theme(self, theme)
@@ -777,7 +899,7 @@ class MainWindow(QMainWindow):
                     if name == "Setup":
                         page.set_reporting_month(self.month)
                         page.refresh()
-                    else:
+                    elif not (isinstance(page, ActivityPage) and self._all_activity and result.get("ready")):
                         page.refresh(result)
                 self.pages["Setup"].bank_connection.set_snapshot(result)
                 self.pages["Setup"].set_bank_openings(result.get("bank_openings", {}))
@@ -793,6 +915,31 @@ class MainWindow(QMainWindow):
                         self._last_message if self._last_message != "Workspace ready." else "",
                     )
                     self._update_status_visibility()
+            elif action == "load_activity_history":
+                if "activity" in result:
+                    self._activity_history = {**self.snapshot, **result["activity"], "activity_all": True}
+                else:
+                    self._all_activity = False
+                    self._activity_link = None
+            elif action in {"load_analysis", "update_analysis_prices"}:
+                page = self.pages["Analysis"]
+                if "analysis" in result and result.get("month") == self.month:
+                    history = result["analysis"]
+                    self._analysis_has_securities = result["has_securities"]
+                    page.set_history(history)
+                    if action == "update_analysis_prices" and history.daily:
+                        latest = history.daily[-1]
+                        self.snapshot["financials"]["net_worth"] = latest.net_worth
+                        self.snapshot["net_worth_unpriced_holdings"] = list(latest.provisional_holdings)
+                        self.snapshot["net_worth_price_dates"] = [
+                            {"name": close.name, "price_date": close.price_date.isoformat()}
+                            for close in latest.price_dates
+                        ]
+                        self.pages["Overview"].refresh(self.snapshot)
+                elif action == "load_analysis" and "analysis" not in result:
+                    page.show_error(result.get("message", "Refresh to reload history."))
+                elif action == "update_analysis_prices" and result.get("message"):
+                    self._progress(result["message"])
             elif action in {
                 "open_entry_editor", "reload_entry_editor", "open_manual_editor", "reload_manual_editor",
             }:
@@ -811,6 +958,7 @@ class MainWindow(QMainWindow):
                     "save_review": "transaction_id", "discard_review": "transaction_id",
                     "save_reviews": "review_ids",
                     "save_manual": "manual_entry_id",
+                    "save_setup": "saved_setup",
                 }.get(action)
                 if saved_identity and not result.get(saved_identity):
                     self._continuation = None
@@ -830,6 +978,16 @@ class MainWindow(QMainWindow):
                             "import_statements", "stage_statements",
                         } else result
                         page.action_completed(action, data)
+                if action == "save_setup":
+                    if not self.pages["Setup"].save_acknowledged(result):
+                        self._continuation = None
+                        self._closing = False
+                    elif "report_appearance" in result:
+                        theme = result["gui_theme"]
+                        self.snapshot.update(gui_theme=theme, report_appearance=result["report_appearance"])
+                        apply_gui_theme(self, theme)
+                        self._refresh_theme_controls()
+                        self.pages["Reports"].apply_appearance(result["report_appearance"])
                 if action == "redbark_sync":
                     self._show_sync_result(result)
                 else:
@@ -855,7 +1013,7 @@ class MainWindow(QMainWindow):
         elif next_step is not None:
             QTimer.singleShot(0, self, lambda: self._continue_work(next_step, resume_controls=resume_controls))
         else:
-            self._set_busy(False)
+            self._resume_page()
 
     def _continue_work(self, operation, *, resume_controls: bool = False) -> None:
         """
@@ -866,8 +1024,17 @@ class MainWindow(QMainWindow):
         try:
             operation()
         finally:
-            if self.job is None:
-                self._set_busy(False)
+            self._resume_page()
+
+    def _resume_page(self) -> None:
+        """
+        Finish any requested page read before restoring actions and following an identity-bound deep link.
+        """
+        self._show_activity_page()
+        self._load_analysis_if_needed()
+        if self.job is None:
+            self._set_busy(False)
+            self._reveal_activity_link()
 
     def _show_sync_result(self, result: dict) -> None:
         """
@@ -880,7 +1047,8 @@ class MainWindow(QMainWindow):
         messages = ["Sync stopped."] if data.get("cancelled") else []
         if failed:
             messages.append(
-                f"{failed} {'account' if failed == 1 else 'accounts'} could not sync. Retry from Statements."
+                f"{failed} {'account' if failed == 1 else 'accounts'} could not sync. "
+                "Retry from Transactions."
             )
         if conflicts:
             messages.append(f"{conflicts} bank import {'issue' if conflicts == 1 else 'issues'} in Review.")
@@ -909,10 +1077,7 @@ class MainWindow(QMainWindow):
         """
         Retain a report's Review destination when navigation waits for an unsaved answer to be saved.
         """
-        if not self._guard_changes(lambda: self._open_review_kind(kind)):
-            return
-        self.navigate("Review")
-        self.pages["Review"].select_kind(kind)
+        self._open_record("Review", kind, by_kind=True)
 
     def _show_editor(self, context: dict) -> None:
         """
@@ -1079,6 +1244,58 @@ class _NavigationList(QListWidget):
         super().__init__(parent)
         self.setMinimumHeight(160)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.accepted_row = -1
+        self._previous_fills = {}
+        self._progress = 1.0
+        self._fade = QVariantAnimation(self)
+        self._fade.setDuration(120)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.valueChanged.connect(self._set_progress)
+        watch_reduced_motion(self._snap_selection)
+
+    def accept_row(self, row: int) -> None:
+        """
+        Cross-fade only after the workspace accepts navigation, starting from the fills visible now.
+        """
+        if row == self.accepted_row:
+            return
+        visible = self._previous_fills.keys() | {self.accepted_row}
+        self._previous_fills = {
+            item: self.selection_opacity(item) for item in visible if item >= 0
+        }
+        self._fade.stop()
+        self.accepted_row = row
+        if not self._previous_fills or not self.isVisible() or reduced_motion(self):
+            self._snap_selection()
+        else:
+            self._set_progress(0.0)
+            self._fade.start()
+
+    def selection_opacity(self, row: int) -> float:
+        """
+        Return the current selection fill for a row, independent of a pending native selection.
+        """
+        previous = self._previous_fills.get(row, 0.0)
+        target = float(row == self.accepted_row)
+        return previous + (target - previous) * self._progress
+
+    def _snap_selection(self) -> None:
+        """
+        Finish the active selection immediately when the motion preference changes.
+        """
+        self._fade.stop()
+        self._set_progress(1.0)
+
+    def _set_progress(self, fraction: float) -> None:
+        """
+        Repaint the short sidebar transition and release the outgoing rows once it settles.
+        """
+        self._progress = fraction
+        if fraction >= 1.0:
+            self._previous_fills.clear()
+        self.viewport().update()
 
     def sizeHint(self) -> QSize:
         """
@@ -1101,12 +1318,28 @@ class _NavigationDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index) -> None:
         """
-        Keep every painted pixel within the row Qt invalidates when hover or selection changes.
+        Blend the themed selection in place while preserving indentation, native text and icon rendering.
         """
         option = QStyleOptionViewItem(option)
         painter.save()
         painter.setClipRect(option.rect, Qt.ClipOperation.IntersectClip)
         if index.data(Qt.ItemDataRole.UserRole + 1):
             option.rect.adjust(18, 0, 0, 0)
+        navigation = self.parent()
+        shape = option.rect.adjusted(0, 2, 0, -2)
+        radius = shape.height() / 2
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if option.state & QStyle.StateFlag.State_MouseOver:
+            painter.setBrush(QColor(gui_colour(navigation, "sidebar_hover", "#275251")))
+            painter.drawRoundedRect(shape, radius, radius)
+        opacity = navigation.selection_opacity(index.row())
+        if opacity:
+            fill = QColor(gui_colour(navigation, "sidebar_selected", "#32605e"))
+            fill.setAlphaF(opacity)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(shape, radius, radius)
+        if index.row() != navigation.accepted_row:
+            option.state &= ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_HasFocus)
         super().paint(painter, option, index)
         painter.restore()

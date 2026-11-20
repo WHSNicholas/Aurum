@@ -27,7 +27,7 @@ from aurum.database.database import _check_schema
 from aurum.database.journal import load_journal_entries
 from aurum.database.manual import load_opening_entry_ids, submit_manual_input, submit_review_responses
 from aurum.database.memory import remember_text
-from aurum.database.prices import load_valuation_quote
+from aurum.database.market_history import load_latest_market_quotes, load_market_history
 from aurum.database.reviews import (
     discard_review, list_guidance_cases, load_guidance_assessments, submit_review,
 )
@@ -39,18 +39,24 @@ from aurum.finance.budget import (
 from aurum.finance.dates import reporting_month
 from aurum.finance.investments import holdings_as_of, price_symbol
 from aurum.finance.manual import ManualInput
-from aurum.finance.reports import build_reports, load_report_settings, resolve_period
+from aurum.finance.reports import ReportSettings, build_reports, load_report_settings, resolve_period
 from aurum.finance.securities import load_securities
 from aurum.gui.theme import resolve_gui_theme
-from aurum.workflows.configuration import initialise_workspace, read_configuration
+from aurum.workflows.analysis import build_analysis_history
+from aurum.workflows.configuration import (
+    initialise_workspace, read_configuration, save_configurations, validate_configuration_changes,
+)
+from aurum.workflows.security_validation import validate_security_symbols
 from aurum.workflows.editing import apply_journal_edit, editor_snapshot, load_journal_edit
 from aurum.workflows.opening import load_bank_openings, save_bank_opening
 from aurum.workflows.journal import (
     DEFAULT_MODEL, journal_snapshot, learn_from_reviews, process_journal,
 )
+from aurum.workflows.market_history import update_market_history
 from aurum.workflows.reports import (
     generate_reports, investment_review_items, report_filenames, resolve_output_directory,
 )
+from aurum.workflows.report_view import load_report_view
 from aurum.workflows.statements import import_statements, stage_statements, statement_completion
 
 
@@ -131,6 +137,7 @@ class WorkspaceService:
             result["owner_name"] = settings.owner_name
             output = resolve_output_directory(settings, self.root)
             result["report_paths"] = [str(output / month / name) for name in report_filenames(month)]
+            result["report_view"], result["report_view_notice"] = load_report_view(output / month, month)
             with closing(self._connection(read_only=True)) as connection:
                 connection.execute("BEGIN")
                 tables = {row[0] for row in connection.execute(
@@ -152,21 +159,15 @@ class WorkspaceService:
                 ]
                 _add_feed_sources(result, result["bank_feed"])
                 entries = load_journal_entries(connection, accounts, securities=securities)
-                quotes = {}
-                if "price_quotes" in tables:
-                    for holding in holdings_as_of(entries, period.cutoff):
-                        security = securities.by_id(holding.security_id)
-                        if security.id in quotes:
-                            continue
-                        try:
-                            quote = load_valuation_quote(
-                                connection, security.id, period.cutoff, price_symbol(security),
-                            )
-                        except ValueError:
-                            # Reports retain recorded value when a saved quote cannot be used.
-                            continue
-                        if quote is not None:
-                            quotes[security.id] = quote
+                symbols = {}
+                for holding in holdings_as_of(entries, period.cutoff):
+                    security = securities.by_id(holding.security_id)
+                    try:
+                        symbols[security.id] = price_symbol(security)
+                    except ValueError:
+                        # Keep holdings without an AUD provider symbol at their recorded value.
+                        continue
+                quotes = load_latest_market_quotes(connection, self.root, period.cutoff, symbols)
                 opening_ids = load_opening_entry_ids(connection)
                 result["bank_openings"] = load_bank_openings(
                     connection, accounts, settings.capital_account, entries=entries, opening_ids=opening_ids,
@@ -201,7 +202,7 @@ class WorkspaceService:
                 )
                 try:
                     result["investment_reviews"] = investment_review_items(
-                        connection, accounts, settings, period.cutoff,
+                        connection, accounts, settings, period.cutoff, entries=entries,
                     )
                 except Exception as error:
                     from aurum.gui.background import error_message
@@ -227,7 +228,7 @@ class WorkspaceService:
             )
             _feed_completion(result, period)
             result["financial_transaction_counts"] = financial_counts
-            result["gui_theme"] = resolve_gui_theme(settings)
+            result.update(_workspace_appearance(settings))
             result["ready"] = True
         except (OSError, ValueError, sqlite3.Error) as error:
             from aurum.gui.background import error_message
@@ -245,6 +246,14 @@ class WorkspaceService:
             return {"message": "Stopped before starting."}
         if action == "reload_entry_editor":
             action = "open_entry_editor"
+        if action == "save_setup":
+            return self._save_setup(payload, cancelled)
+        if action == "load_activity_history":
+            return self._load_activity_history(cancelled)
+        if action == "load_analysis":
+            return self._load_analysis(month, cancelled)
+        if action == "update_analysis_prices":
+            return self._update_analysis_prices(month, payload["start"], progress, cancelled)
         if action == "initialise":
             initialise_workspace(self.root)
             return {"message": "Workspace ready. Add your bank and category accounts in Setup."}
@@ -293,6 +302,7 @@ class WorkspaceService:
             return {
                 "message": f"Four {'draft ' if reasons else ''}PDFs saved to {result.paths[0].parent}.",
                 "paths": list(map(str, result.paths)), "draft_reasons": reasons,
+                "report_view": result.view_snapshot,
             }
         editor_actions = {"open_entry_editor", "open_manual_editor", "reload_manual_editor"}
         with closing(self._connection(read_only=action in editor_actions)) as connection:
@@ -443,6 +453,116 @@ class WorkspaceService:
             connection.close()
             raise
 
+    def _load_activity_history(self, cancelled) -> dict:
+        """
+        Read the activity lists together without widening the workspace's reporting period.
+        """
+        from aurum.database.bank_feeds import feed_snapshot
+        accounts, securities, budget = self._models()
+        settings = load_report_settings(self.config / "reports.yaml", accounts)
+        with closing(self._connection(read_only=True)) as connection:
+            connection.execute("BEGIN")
+            activity = journal_snapshot(connection, accounts, securities=securities, budget=budget)
+            if cancelled():
+                return {}
+            feed = feed_snapshot(connection)
+            feed["connection_error"] = self._bank_sync_error
+            activity["bank_feed"] = feed
+            _add_feed_sources(activity, feed)
+            entries = load_journal_entries(connection, accounts, securities=securities)
+            opening_ids = load_opening_entry_ids(connection)
+            activity["budget_reviews"] = _budget_review_items(None, entries, accounts, budget, opening_ids)
+            _add_budget_statuses(activity, entries, accounts, budget, opening_ids, None)
+            activity["investment_reviews_error"] = ""
+            try:
+                activity["investment_reviews"] = investment_review_items(
+                    connection, accounts, settings, None, entries=entries,
+                )
+            except (ValueError, sqlite3.Error) as error:
+                from aurum.gui.background import error_message
+                activity["investment_reviews"] = []
+                activity["investment_reviews_error"] = error_message(error)
+        return {} if cancelled() else {"activity": activity}
+
+    def _load_analysis(self, month: str, cancelled) -> dict:
+        """
+        Load the selected historical ledger and quote cache in one read-only database snapshot.
+        """
+        period = resolve_period((), month=month)
+        accounts, securities, budget = self._models()
+        settings = load_report_settings(self.config / "reports.yaml", accounts)
+        stopped = {"message": "History loading stopped. Refresh to try again."}
+        if cancelled():
+            return stopped
+        with closing(self._connection(read_only=True)) as connection:
+            connection.execute("BEGIN")
+            entries = load_journal_entries(connection, accounts, securities=securities)
+            if cancelled():
+                return stopped
+            openings = load_opening_entry_ids(connection)
+            quotes = load_market_history(connection, self.root, period.cutoff)
+        try:
+            history = build_analysis_history(
+                entries, accounts, securities, settings, budget, period, quotes=quotes,
+                opening_entry_ids=openings, cancelled=cancelled,
+            )
+        except InterruptedError:
+            return stopped
+        if cancelled():
+            return stopped
+        has_securities = any(
+            line.investment is not None for entry in entries if entry.date <= period.cutoff
+            for line in entry.lines
+        )
+        return {"analysis": history, "month": month, "has_securities": has_securities}
+
+    def _update_analysis_prices(self, month: str, start: date, progress, cancelled) -> dict:
+        """
+        Fill missing closes for the visible dates, releasing the accounting read before any provider request.
+        """
+        period = resolve_period((), month=month)
+        accounts, securities, _ = self._models()
+        with closing(self._connection(read_only=True)) as connection:
+            connection.execute("BEGIN")
+            entries = load_journal_entries(connection, accounts, securities=securities)
+        update = update_market_history(
+            self.root, entries, securities, start, period.cutoff, progress=progress, cancelled=cancelled,
+        )
+        for warning in update.warnings:
+            progress(warning)
+        if update.cancelled or cancelled():
+            return {"month": month, "message": "Price update stopped. Refresh to try again."}
+        return self._load_analysis(month, cancelled) if update.updated else {"month": month}
+
+    def _save_setup(self, payload: dict, cancelled) -> dict:
+        """
+        Validate changed provider symbols before atomically saving one frozen multi-file Setup draft.
+        """
+        documents, changes = payload["documents"], payload["changes"]
+        prepared = validate_configuration_changes(documents, changes)
+        checks = validate_security_symbols(
+            documents["securities"].data, prepared["securities"], cancelled=cancelled,
+        ) if "securities" in prepared else ()
+        if cancelled():
+            return {"cancelled": True, "message": "Setup save stopped; drafts were retained."}
+        invalid = [check.model_dump(mode="json") for check in checks if check.status == "invalid"]
+        if invalid:
+            # New rows have no key in the form until a save succeeds. Keep their exact draft index.
+            positions = {row["key"]: index for index, row in enumerate(prepared["securities"])}
+            for issue in invalid:
+                index = positions[issue["key"]]
+                issue["draft_row"] = changes["securities"][index].get("key") or index
+            return {"security_errors": invalid, "message": "Correct the security ticker before saving."}
+        appearance = {}
+        if "reports" in prepared:
+            appearance = _workspace_appearance(ReportSettings.model_validate(prepared["reports"]))
+        saved = save_configurations(documents, prepared)
+        warnings = [f"{check.name}: {check.message}" for check in checks if check.status == "unverified"]
+        return {
+            "saved_setup": payload["submission"], "documents": saved, "warnings": warnings, **appearance,
+            "message": "Settings saved without Yahoo verification." if warnings else "Settings saved.",
+        }
+
     def _models(self) -> tuple:
         """
         Validate saved definitions without initializing IDs as a side effect of visiting a screen.
@@ -578,13 +698,10 @@ class WorkspaceService:
             outcomes = result.get("results", [])
             added = sum(item.get("new_count", 0) for item in outcomes)
             failed = sum(item.get("status") == "failed" for item in outcomes)
-            conflicts = len(result.get("conflicts", []))
             message = ("Sync stopped. " if result.get("cancelled") else "Sync finished. ")
             message += f"{added} new transaction(s)."
-            if conflicts:
-                message += f" {conflicts} import issue(s) in Review."
             if failed:
-                message += f" {failed} account(s) could not sync; retry from Statements."
+                message += f" {failed} account(s) could not sync; retry from Transactions."
             return {"message": message, "data": result}
         with closing(self._connection()) as connection:
             if action == "redbark_disconnect":
@@ -713,6 +830,19 @@ class WorkspaceService:
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
+def _workspace_appearance(settings: ReportSettings) -> dict:
+    """
+    Supply the desktop colours and the presentation fields used to display a published financial report.
+    """
+    return {
+        "gui_theme": resolve_gui_theme(settings),
+        "report_appearance": {
+            "colour_scheme": settings.colour_scheme, "dark_mode": settings.dark_mode,
+            "themes": settings.themes, "colours": settings.colours,
+        },
+    }
+
+
 def _budget_review_items(report, entries, accounts, budget, opening_ids) -> list[dict]:
     """
     Expose unresolved cash events through the cutoff without manufacturing saved questions.
@@ -721,9 +851,9 @@ def _budget_review_items(report, entries, accounts, budget, opening_ids) -> list
     definitions = {account.id: account for account in accounts.accounts.values()}
     names = {identifier: account.name for identifier, account in definitions.items()}
     result = []
-    issues = list(report.issues)
+    issues = list(report.issues) if report else []
     for entry in entries:
-        if entry.date < report.start_date:
+        if report is None or entry.date < report.start_date:
             issues.extend(project_budget_entry(
                 entry, accounts, budget, opening=entry.id in opening_ids,
             ).issues)
@@ -751,7 +881,7 @@ def _budget_review_items(report, entries, accounts, budget, opening_ids) -> list
     return result
 
 
-def _add_budget_statuses(snapshot: dict, entries, accounts, budget, opening_ids, cutoff: date) -> None:
+def _add_budget_statuses(snapshot: dict, entries, accounts, budget, opening_ids, cutoff: date | None) -> None:
     """
     Classify Journal rows directly from complete events without rebuilding monthly impact previews.
 
@@ -767,7 +897,7 @@ def _add_budget_statuses(snapshot: dict, entries, accounts, budget, opening_ids,
         record["budget_tooltip"] = "Refresh to load this entry's budget classification."
         if entry is None:
             continue
-        if entry.date > cutoff:
+        if cutoff is not None and entry.date > cutoff:
             record["budget_status"] = "After cutoff"
             record["budget_tooltip"] = f"Accounting date is after {cutoff.isoformat()}."
             continue
@@ -839,7 +969,7 @@ def _feed_completion(snapshot: dict, period) -> None:
             "pending": True, "status": "feed_attention",
             "message": "Resolve bank import conflicts in Review." if conflicts else
             "Reconnect Redbark in Setup → Accounts to check this month's bank activity." if disconnected else
-            "Sync your bank accounts in Statements. A complete bank check is still needed.",
+            "Sync your bank accounts in Transactions. A complete bank check is still needed.",
         }
     elif not snapshot.get("statement_completion", {}).get("pending") and period.is_partial:
         snapshot["statement_completion"] = {

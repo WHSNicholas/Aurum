@@ -3,7 +3,7 @@
 #                                                  GUI - Workspace                                                     #
 # -------------------------------------------------------------------------------------------------------------------- #
 """
-Connect the desktop's overview, ChatGPT setup and PDF viewer to explicit user actions.
+Connect the desktop's overview, ChatGPT setup and native report views to explicit user actions.
 
 These widgets display results and collect choices. Accounting, authentication and report generation are
 handled by shared services in background jobs; simply visiting a screen never calls AI or changes accounting.
@@ -13,19 +13,20 @@ handled by shared services in background jobs; simply visiting a screen never ca
 # Imports
 from datetime import datetime
 from pathlib import Path
-import stat
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtPdf import QPdfDocument
-from PySide6.QtPdfWidgets import QPdfView
+from PySide6.QtCore import QEasingCurve, QEvent, QLineF, QSize, Qt, QVariantAnimation, Signal
+from PySide6.QtGui import QPainter, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListView,
     QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
-from aurum.gui.controls import HeaderActionButton, PageActionRow, QuoteBlock, confirm_discard
-from aurum.gui.icons import icon
+from aurum.gui.controls import (
+    HeaderActionButton, PageActionRow, QuoteBlock, ReportSegmentedControl, confirm_discard,
+    reduced_motion, watch_reduced_motion,
+)
+from aurum.gui.icons import connection_button, icon
 from aurum.gui.theme import gui_colour
 
 
@@ -156,9 +157,9 @@ class OverviewPage(QWidget):
         ), 1):
             if number > 1:
                 flow.addWidget(self._symbol("right", 16))
-            frame = _WorkflowStage()
+            frame = _WorkflowStage(f"{number} · {name}")
             frame.setObjectName("overviewStage")
-            destination = "Statements" if key == "sources" else name
+            destination = "Transactions" if key == "sources" else name
             frame.clicked.connect(lambda checked=False, page=destination: self.navigate.emit(page))
             stage = QVBoxLayout(frame)
             stage.setContentsMargins(16, 16, 16, 16)
@@ -174,10 +175,7 @@ class OverviewPage(QWidget):
             top.addWidget(state)
             stage.addLayout(top)
             stage.addSpacing(4)
-            title = QLabel(f"{number} · {name}")
-            title.setObjectName("overviewStageTitle")
-            title.setWordWrap(True)
-            stage.addWidget(title)
+            stage.addWidget(frame.title)
             value = QLabel("—")
             value.setObjectName("overviewStageValue")
             value.setWordWrap(True)
@@ -438,7 +436,7 @@ class OverviewPage(QWidget):
         badge.setVisible(tone in {"done", "attention"})
         badge.setToolTip(state.capitalize())
         badge.setAccessibleName(state.capitalize())
-        destination = "Statements" if key == "sources" else key.capitalize()
+        destination = "Transactions" if key == "sources" else key.capitalize()
         frame.setAccessibleName(f"Open {destination}. {state.lower()}. {value}.")
         frame.setAccessibleDescription(detail)
 
@@ -460,7 +458,7 @@ class _WorkflowStage(QPushButton):
     Make the whole stage a keyboard-accessible link with a quiet hover and focus cue.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, caption: str) -> None:
         """
         Retain ordinary button activation while drawing content through the stage's child layout.
         """
@@ -470,6 +468,7 @@ class _WorkflowStage(QPushButton):
         self.setAutoDefault(False)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self._hovered = False
+        self.title = _StageTitle(caption, self)
 
     def sizeHint(self) -> QSize:
         """
@@ -492,13 +491,85 @@ class _WorkflowStage(QPushButton):
         if kind in {QEvent.Type.Enter, QEvent.Type.Leave, QEvent.Type.FocusIn, QEvent.Type.FocusOut}:
             if kind in {QEvent.Type.Enter, QEvent.Type.Leave}:
                 self._hovered = kind == QEvent.Type.Enter
-            title = self.findChild(QLabel, "overviewStageTitle")
-            if title is not None:
-                title.setProperty("emphasized", self._hovered or self.hasFocus())
-                title.style().unpolish(title)
-                title.style().polish(title)
-                title.update()
+            self.title.emphasize(self._hovered or self.hasFocus())
         return result
+
+
+class _StageTitle(QLabel):
+    """
+    Fade the workflow link underline without moving its label or changing the card's colour.
+    """
+
+    def __init__(self, caption: str, parent: QWidget) -> None:
+        """
+        Keep the native label's typography, wrapping and accessibility.
+        """
+        super().__init__(caption, parent)
+        self.setObjectName("overviewStageTitle")
+        self.setWordWrap(True)
+        self._emphasized = False
+        self._opacity = 0.0
+        self._fade = QVariantAnimation(self)
+        self._fade.setDuration(100)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.valueChanged.connect(self._paint_opacity)
+        watch_reduced_motion(self._snap_underline)
+
+    def emphasize(self, active: bool) -> None:
+        """
+        Retarget a hover or keyboard-focus transition from the underline's current opacity.
+        """
+        if active == self._emphasized:
+            return
+        self._emphasized = active
+        self._fade.stop()
+        if not self.isVisible() or reduced_motion(self):
+            self._snap_underline()
+            return
+        self._fade.setStartValue(self._opacity)
+        self._fade.setEndValue(float(active))
+        self._fade.start()
+
+    def _snap_underline(self) -> None:
+        """
+        Apply the requested emphasis immediately when the motion preference changes.
+        """
+        self._fade.stop()
+        self._paint_opacity(float(self._emphasized))
+
+    def _paint_opacity(self, opacity: float) -> None:
+        """
+        Invalidate only the title while its underline fades.
+        """
+        self._opacity = opacity
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        """
+        Underline each visible line using its actual font, text colour and wrapped width.
+        """
+        super().paintEvent(event)
+        if self._opacity == 0.0:
+            return
+        bounds = self.contentsRect()
+        layout = QTextLayout(self.text(), self.font(), self)
+        options = QTextOption()
+        options.setWrapMode(QTextOption.WrapMode.WordWrap)
+        layout.setTextOption(options)
+        layout.beginLayout()
+        lines = []
+        height = 0.0
+        while (line := layout.createLine()).isValid():
+            line.setLineWidth(bounds.width())
+            y = height + line.ascent() + self.fontMetrics().underlinePos()
+            lines.append(QLineF(0, y, line.naturalTextWidth(), y))
+            height += line.height()
+        layout.endLayout()
+        painter = QPainter(self)
+        painter.translate(bounds.x(), bounds.y() + int((bounds.height() - height) / 2))
+        painter.setPen(QPen(self.palette().windowText().color(), self.fontMetrics().lineWidth()))
+        painter.setOpacity(self._opacity)
+        painter.drawLines(lines)
 
 
 # %% 2. ChatGPT Setup ----------------------------------------------------------------------------------------
@@ -559,7 +630,7 @@ class ChatGPTPage(QWidget):
         self.models.setPlaceholderText("Choose a model")
         self.models.currentIndexChanged.connect(self._update_controls)
         row.addWidget(self.models, 1)
-        self.connect_button = self._icon_button("refresh", "Check connection", primary=True)
+        self.connect_button = connection_button("ChatGPT")
         self.connect_button.clicked.connect(lambda: self.action_requested.emit("connect_chatgpt", {}))
         self.reconnect = self._icon_button(
             "login", "Sign in again to renew access or change your ChatGPT account",
@@ -570,7 +641,7 @@ class ChatGPTPage(QWidget):
         self.save = self._icon_button("save", "Save model", primary=True)
         self.save.clicked.connect(self.save_changes)
         row.addWidget(self.save)
-        self.cancel = self._icon_button("close", "Discard model change")
+        self.cancel = self._icon_button("undo", "Discard model change")
         self.cancel.clicked.connect(self._cancel)
         row.addWidget(self.cancel)
         row.addStretch()
@@ -741,9 +812,9 @@ class ChatGPTPage(QWidget):
             "Saved sign-in has not been checked during this session." if signed_in else
             "Sign in with ChatGPT to load available models."
         )
-        self.connect_button.setIcon(icon("refresh" if signed_in else "chat", "#ffffff", 16))
-        self.connect_button.setAccessibleName("Check connection" if signed_in else "Sign in with ChatGPT")
-        self.connect_button.setToolTip(self.connect_button.accessibleName())
+        label = "Check ChatGPT connection" if signed_in else "Sign in with ChatGPT"
+        self.connect_button.setAccessibleName(label)
+        self.connect_button.setToolTip(label)
         self.connect_button.setEnabled(not self._busy)
         self.reconnect.setVisible(True)
         self.reconnect.setEnabled(not self._busy)
@@ -754,7 +825,8 @@ class ChatGPTPage(QWidget):
         self.cancel.setEnabled(not self._busy)
         self.cancel.setVisible(dirty)
         name = self._model_label(self._saved_model) if self._saved_model else ""
-        self.models.setToolTip(
+        self.models.setToolTip(f"Saved model · {name}" if name else "Choose a model")
+        self.models.setAccessibleDescription(
             (f"Saved model: {name}." if name else "No model saved.")
             + (" Save applies only this model." if self._models_loaded
                else " Check the connection to choose a model.")
@@ -823,147 +895,143 @@ class ChatGPTPage(QWidget):
         return " - ".join(part.title() for part in parts)
 
 
-# %% 3. PDF Reports ------------------------------------------------------------------------------------------
+# %% 3. Dashboard Reports ------------------------------------------------------------------------------------
 class ReportsPage(QWidget):
     """
-    Inspect saved PDF snapshots and generate reports through an explicit workspace action.
+    Restore the last generated report as native dashboard content without recalculating saved figures.
     """
 
     action_requested = Signal(str, object)
+    TITLES = ("Balance Sheet", "Income Statement", "Budget Report", "Investment Report")
+    SUBTITLES = (
+        "Statement of Financial Position", "Statement of Financial Performance",
+        "Summary of Budget Allocation", "Summary of Investment Holdings",
+    )
 
     def __init__(self, parent=None) -> None:
         """
-        Put generation and a compact report picker above one spacious PDF preview.
+        Keep report selection and explicit generation above one continuously scrolling financial view.
         """
         super().__init__(parent)
+        from aurum.gui.report_view import ReportView
+
         self.paths = []
-        self.loaded = None
         self._busy = False
         self._workspace_available = False
-        self._workspace_error = ""
         self._month = None
-        self._draft_reasons = []
-        self._generation_files = {}
-        self._generated = False
-        self._generation_notice = ""
+        self._view = None
+        self._appearance = {}
+        self._location = None
+        self._file_notice = ""
+        self._stale_notice = ""
+        self._failure_notice = ""
+        self._workspace_error = ""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        heading_row = QHBoxLayout()
-        title_block = QVBoxLayout()
-        title_block.setContentsMargins(0, 0, 0, 16)
-        title_block.setSpacing(0)
-        heading = QLabel("Reports")
-        heading.setObjectName("workspacePageTitle")
+        header = QVBoxLayout()
+        header.setContentsMargins(0, 0, 0, 16)
+        header.setSpacing(0)
+        self.heading = QLabel(self.TITLES[0])
+        self.heading.setObjectName("workspacePageTitle")
         self.title_row = QHBoxLayout()
-        self.title_row.addWidget(heading)
+        self.title_row.addWidget(self.heading)
         self.title_row.addStretch()
-        title_block.addLayout(self.title_row)
-        heading.setAccessibleDescription("Preview and save your monthly financial reports.")
-        subtitle_row = PageActionRow()
-        subtitle_row.setContentsMargins(0, 0, 0, 0)
-        subtitle_row.addStrut(28)
-        subtitle_row.addStretch(1)
-        title_block.addLayout(subtitle_row)
-        heading_row.addLayout(title_block, 1)
+        header.addLayout(self.title_row)
+        self.subtitle = QLabel()
+        self.subtitle.setObjectName("nativeReportSubtitle")
+        self.subtitle.setTextFormat(Qt.TextFormat.RichText)
+        self.subtitle.setWordWrap(True)
+        self.subtitle.setStyleSheet(
+            "QLabel#nativeReportSubtitle { font: 400 13px 'Geist'; padding: 0; margin: 0; }"
+        )
+        header.addWidget(self.subtitle)
+        header.addSpacing(12)
+        actions = PageActionRow()
+        actions.setSpacing(10)
         self.generate = HeaderActionButton("Generate", icon_only=True)
-        self.generate.setToolTip("Save all four PDFs for the selected reporting month.")
         self.generate.clicked.connect(lambda: self.action_requested.emit("generate_reports", {}))
-        subtitle_row.insertWidget(0, self.generate, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addLayout(heading_row)
-        self.notice = QLabel(self._generation_notice)
+        actions.addWidget(self.generate)
+        self.kind = ReportSegmentedControl()
+        self.kind.setAccessibleName("Report type")
+        self.kind.setToolTip("Choose report")
+        self.kind.currentIndexChanged.connect(self._show_report)
+        actions.addWidget(self.kind)
+        actions.addStretch()
+        header.addLayout(actions)
+        layout.addLayout(header)
+        self.notice = QLabel()
         self.notice.setObjectName("workspaceMessage")
         self.notice.setWordWrap(True)
         self.notice.setTextFormat(Qt.TextFormat.PlainText)
         self.notice.hide()
         layout.addWidget(self.notice)
-
-        preview_layout = QVBoxLayout()
-        preview_layout.setSpacing(8)
-        layout.addLayout(preview_layout, 1)
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
-        self.kind = QComboBox()
-        self.kind.addItems(["Balance sheet", "Income statement", "Budget", "Investments"])
-        self.kind.setMinimumWidth(195)
-        self.kind.setAccessibleName("Report type")
-        self.kind.setToolTip("Choose a saved report to preview.")
-        self.kind.setObjectName("reportTypePicker")
-        self.kind.currentIndexChanged.connect(self._show_pdf)
-        toolbar.addWidget(self.kind)
-        self.fit = QToolButton()
-        self.fit.setObjectName("viewerIconAction")
-        self.fit.setIcon(icon("fit", size=18))
-        self.fit.setFixedSize(34, 34)
-        self.fit.setToolTip("Fit report to width")
-        self.fit.setAccessibleName("Fit report to width")
-        self.fit.clicked.connect(lambda: self.viewer.setZoomMode(QPdfView.ZoomMode.FitToWidth))
-        toolbar.addWidget(self.fit)
-        self.zoom_buttons = []
-        for label, factor, tooltip in (("−", 0.85, "Zoom out"), ("+", 1.18, "Zoom in")):
-            button = QPushButton(label)
-            button.setFixedWidth(32)
-            button.setToolTip(tooltip)
-            button.clicked.connect(lambda checked=False, scale=factor: self._zoom(scale))
-            self.zoom_buttons.append(button)
-            toolbar.addWidget(button)
-        toolbar.addStretch()
-        preview_layout.addLayout(toolbar)
-        self.preview_stack = QStackedWidget()
-        self.document = QPdfDocument(self)
-        self.document.statusChanged.connect(self._document_status)
-        self.viewer = QPdfView(self)
-        self.viewer.setDocument(self.document)
-        self.viewer.setPageMode(QPdfView.PageMode.MultiPage)
-        self.viewer.setZoomMode(QPdfView.ZoomMode.FitToWidth)
-        self.preview_stack.addWidget(self.viewer)
-        self.empty_preview = QLabel()
-        self.empty_preview.setObjectName("workspaceInset")
-        self.empty_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_preview.setWordWrap(True)
-        self.empty_preview.setMargin(24)
-        self.empty_preview.setTextFormat(Qt.TextFormat.PlainText)
-        self.preview_stack.addWidget(self.empty_preview)
-        preview_layout.addWidget(self.preview_stack, 1)
-        self._show_pdf()
+        self.report_stack = QStackedWidget()
+        self.viewer = ReportView()
+        self.report_stack.addWidget(self.viewer)
+        self.empty = QLabel()
+        self.empty.setObjectName("workspaceInset")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty.setWordWrap(True)
+        self.empty.setMargin(24)
+        self.empty.setTextFormat(Qt.TextFormat.PlainText)
+        self.empty.setAccessibleName("No saved dashboard reports")
+        self.empty.setToolTip("Generate to create this month's dashboard reports.")
+        self.report_stack.addWidget(self.empty)
+        layout.addWidget(self.report_stack, 1)
         QWidget.setTabOrder(self.generate, self.kind)
+        self._show_report()
 
     def refresh(self, snapshot: dict) -> None:
         """
-        Read saved output without generating it, preserving the selected report and unchanged preview.
+        Reload only a published dashboard snapshot, never replacing it with newly calculated accounting.
         """
-        self._workspace_available = bool(snapshot.get("ready"))
-        self._workspace_error = str(
-            snapshot.get("error") or (
-                "Complete workspace setup before generating reports." if snapshot.get("missing_files")
-                else "Workspace details are unavailable. Refresh the workspace to try again."
-            )
-        )
         month = snapshot.get("month")
-        paths = list(snapshot.get("report_paths", [])) if self._workspace_available else []
-        if month != self._month or (self._workspace_available and paths != self.paths):
-            self._draft_reasons = []
-            self._generation_files = {}
-            self._generated = False
-            self._generation_notice = ""
-        self._month = month
+        paths = list(snapshot.get("report_paths", []))
+        if month == self._month and not snapshot.get("ready") and "report_view" not in snapshot:
+            paths = self.paths
+        location = str(Path(paths[0]).parent) if paths else None
+        changed = (month, location) != (self._month, self._location)
+        if changed:
+            self._view = None
+            self._file_notice = self._stale_notice = self._failure_notice = ""
+            self.viewer.clear()
+        self._month, self._location = month, location
         self.paths = paths
-        self._show_destination()
-        self._show_notice(
-            self._generation_notice if self._workspace_available else self._workspace_error
-        )
-        self._show_pdf()
+        self._workspace_available = bool(snapshot.get("ready")) and not snapshot.get("error")
+        if self._workspace_available and "report_appearance" in snapshot:
+            self._appearance = snapshot["report_appearance"]
+        self._workspace_error = str(snapshot.get("error") or (
+            "Complete workspace setup before generating reports." if snapshot.get("missing_files") else ""
+        ))
+        candidate = snapshot.get("report_view")
+        if candidate is not None and candidate.month == month:
+            self._view = candidate
+            self._file_notice = str(snapshot.get("report_view_notice") or "")
+        elif ("report_view" in snapshot or changed) and not self._failure_notice:
+            self._view = None
+            self._file_notice = str(snapshot.get("report_view_notice") or "")
+        self._show_report()
+
+    def apply_appearance(self, appearance: dict) -> None:
+        """
+        Recolour the displayed report as soon as Setup acknowledges a saved theme.
+        """
+        if self._appearance != appearance:
+            self._appearance = appearance
+            self._show_report()
 
     def action_started(self, action: str, payload: dict) -> None:
         """
-        Clear an earlier generation notice while the shared activity spinner runs.
+        Clear an earlier generation error while retaining the last published report during work.
         """
         if action == "generate_reports":
-            self._show_notice("")
+            self._failure_notice = ""
+            self._show_report()
 
     def action_completed(self, action: str, result=None) -> None:
         """
-        Acknowledge only completed generation and flag changes that can affect later report output.
+        Replace all four views together only after the PDFs and dashboard snapshot were published.
         """
         if action == "import_statements" and isinstance(result, list) and result:
             self.mark_stale()
@@ -972,192 +1040,98 @@ class ReportsPage(QWidget):
         if action != "generate_reports":
             identifiers = {
                 "apply_journal_edit": "journal_entry_id", "save_review": "transaction_id",
-                "save_reviews": "transaction_ids",
-                "discard_review": "transaction_id", "save_manual": "manual_entry_id",
+                "save_reviews": "review_ids", "discard_review": "transaction_id",
+                "save_manual": "manual_entry_id", "save_bank_opening": "journal_entry_id",
             }
             acknowledged = bool(result.get(identifiers[action])) if action in identifiers else False
             acknowledged = acknowledged or (
-                action in {"process_journal", "import_statements"}
-                and "data" in result
+                action in {"process_journal", "redbark_sync", "import_statements"} and "data" in result
             )
             if acknowledged:
                 self.mark_stale()
             return
+        view = result.get("report_view")
         paths = result.get("paths")
-        if not isinstance(paths, (list, tuple)) or len(paths) != 4 or not all(paths):
-            self._generation_notice = "Generation did not finish. Previously saved PDFs are unchanged."
-            self._show_notice(self._generation_notice)
+        if view is None or view.month != self._month or not isinstance(paths, (list, tuple)) or len(paths) != 4:
+            self._failure_notice = "Generation did not finish. Generate again to update the saved reports."
+            self._show_report()
             return
+        self._view = view
         self.paths = list(paths)
-        self._generation_files = self._report_signatures()
-        self._generated = True
-        self._draft_reasons = list(dict.fromkeys(result.get("draft_reasons") or []))
-        self._generation_notice = (
-            "Draft reports · Resolve outstanding items in Review."
-            if self._draft_reasons else ""
-        )
-        self._show_notice(self._generation_notice)
-        self._show_destination()
-        self._show_pdf()
+        self._location = str(Path(paths[0]).parent)
+        self._file_notice = self._stale_notice = self._failure_notice = ""
+        self._show_report()
 
     def action_failed(self, action: str, message: str) -> None:
         """
-        Keep saved files viewable after generation errors and block writes if workspace refresh fails.
+        Keep the last valid display while making unsuccessful writes or workspace reads explicit.
         """
         if action == "generate_reports":
-            self._generation_notice = f"Reports could not be generated. {message}"
-            self._show_notice(self._generation_notice)
+            self._failure_notice = f"Reports could not be generated. {message}"
         elif action == "refresh":
             self._workspace_available = False
             self._workspace_error = f"Workspace details could not be refreshed. {message}"
-            self._show_notice(self._workspace_error)
         elif action in {"process_journal", "import_statements"}:
-            self.mark_stale("Workspace processing stopped with an error. Refresh, then regenerate reports.")
-        self._update_actions()
+            self._stale_notice = "Workspace processing stopped. Generate again after resolving the error."
+        self._show_report()
 
-    def mark_stale(
-        self, message: str = "Changes ready · Generate to update reports.",
-    ) -> None:
+    def mark_stale(self, message: str = "Changes ready · Generate to update reports.") -> None:
         """
-        Replace any generation status after accounting or report configuration changes.
+        Explain that saved report figures remain a snapshot after later accounting or settings changes.
         """
-        self._generation_notice = message
-        self._show_notice(message)
+        self._stale_notice = message
+        self._show_report()
 
     def set_busy(self, busy: bool) -> None:
         """
-        Prevent generation during a workspace operation while allowing saved PDF inspection.
+        Block competing generation while leaving saved report selection and inspection available.
         """
         self._busy = busy
-        self._update_actions()
+        self.generate.setEnabled(self._workspace_available and not busy)
 
-    def _show_notice(self, message: str) -> None:
+    def _show_report(self, *_args) -> None:
         """
-        Reserve page space for stale output or an actionable problem.
+        Present published figures with the workspace's saved colours and the original draft explanations.
         """
-        self.notice.setText(message)
-        self.notice.setVisible(bool(message))
-
-    def _show_destination(self) -> None:
-        """
-        Keep the output folder available on the Generate tooltip without adding a path label.
-        """
-        text = f"Generate all four reports in {Path(self.paths[0]).parent}" if self.paths else (
-            "Generate all four reports for the selected month."
-        )
-        self.generate.setToolTip(text)
-
-    def _show_pdf(self) -> None:
-        """
-        Reload changed files and handle missing or inaccessible PDFs without retaining a stale preview.
-        """
-        if self._generated and self._generation_files != self._report_signatures():
-            self._generated = False
-            self._draft_reasons = []
-            self._generation_files = {}
-            self.mark_stale("Saved PDF files changed. Generate again to check their draft reasons.")
-        index = self.kind.currentIndex()
-        path = Path(self.paths[index]) if len(self.paths) > index >= 0 else None
-        try:
-            info = path.stat() if path is not None else None
-            if info is not None and not stat.S_ISREG(info.st_mode):
-                self._clear_preview("The configured report path is not a PDF file.")
-                return
-        except FileNotFoundError:
-            info = None
-        except OSError as error:
-            self._clear_preview(f"The saved PDF could not be read. {error}")
-            return
-        if info is None:
-            if path is None:
-                message = "Load the workspace to locate saved PDFs."
-            else:
-                message = (
-                    f"No saved {self.kind.currentText().lower()} PDF for this month.\n"
-                    "Choose Generate to create your reports."
-                )
-            self._clear_preview(message)
-            return
-        signature = (str(path), info.st_mtime_ns, info.st_size)
-        self.viewer.setToolTip(str(path))
-        if signature == self.loaded:
-            self._update_actions()
-            return
-        self.loaded = None
-        self.document.close()
-        self.loaded = signature
-        self._preview_message("")
-        error = self.document.load(str(path))
-        if error != QPdfDocument.Error.None_:
-            self._preview_message(
-                f"PDF preview could not load this file ({error.name}). Generate the reports again."
+        index = max(0, self.kind.currentIndex())
+        self.heading.setText(self.TITLES[index])
+        self.subtitle.setText(self.SUBTITLES[index])
+        reasons = ()
+        if self._view is not None:
+            reports = self._view.reports
+            settings = self._view.settings.model_copy(update=self._appearance)
+            report = (
+                reports.balance_sheet, reports.income_statement,
+                reports.budget_report, reports.investment_report,
+            )[index]
+            self.viewer.set_report(reports, settings, index)
+            self.subtitle.setStyleSheet(
+                "QLabel#nativeReportSubtitle { font: 400 13px 'Geist'; padding: 0; margin: 0; color: "
+                + self.viewer.caption_colour + "; }"
             )
+            self.report_stack.setCurrentWidget(self.viewer)
+            reasons = report.draft_reasons
         else:
-            self._document_status(self.document.status())
-        self._update_actions()
-
-    def _report_signatures(self) -> dict:
-        """
-        Recognise file replacement without attributing earlier draft findings to new saved PDFs.
-        """
-        signatures = {}
-        for value in self.paths:
-            try:
-                info = Path(value).stat()
-                signatures[value] = (info.st_mtime_ns, info.st_size)
-            except OSError:
-                signatures[value] = None
-        return signatures
-
-    def _clear_preview(self, message: str) -> None:
-        """
-        Clear the previous file and its timestamp before showing an empty or failed state.
-        """
-        self.loaded = None
-        self.document.close()
-        self.viewer.setToolTip("")
-        self._preview_message(message)
-        self._update_actions()
-
-    def _preview_message(self, message: str) -> None:
-        """
-        Replace the PDF viewport with a readable local preview status.
-        """
-        self.empty_preview.setText(message)
-        self.preview_stack.setCurrentWidget(self.empty_preview)
-
-    def _document_status(self, status: QPdfDocument.Status) -> None:
-        """
-        Account for asynchronous PDF load failures as well as immediate load results.
-        """
-        if self.loaded is None:
-            return
-        if status == QPdfDocument.Status.Ready:
-            self.preview_stack.setCurrentWidget(self.viewer)
-        elif status == QPdfDocument.Status.Error:
-            self._preview_message(
-                f"PDF preview could not load this file ({self.document.error().name}). Generate again."
-            )
-        self._update_actions()
-
-    def _update_actions(self) -> None:
-        """
-        Keep write actions tied to workspace readiness and file controls tied to the selected saved file.
-        """
+            self.empty.setPixmap(icon("report", gui_colour(self, "muted"), 36).pixmap(36, 36))
+            self.report_stack.setCurrentWidget(self.empty)
+        messages = [
+            self._workspace_error, self._failure_notice,
+            self._file_notice if not self._file_notice.startswith("Generate to create") else "",
+        ]
+        self.notice.setText("\n".join(dict.fromkeys(message for message in messages if message)))
+        self.notice.setToolTip("\n".join(reasons))
+        self.notice.setVisible(bool(self.notice.text()))
         self.generate.setEnabled(self._workspace_available and not self._busy)
-        has_file = self.loaded is not None
-        preview_ready = has_file and self.document.status() == QPdfDocument.Status.Ready
-        self.fit.setEnabled(preview_ready)
-        for button in self.zoom_buttons:
-            button.setEnabled(preview_ready)
-
-    def _zoom(self, factor: float) -> None:
-        """
-        Switch from fit mode to a bounded manual zoom.
-        """
-        zoom = self.viewer.zoomFactor()
-        self.viewer.setZoomMode(QPdfView.ZoomMode.Custom)
-        self.viewer.setZoomFactor(min(4.0, max(0.25, zoom * factor)))
+        destination = (f"Generate all four reports in {Path(self.paths[0]).parent}" if self.paths else
+                       "Generate and save all four reports for the selected month.")
+        details = [destination]
+        if self._stale_notice:
+            details.append(self._stale_notice)
+        if reasons:
+            details.extend(("Draft details:", *reasons))
+        tip = f"Generate in {Path(self.paths[0]).parent}" if self.paths else "Generate reports"
+        self.generate.setToolTip(tip)
+        self.generate.setAccessibleDescription("\n".join(details))
 
 # %% 4. Helpers ----------------------------------------------------------------------------------------------
 def _overview_work(snapshot: dict) -> dict[str, int]:

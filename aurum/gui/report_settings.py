@@ -55,7 +55,7 @@ class ReportForm(QWidget):
         layout.setSpacing(18)
         directory_row = QHBoxLayout()
         directory_row.setSpacing(10)
-        directory_row.addWidget(QLabel("Save reports in"))
+        directory_row.addWidget(QLabel("Outputs"))
         self.directory = QLineEdit(str(self.data.get("output_directory", "data/reports")))
         self.directory.setPlaceholderText("data/reports")
         self.directory.setAccessibleName("Report output folder")
@@ -237,7 +237,7 @@ class ReportForm(QWidget):
         workspace = Path(self.choices.get("workspace", Path.cwd())).resolve()
         current = Path(self.directory.text() or "data/reports").expanduser()
         current = current if current.is_absolute() else workspace / current
-        selected = QFileDialog.getExistingDirectory(self, "Save reports in", str(current))
+        selected = QFileDialog.getExistingDirectory(self, "Outputs", str(current))
         if selected:
             path = Path(selected).resolve()
             try:
@@ -806,7 +806,7 @@ def _action_button(label: str, symbol: str) -> QToolButton:
     button.setAutoRaise(True)
     button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
     button.setFixedSize(30, 30)
-    size = 14 if symbol in {"up", "down"} else 18
+    size = 22 if symbol in {"up", "down"} else 18
     button.setIconSize(QSize(size, size))
     button.setStyleSheet("QToolButton#setupIconAction { padding: 0; }")
     button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

@@ -13,13 +13,12 @@ shared configuration workflow, which validates dependencies and accounting histo
 # Imports
 from copy import deepcopy
 from datetime import date
-from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem,
-    QPlainTextEdit, QScrollArea, QSizePolicy, QStyledItemDelegate, QStyleOptionViewItem, QToolButton,
+    QScrollArea, QSizePolicy, QStyledItemDelegate, QStyleOptionViewItem, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -72,7 +71,7 @@ class CatalogueForm(QWidget):
         list_layout.setContentsMargins(0, 0, 0, 0)
         list_layout.setSpacing(10)
         heading = QHBoxLayout()
-        heading.addStretch()
+        heading.setSpacing(4)
         self.add_button = QToolButton()
         self.add_button.setObjectName("catalogueAdd")
         self.add_button.setIcon(icon("add", size=18))
@@ -88,6 +87,7 @@ class CatalogueForm(QWidget):
         list_layout.addLayout(heading)
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("catalogueList")
+        self.list_widget.setMouseTracking(True)
         self.list_widget.setItemDelegate(_CatalogueDelegate(self.list_widget))
         self.list_widget.setAccessibleName(kind.title() + " grouped by type")
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -104,10 +104,25 @@ class CatalogueForm(QWidget):
         self.remove_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.remove_button.setAccessibleName("Remove selected " + self.noun)
         self.remove_button.setToolTip(
-            "Remove this definition from the draft; saved history is checked on save."
+            "Remove from draft"
         )
         self.remove_button.clicked.connect(self._remove)
         heading.addWidget(self.remove_button)
+        self.move_buttons = []
+        for direction, label, offset in (("up", "Move up", -1), ("down", "Move down", 1)):
+            button = QToolButton()
+            button.setObjectName("budgetAction")
+            button.setIcon(icon(direction, size=22))
+            button.setIconSize(QSize(22, 22))
+            button.setFixedSize(28, 28)
+            button.setAutoRaise(True)
+            button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            button.setToolTip(label + " within this type")
+            button.setAccessibleName(label + " within this type")
+            button.clicked.connect(lambda _checked=False, step=offset: self._move(step))
+            heading.addWidget(button)
+            self.move_buttons.append(button)
+        heading.addStretch()
         layout.addWidget(listing, 1)
 
         details = QWidget()
@@ -125,7 +140,7 @@ class CatalogueForm(QWidget):
 
     def value(self) -> list[dict]:
         """
-        Return all local drafts in their original order for the shared validated save operation.
+        Return all local drafts in their chosen order for the shared validated save operation.
         """
         self._store_active()
         return deepcopy(self.records)
@@ -217,6 +232,7 @@ class CatalogueForm(QWidget):
             self.list_widget.scrollToItem(self.list_widget.item(selected_row))
         else:
             self.list_widget.verticalScrollBar().setValue(scroll)
+        self._update_move_actions(selected)
 
     def _select_row(self, row: int) -> None:
         """
@@ -243,6 +259,7 @@ class CatalogueForm(QWidget):
             empty.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             self.detail.setWidget(empty)
             self.remove_button.setEnabled(False)
+            self._update_move_actions(-1)
             return
         record = self.records[index]
         if self.kind == "accounts":
@@ -257,6 +274,43 @@ class CatalogueForm(QWidget):
         self.editor.changed.connect(self._detail_changed)
         self.detail.setWidget(self.editor)
         self.remove_button.setEnabled(record.get("key") not in self._fixed)
+        self._update_move_actions(index)
+
+    def _update_move_actions(self, selected: int) -> None:
+        """
+        Keep reorder arrows within the selected type and disable unavailable group-edge movements.
+        """
+        indices = []
+        if 0 <= selected < len(self.records):
+            selected_type = self.records[selected].get(self.type_field)
+            if selected_type in {key for key, _ in self.groups}:
+                indices = [index for index, record in enumerate(self.records)
+                           if record.get(self.type_field) == selected_type]
+        position = indices.index(selected) if selected in indices else -1
+        self.move_buttons[0].setEnabled(position > 0)
+        self.move_buttons[1].setEnabled(position >= 0 and position < len(indices) - 1)
+
+    def _move(self, offset: int) -> None:
+        """
+        Swap neighbouring same-type drafts while preserving the active editor, identities and row drafts.
+        """
+        self._store_active()
+        selected = self._active_index
+        if not 0 <= selected < len(self.records) or offset not in {-1, 1}:
+            return
+        selected_type = self.records[selected].get(self.type_field)
+        if selected_type not in {key for key, _ in self.groups}:
+            return
+        indices = [index for index, record in enumerate(self.records)
+                   if record.get(self.type_field) == selected_type]
+        position = indices.index(selected) + offset
+        if not 0 <= position < len(indices):
+            return
+        destination = indices[position]
+        self.records[selected], self.records[destination] = self.records[destination], self.records[selected]
+        self._active_index = destination
+        self._rebuild_list(destination, reveal=True)
+        self.changed.emit()
 
     def _store_active(self) -> None:
         """
@@ -339,6 +393,29 @@ class SecuritiesForm(CatalogueForm):
         """
         super().__init__(schema, value, choices, "securities", parent)
 
+    def apply_provider_suggestion(self, key: str | int, symbol: str) -> bool:
+        """
+        Stage an explicitly chosen Yahoo symbol without renaming the security or changing its identity.
+
+        New definitions may use their draft list index before the validated save assigns a stable key.
+        """
+        self._store_active()
+        selected = key if type(key) is int else next((
+            index for index, record in enumerate(self.records)
+            if record.get("key") == key or str(record.get("id", "")) == key
+        ), -1)
+        if not 0 <= selected < len(self.records):
+            return False
+        symbol = symbol.strip()
+        if not symbol:
+            return False
+        if selected == self._active_index and self.editor is not None:
+            self.editor.price_symbol.setText(symbol)
+        else:
+            self.records[selected]["price_symbol"] = symbol
+            self.changed.emit()
+        return True
+
 
 # %% 2. Definition Details -----------------------------------------------------------------------------------
 class AccountEditor(QWidget):
@@ -405,10 +482,11 @@ class AccountEditor(QWidget):
         _add_row(form, "Asset account type", self.budget_choice)
         self.budget_label = form.labelForField(self.budget_choice)
         self.budget_choice.currentIndexChanged.connect(self._choose_budget)
-        self.notes = QPlainTextEdit()
-        self.notes.setPlaceholderText("Optional notes")
-        self.notes.setPlainText(_text(record.get("notes")))
-        self.notes.setFixedHeight(88)
+        self.original_notes_line = " ".join(_text(record.get("notes")).splitlines())
+        self.notes = _text_field("", "Optional notes")
+        # Preserve notes written by the former multiline editor beyond QLineEdit’s default length limit.
+        self.notes.setMaxLength(2**31 - 1)
+        self.notes.setText(self.original_notes_line)
         _add_row(form, "Notes", self.notes)
         self.key = _text_field(record.get("key"), "Generated from the name when saved")
         self.key.setObjectName("catalogueMeta")
@@ -442,7 +520,8 @@ class AccountEditor(QWidget):
             elif "bank_details" in result:
                 result["bank_details"] = None
         _optional_text(result, self.original, "institution", self.institution.text())
-        _optional_text(result, self.original, "notes", self.notes.toPlainText())
+        if self.notes.isModified() or self.notes.text() != self.original_notes_line:
+            _optional_text(result, self.original, "notes", " ".join(self.notes.text().splitlines()))
         if not self.fixed_name:
             if self.closing_date.text():
                 result["closing_date"] = self.closing_date.text()
@@ -669,11 +748,6 @@ def _choice_field(options: tuple, value: Any) -> QComboBox:
     field = QComboBox()
     field.setObjectName("catalogueSelect")
     field.setView(QListView(field))
-    arrow = (Path(__file__).parent / "assets" / "chevron_down.svg").as_posix()
-    field.setStyleSheet(
-        "QComboBox { padding-right: 28px; } "
-        f'QComboBox::down-arrow {{ image: url("{arrow}"); width: 10px; height: 6px; }}'
-    )
     field.setFixedHeight(34)
     field.addItem("Choose a type…", "")
     for key, label in options:

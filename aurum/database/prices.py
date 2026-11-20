@@ -13,6 +13,7 @@ Reporting may reuse the latest valid cached close through its cutoff without cha
 
 # %% 0. Preamble ---------------------------------------------------------------------------------------------
 # Imports
+from collections.abc import Iterator
 from datetime import date
 import sqlite3
 from uuid import UUID
@@ -71,14 +72,27 @@ def load_valuation_quote(
         "ORDER BY price_date DESC, requested_date DESC",
         (str(security_id), cutoff.isoformat(), cutoff.isoformat(), symbol),
     )
-    for row in rows:
-        try:
-            quote = PriceQuote.model_validate(dict(zip(PRICE_COLUMNS, row)))
-        except ValueError:
-            continue
-        if quote.requested_date <= cutoff and quote.price_date <= cutoff:
-            return quote
-    return None
+    return next(_valuation_quotes(rows, cutoff), None)
+
+
+def load_valuation_history(connection: sqlite3.Connection, cutoff: date) -> tuple[PriceQuote, ...]:
+    """
+    Read all valid saved AUD closes eligible through the final historical cutoff in one query.
+
+    Historical valuation selects the configured symbol separately at each requested point. Older databases
+    without a quote cache yield an empty history and retain the recorded values of their positions.
+    """
+    available = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'price_quotes'"
+    ).fetchone()
+    if not available:
+        return ()
+    rows = connection.execute(
+        "SELECT " + ", ".join(PRICE_COLUMNS) + " FROM price_quotes "
+        "WHERE requested_date <= ? AND price_date <= ? AND currency = 'AUD' AND provider = 'yahoo'",
+        (cutoff.isoformat(), cutoff.isoformat()),
+    )
+    return tuple(_valuation_quotes(rows, cutoff))
 
 
 def save_quote(connection: sqlite3.Connection, quote: PriceQuote) -> PriceQuote:
@@ -101,3 +115,17 @@ def save_quote(connection: sqlite3.Connection, quote: PriceQuote) -> PriceQuote:
             tuple(values[name] for name in PRICE_COLUMNS),
         )
     return load_quote(connection, quote.security_id, quote.requested_date, quote.symbol)
+
+
+# %% 2. Helpers ----------------------------------------------------------------------------------------------
+def _valuation_quotes(rows: sqlite3.Cursor, cutoff: date) -> Iterator[PriceQuote]:
+    """
+    Skip invalid cache records and enforce both cutoff dates on validated values.
+    """
+    for row in rows:
+        try:
+            quote = PriceQuote.model_validate(dict(zip(PRICE_COLUMNS, row)))
+        except ValueError:
+            continue
+        if quote.requested_date <= cutoff and quote.price_date <= cutoff:
+            yield quote

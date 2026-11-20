@@ -67,12 +67,14 @@ def prepare_manuals(
     retry_errors: bool = False, skill_version: str | None = None,
     securities: SecurityRegistry | None = None, budget: BudgetSettings | None = None,
     manual_ids: set[UUID] | None = None, persist_questions: bool = True,
+    display_month_scope: Callable[[int, int], set[UUID]] | None = None,
 ) -> ManualSession:
     """
     Prepare saved instructions and responses directly from SQLite.
 
     Other instructions' claims still protect their evidence. Only selected instructions may acquire new
     questions or requests, and complete existing events remain available as context for corrections.
+    A full-history read can supply each instruction's processing scope to retain cross-month warnings.
     """
     session = ManualSession()
     transactions = load_transactions(connection)
@@ -80,6 +82,7 @@ def prepare_manuals(
     skill_version = skill_version or load_manual_skill().version
     catalogue_revision = _catalogue_revision(accounts, securities, budget)
     outside_claims = set()
+    claimants = {}
     for record in load_manual_entries(connection):
         identifier = record["manual_id"]
         if record["status"] == "withdrawn" or record.get("is_savings"):
@@ -93,6 +96,8 @@ def prepare_manuals(
             if record["status"] in {"pending", "requesting", "needs_review", "failed", "unsupported"}:
                 for item in case.transactions:
                     session.blocking_manuals.setdefault(item.transaction_id, identifier)
+                    if display_month_scope is not None:
+                        claimants.setdefault(item.transaction_id, set()).add(identifier)
             if not selected:
                 if record["status"] in {"pending", "requesting", "needs_review", "failed", "unsupported"}:
                     outside_claims.update(item.transaction_id for item in case.transactions)
@@ -113,7 +118,14 @@ def prepare_manuals(
     session.blocked.update(outside_claims)
     retained = []
     for case in session.cases:
-        if outside_claims & {row.transaction_id for row in case.transactions}:
+        sources = {row.transaction_id for row in case.transactions}
+        conflict = bool(outside_claims & sources)
+        if display_month_scope is not None:
+            others = {owner for source in sources for owner in claimants.get(source, ())}
+            others.discard(case.submission.id)
+            if others:
+                conflict = not others <= display_month_scope(*reporting_month(case.submission.date))
+        if conflict:
             session.messages[case.submission.id] = (
                 "Another month's pending manual instruction could use this bank evidence. "
                 "Resolve it or select exact source transactions before processing."

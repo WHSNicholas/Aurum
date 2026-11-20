@@ -14,20 +14,19 @@ again before committing. Opening this dialog or changing its fields never change
 # Imports
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 from uuid import uuid4
 
 from pydantic import ValidationError
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView,
-    QPushButton, QStyledItemDelegate, QTableWidget, QToolButton, QToolTip, QVBoxLayout, QWidget,
+    QPushButton, QStyledItemDelegate, QTableWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 # Aurum imports
 from aurum.finance.dates import parse_input_date
 from aurum.finance.journal import JournalEntry
-from aurum.gui.controls import DateField, confirm_discard
+from aurum.gui.controls import DateField, confirm_discard, hide_tooltip, show_tooltip
 from aurum.gui.icons import icon
 from aurum.gui.investment_disposal import InvestmentDisposalDialog
 from aurum.gui.manual import SourcePicker
@@ -47,6 +46,7 @@ class JournalEditor(QDialog):
         Build the posting form either as its own dialog or inside a parent-owned manual-entry composer.
         """
         super().__init__(parent)
+        self.setObjectName("journalEntryEditor")
         self.embedded = embedded
         if embedded:
             self.setWindowFlags(Qt.WindowType.Widget)
@@ -93,7 +93,7 @@ class JournalEditor(QDialog):
         self.date.setEnabled(not self.protected_trade)
         top.addWidget(self.date)
         self.sources_button = QPushButton("Bank transactions")
-        self.sources_button.setIcon(icon("statement", size=16))
+        self.sources_button.setIcon(icon("attach_evidence", size=16))
         self.sources_button.setAccessibleName("Choose linked bank transactions")
         self.sources_button.clicked.connect(self._choose_sources)
         self.sources_button.setEnabled(not context.get("journal_entry_id"))
@@ -111,7 +111,7 @@ class JournalEditor(QDialog):
         self.disposal_actions = QWidget()
         posting_actions = QHBoxLayout(self.disposal_actions)
         posting_actions.setContentsMargins(0, 0, 0, 0)
-        self.disposal_button = _posting_action("Investment disposal", "chart")
+        self.disposal_button = _posting_action("Investment disposal", "investment_disposal")
         self.disposal_button.clicked.connect(self._open_disposal)
         disposal_sources = context.get("investment_disposals", {}).get("sources", [])
         self.disposal_actions.setVisible(
@@ -127,6 +127,7 @@ class JournalEditor(QDialog):
         self.posting_header = _PostingHeader(self.add_button, self.table)
         self.table.setHorizontalHeader(self.posting_header)
         self.table.setObjectName("journalPostingTable")
+        self.table.setProperty("roundedTable", True)
         self.table.setShowGrid(False)
         self.table.setStyleSheet(
             "QTableWidget#journalPostingTable QHeaderView::section { border: none; }"
@@ -172,7 +173,7 @@ class JournalEditor(QDialog):
         self.cancel_button = _editor_action("Cancel journal edits", "close")
         self.cancel_button.clicked.connect(self.reject)
         actions.addWidget(self.cancel_button)
-        self.save_button = _editor_action("Save entry", "save")
+        self.save_button = _editor_action("Save entry", "post")
         self.save_button.clicked.connect(self.save_changes)
         actions.addWidget(self.save_button)
         self.actions_widget.setVisible(not embedded)
@@ -561,7 +562,7 @@ class JournalEditor(QDialog):
             control.setToolTip(tooltip)
             control.setAccessibleDescription(description)
             self._validation_target = None
-            QToolTip.hideText()
+            hide_tooltip()
         self.validation.clear()
         self.validation.hide()
 
@@ -583,7 +584,7 @@ class JournalEditor(QDialog):
         control.setToolTip(message)
         control.setAccessibleDescription(message)
         control.setFocus(Qt.FocusReason.OtherFocusReason)
-        QToolTip.showText(control.mapToGlobal(QPoint(0, control.height())), message, control)
+        show_tooltip(control.mapToGlobal(QPoint(0, control.height())), message, control)
 
     def _reload(self) -> None:
         """
@@ -813,16 +814,11 @@ def _editor_action(label: str, symbol: str) -> QToolButton:
 
 def _posting_combo(name: str, *, account_choices: bool = False) -> QComboBox:
     """
-    Give posting choices a visible arrow and a Qt list popup that works inside the macOS table.
+    Use the shared selector appearance and a Qt list popup inside the posting table.
     """
     combo = _AccountComboBox() if account_choices else QComboBox()
     combo.setView(QListView(combo))
     combo.setAccessibleName(name)
-    arrow = (Path(__file__).parent / "assets" / "chevron_down.svg").as_posix()
-    combo.setStyleSheet(
-        'QComboBox { padding-right: 28px; } '
-        f'QComboBox::down-arrow {{ image: url("{arrow}"); width: 10px; height: 6px; }} '
-    )
     return combo
 
 

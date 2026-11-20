@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict
 from aurum.database.database import DEFAULT_DATABASE, _check_schema
 from aurum.database.journal import load_journal_entries
 from aurum.database.manual import load_manual_entries
-from aurum.database.prices import load_valuation_quote
+from aurum.database.market_history import load_latest_market_quotes
 from aurum.database.reviews import load_review_answers, load_review_cases, load_review_baselines
 from aurum.database.manual import load_opening_entry_ids
 from aurum.database.transactions import load_transactions
@@ -42,6 +42,7 @@ from aurum.finance.reports import (
 )
 from aurum.finance.securities import DEFAULT_SECURITIES, Security, load_securities
 from aurum.reporting.pdf import render_reports
+from aurum.workflows.report_view import REPORT_VIEW_FILENAME, ReportViewSnapshot, create_report_view
 
 # Default paths
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +60,8 @@ class ReportResult(BaseModel):
 
     reports: Reports
     paths: tuple[Path, Path, Path, Path]
+    settings: ReportSettings
+    view_snapshot: ReportViewSnapshot
 
 
 def generate_reports(
@@ -130,34 +133,43 @@ def generate_reports(
             f"Checking closing prices for {len(required_ids)} securities as of {period.cutoff.isoformat()}..."
         )
         with closing(sqlite3.connect(database.as_uri() + "?mode=rw", uri=True)) as connection:
+            symbols = {}
             for identifier in sorted(required_ids, key=str):
                 security = securities.by_id(identifier)
                 try:
-                    symbol = price_symbol(security)
-                    try:
-                        get_quote(connection, security, period.cutoff, fetcher=fetcher)
-                    except (PriceUnavailable, ValueError):
-                        # A failed current request must not discard a valid earlier market valuation.
-                        pass
-                    quote = load_valuation_quote(connection, identifier, period.cutoff, symbol)
-                    if quote is None:
-                        raise PriceUnavailable("No valid cached close is available")
-                    quotes[identifier] = quote
+                    symbols[identifier] = price_symbol(security)
                 except PriceUnavailable:
-                    valuation_errors[identifier] = (
-                        f"No valid AUD market close is available on or before {period.cutoff.isoformat()}. "
-                        "Check the symbol or rerun reports"
-                    )
+                    continue
+            quotes = load_latest_market_quotes(connection, Path(workspace), period.cutoff, symbols)
+            for identifier in symbols:
+                previous = quotes.get(identifier)
+                if previous is not None and previous.price_date == period.cutoff:
+                    continue
+                try:
+                    fresh = get_quote(connection, securities.by_id(identifier), period.cutoff, fetcher=fetcher)
+                except (PriceUnavailable, ValueError):
+                    continue
+                if previous is None or (fresh.price_date, fresh.requested_date) >= (
+                    previous.price_date, previous.requested_date,
+                ):
+                    quotes[identifier] = fresh
+            for identifier in required_ids - quotes.keys():
+                valuation_errors[identifier] = (
+                    f"No valid AUD market close is available on or before {period.cutoff.isoformat()}. "
+                    "Check the symbol or rerun reports"
+                )
     reports = build_reports(
         entries, accounts, settings, period, quotes=quotes, securities=securities,
         budget_settings=budget_settings, valuation_errors=valuation_errors, draft_reasons=draft_reasons,
         opening_entry_ids=opening_ids,
     )
     emit(f"Rendering {period.month} balance sheet, income, budget and investment reports...")
-    documents = render_reports(reports, settings)
-    paths = _save_pdfs(destination / period.month, documents)
+    generated_on = date.today()
+    documents = render_reports(reports, settings, generated_on=generated_on)
+    view_snapshot = create_report_view(reports, settings, period.month, generated_on, documents)
+    paths = _save_pdfs(destination / period.month, documents, view_snapshot=view_snapshot)
     emit(f"Saved all four PDFs to {paths[0].parent}")
-    return ReportResult(reports=reports, paths=paths)
+    return ReportResult(reports=reports, paths=paths, settings=settings, view_snapshot=view_snapshot)
 
 
 def report_filenames(month: str) -> tuple[str, str, str, str]:
@@ -184,7 +196,8 @@ def resolve_output_directory(
 
 
 def investment_review_items(
-    connection: sqlite3.Connection, accounts: AccountRegistry, settings: ReportSettings, cutoff: date,
+    connection: sqlite3.Connection, accounts: AccountRegistry, settings: ReportSettings, cutoff: date | None,
+    *, entries=None,
 ) -> list[dict]:
     """
     List posted whole-account investment movements whose missing treatment leaves report cost unknown.
@@ -197,8 +210,8 @@ def investment_review_items(
     }
     by_account = {account.id: account for account in accounts.accounts.values()}
     items = []
-    for entry in load_journal_entries(connection, accounts):
-        if entry.date > cutoff:
+    for entry in (load_journal_entries(connection, accounts) if entries is None else entries):
+        if cutoff is not None and entry.date > cutoff:
             continue
         journal_entry = None
         for number, line in enumerate(entry.lines, 1):
@@ -343,15 +356,27 @@ def _unfinished_accounting(
     return tuple(reasons)
 
 
-def _save_pdfs(folder: Path, documents: tuple[bytes, bytes, bytes, bytes]) -> tuple[Path, Path, Path, Path]:
+def _save_pdfs(
+    folder: Path, documents: tuple[bytes, bytes, bytes, bytes], *,
+    view_snapshot: ReportViewSnapshot | None = None,
+) -> tuple[Path, Path, Path, Path]:
     """
     Stage all four rendered PDFs before replacing the period's existing files.
 
     Rendering and staging failures leave previous PDFs intact. Each final replacement is atomic, so an
-    individual PDF is never exposed while partially written.
+    individual PDF is never exposed while partially written. The optional dashboard snapshot is staged
+    before any replacements and published last, so it represents only a complete successful generation.
     """
     if len(documents) != 4 or any(not content.startswith(b"%PDF-") for content in documents):
         raise ValueError("The renderer did not return four valid PDF documents")
+    snapshot_bytes = None
+    if view_snapshot is not None:
+        checked = create_report_view(
+            view_snapshot.reports, view_snapshot.settings, folder.name, view_snapshot.generated_on, documents,
+        )
+        if checked != view_snapshot:
+            raise ValueError("Dashboard report data does not match the rendered PDFs or reporting month")
+        snapshot_bytes = view_snapshot.model_dump_json(indent=2).encode("utf-8")
     folder.mkdir(parents=True, exist_ok=True)
     paths = tuple(folder / name for name in report_filenames(folder.name))
     with tempfile.TemporaryDirectory(prefix=".reports-", dir=folder) as temporary:
@@ -360,6 +385,17 @@ def _save_pdfs(folder: Path, documents: tuple[bytes, bytes, bytes, bytes]) -> tu
             path = Path(temporary) / target.name
             path.write_bytes(content)
             staged.append(path)
-        for source, target in zip(staged, paths):
-            os.replace(source, target)
+        snapshot_path = Path(temporary) / REPORT_VIEW_FILENAME
+        if snapshot_bytes is not None:
+            snapshot_path.write_bytes(snapshot_bytes)
+        try:
+            for source, target in zip(staged, paths):
+                os.replace(source, target)
+            if snapshot_bytes is not None:
+                os.replace(snapshot_path, folder / REPORT_VIEW_FILENAME)
+        except OSError as error:
+            raise OSError(
+                "Report publication did not finish; some PDFs may have changed. "
+                "The previous dashboard result was retained. Generate again."
+            ) from error
     return paths

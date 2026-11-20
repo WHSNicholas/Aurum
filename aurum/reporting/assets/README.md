@@ -16,6 +16,16 @@ except `net_worth.png` and `net_income.png`, which are white for the highlighted
 `data/icons/` are unchanged. Reports use these bundled copies, so no private folder or runtime image-editing
 dependency is needed. The expense chart is drawn as local SVG by `pdf.py`.
 
-The investment report's `market_value.png` and `unrealised_gain.png` were extracted from the supplied Eigen One
-investment PDF. Their original embedded colour images and transparency masks are preserved without recolouring.
-The allocation donut is generated locally as SVG.
+The four additional summary icons use the [Solar Icon Set](https://github.com/480-Design/Solar-Icon-Set)
+by 480 Design / Damir Tuarshe, licensed under [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/).
+Each source is from revision `44017167688b49109d88ae6a98979b23d8950db0`. Aurum rasterises the original
+24×24 SVG artwork to transparent 512×512 PNGs and tints the silhouettes for the report theme.
+
+| Report measure | PNG | Original Solar Bold artwork |
+| --- | --- | --- |
+| Total Savings | `savings.png` | [Safe Square](https://github.com/480-Design/Solar-Icon-Set/blob/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Money/Safe%20Square.svg) |
+| Total Invested | `invested_cost.png` | [Wad Of Money](https://github.com/480-Design/Solar-Icon-Set/blob/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Money/Wad%20Of%20Money.svg) |
+| Market Value / Portfolio Value | `market_value.png` | [Tag Price](https://github.com/480-Design/Solar-Icon-Set/blob/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/Money/Tag%20Price.svg) |
+| Investment P&L | `unrealised_gain.png` | [Plus, Minus](https://github.com/480-Design/Solar-Icon-Set/blob/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Bold/School/Plus%2C%20Minus.svg) |
+
+The investment allocation donut is generated locally as SVG.

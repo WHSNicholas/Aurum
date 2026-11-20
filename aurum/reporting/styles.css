@@ -64,7 +64,7 @@ h1 {
     border-radius: 14px;
     padding: 12px 14px;
     text-align: center;
-    background: var(--report-surface);
+    background: var(--report-card, var(--report-surface));
 }
 .summary-card.highlight {
     color: var(--report-on-highlight);

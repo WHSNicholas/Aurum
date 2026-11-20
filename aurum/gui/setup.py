@@ -17,6 +17,7 @@ from datetime import date
 from decimal import Decimal, localcontext, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import ValidationError
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -42,7 +43,6 @@ from aurum.gui.theme_picker import ThemeComboBox
 from aurum.gui.workspace import ChatGPTPage
 from aurum.workflows.configuration import (
     CONFIGURATION_MODELS, configuration_schema, initialise_workspace, read_configuration, save_configuration,
-    save_configurations,
 )
 
 # %% 1. Setup Screen -----------------------------------------------------------------------------------------
@@ -77,6 +77,8 @@ class SetupPage(QWidget):
         self.budget_header_layout = QVBoxLayout()
         self.budget_header_layout.setContentsMargins(0, 0, 0, 0)
         self._messages = {}
+        self._submitted_setup = None
+        self._last_setup_ack = None
         self.configuration_kinds = tuple(CONFIGURATION_MODELS)
         self.kinds = self.configuration_kinds
         self.chatgpt = ChatGPTPage()
@@ -99,8 +101,8 @@ class SetupPage(QWidget):
         layout.addLayout(header)
         cards = QHBoxLayout()
         cards.setSpacing(12)
-        self.account_value, self.account_detail = self._summary_card(cards, "ACCOUNTS", "wallet")
-        self.budget_value, self.budget_detail = self._summary_card(cards, "BUDGET", "savings", flow=True)
+        self.account_value, self.account_detail = self._summary_card(cards, "ACCOUNTS", "accounts")
+        self.budget_value, self.budget_detail = self._summary_card(cards, "BUDGET", "budget", flow=True)
         theme_card = QFrame()
         theme_card.setObjectName("setupSummary")
         theme_card.setFixedHeight(132)
@@ -108,7 +110,7 @@ class SetupPage(QWidget):
         theme_layout.setContentsMargins(16, 18, 16, 6)
         theme_layout.setSpacing(4)
         theme_icon = QLabel()
-        theme_icon.setPixmap(icon("reports", "#3f7168", 20).pixmap(20, 20))
+        theme_icon.setPixmap(icon("theme", "#3f7168", 20).pixmap(20, 20))
         theme_icon.setFixedSize(20, 20)
         theme_layout.addWidget(theme_icon, 0, Qt.AlignmentFlag.AlignHCenter)
         theme_label = QLabel("THEME")
@@ -213,6 +215,23 @@ class SetupPage(QWidget):
             error.setWordWrap(True)
             error.hide()
             page_layout.addWidget(error)
+            if kind == "securities":
+                self.security_suggestions = QWidget()
+                suggestions = QHBoxLayout(self.security_suggestions)
+                suggestions.setContentsMargins(0, 0, 0, 0)
+                self.security_choices = QComboBox()
+                self.security_choices.setAccessibleName("Suggested Yahoo Finance ticker")
+                suggestions.addWidget(self.security_choices, 1)
+                self.security_use = QToolButton()
+                self.security_use.setObjectName("securitySuggestionAction")
+                self.security_use.setIcon(icon("check", size=18))
+                self.security_use.setFixedSize(30, 30)
+                self.security_use.setToolTip("Use selected market data symbol")
+                self.security_use.setAccessibleName("Use selected market data symbol")
+                self.security_use.clicked.connect(self._use_security_suggestion)
+                suggestions.addWidget(self.security_use)
+                self.security_suggestions.hide()
+                page_layout.addWidget(self.security_suggestions)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -313,17 +332,23 @@ class SetupPage(QWidget):
 
     def action_completed(self, action: str, result: dict) -> None:
         """
-        Clear only an opening balance whose atomic ledger save has been acknowledged.
+        Apply the worker's result to the matching opening or configuration draft.
         """
         if action == "save_bank_opening":
             self.bank_openings.complete(result)
+        elif action == "save_setup":
+            self._accept_setup_save(result)
 
     def action_failed(self, action: str, message: str) -> None:
         """
-        Leave unsuccessful bank opening drafts available for correction or explicit discard.
+        Leave unsuccessful drafts available for correction or explicit discard.
         """
         if action == "save_bank_opening":
             self.bank_openings.fail(message)
+        elif action == "save_setup":
+            self._submitted_setup = None
+            self._show_error(self.current_section(), message)
+            self._update_labels()
 
     def set_reporting_month(self, month: str) -> None:
         """
@@ -354,42 +379,107 @@ class SetupPage(QWidget):
 
     def save_changes(self) -> bool:
         """
-        Save all edited sections, keeping unsuccessful drafts visible and acknowledging partial saves.
+        Submit one frozen coordinated configuration draft and await its background acknowledgement.
         """
-        if self._busy or (self._missing and self._dirty):
+        if self._busy or self._submitted_setup is not None or (self._missing and self._dirty):
             return False
-        saved = []
-        if "accounts" in self._dirty and (self._account_roles_dirty or "budget" in self._dirty):
-            if not self._save_account_budget():
-                self.tabs.blockSignals(True)
-                self.tabs.setCurrentIndex(self.kinds.index("accounts"))
-                self.tabs.blockSignals(False)
-                self._current = self.kinds.index("accounts")
-                self.section_changed.emit("accounts")
-                self._update_labels()
-                return False
-            saved.extend(("accounts", "budget"))
-        for kind in ("accounts", "securities", "reports", "budget"):
-            if kind not in self._dirty:
-                continue
-            if not self._save(kind):
-                self.tabs.blockSignals(True)
-                self.tabs.setCurrentIndex(self.kinds.index(kind))
-                self.tabs.blockSignals(False)
-                self._current = self.kinds.index(kind)
-                self.section_changed.emit(kind)
-                self._update_labels()
-                if saved:
-                    self.save_status.setText(
-                        ", ".join(item.title() for item in saved) + " saved. Correct the remaining changes."
+        if not self._dirty:
+            return True
+        kinds = set(self._dirty)
+        if "accounts" in kinds and self._account_roles_dirty:
+            kinds.add("budget")
+        try:
+            if "budget" in self._dirty:
+                self.forms["budget"].validate_targets()
+            changes = {kind: deepcopy(self.forms[kind].value()) for kind in kinds}
+            documents = {kind: deepcopy(self.documents[kind]) for kind in kinds}
+        except (ValueError, OSError, TypeError, KeyError) as error:
+            kind = "budget" if "budget" in kinds else self.current_section()
+            self._show_error(kind, _configuration_error(error))
+            self._focus_section(kind)
+            return False
+        submission = str(uuid4())
+        self._last_setup_ack = None
+        self._submitted_setup = {"submission": submission, "documents": documents, "changes": changes}
+        self.security_suggestions.hide()
+        self.action_requested.emit("save_setup", self._submitted_setup)
+        return False
+
+    def save_acknowledged(self, result: dict) -> bool:
+        """
+        Let deferred navigation continue only after this exact submitted draft was saved and accepted.
+        """
+        return bool(result.get("saved_setup")) and result["saved_setup"] == self._last_setup_ack
+
+    def _focus_section(self, kind: str) -> None:
+        """
+        Reveal validation feedback without discarding any of the coordinated configuration drafts.
+        """
+        self.tabs.blockSignals(True)
+        self._current = self.kinds.index(kind)
+        self.tabs.setCurrentIndex(self._current)
+        self.tabs.blockSignals(False)
+        self.section_changed.emit(kind)
+        self._update_labels()
+
+    def _accept_setup_save(self, result: dict) -> None:
+        """
+        Clear only an acknowledged unchanged submission; otherwise preserve every newer local edit.
+        """
+        submitted, self._submitted_setup = self._submitted_setup, None
+        if submitted is None:
+            return
+        errors = result.get("security_errors") or []
+        if errors:
+            self._show_error("securities", "\n".join(
+                f"{item['name']}: {item['message']}" for item in errors
+            ))
+            self.security_choices.clear()
+            for item in errors:
+                for suggestion in item.get("suggestions", []):
+                    text = " · ".join(filter(None, (
+                        suggestion["symbol"], suggestion["name"], suggestion.get("exchange"),
+                    )))
+                    self.security_choices.addItem(
+                        item["name"] + ": " + text, (item["draft_row"], suggestion["symbol"]),
                     )
-                    self.save_status.show()
-                return False
-            saved.append(kind)
-        if saved:
-            self.save_status.setText("Changes saved")
-            self.save_status.show()
-        return True
+            self.security_suggestions.setVisible(self.security_choices.count() > 0)
+            self._focus_section("securities")
+            return
+        if result.get("saved_setup") != submitted["submission"] or not result.get("documents"):
+            self._update_labels()
+            return
+        saved = result["documents"]
+        unchanged = self._dirty.issubset(submitted["changes"]) and all(
+            self.forms[kind].value() == value for kind, value in submitted["changes"].items()
+        )
+        self.documents.update(saved)
+        if not unchanged:
+            self._show_error(
+                self.current_section(),
+                "The submitted settings were saved, but newer local edits remain. Reload before saving again.",
+            )
+            self._update_labels()
+            return
+        self._last_setup_ack = submitted["submission"]
+        self._dirty.difference_update(saved)
+        self._account_roles_dirty = False
+        self.refresh(force=True)
+        warnings = result.get("warnings") or []
+        if warnings:
+            self._messages["securities"] = "Saved without Yahoo verification. " + " ".join(warnings)
+        self._update_labels()
+        self.changed.emit()
+
+    def _use_security_suggestion(self) -> None:
+        """
+        Stage the selected provider symbol without changing a label, identity or any saved configuration.
+        """
+        choice = self.security_choices.currentData()
+        form = self.forms.get("securities")
+        if choice and form is not None and form.apply_provider_suggestion(*choice):
+            self.security_suggestions.hide()
+            self._focus_section("securities")
 
     def _summary_card(
         self, row: QHBoxLayout, title: str, symbol: str, *, flow: bool = False,
@@ -626,12 +716,15 @@ class SetupPage(QWidget):
         """
         self._busy = busy
         self.bank_connection.set_busy(busy)
+        self.security_suggestions.setEnabled(not busy)
         self._update_labels()
 
     def _load(self, kind: str, choices: dict) -> None:
         """
         Replace a form from disk, retaining its view state and clearing stale controls if loading fails.
         """
+        if kind == "securities":
+            self.security_suggestions.hide()
         previous = self.forms.get(kind)
         state = previous.view_state() if hasattr(previous, "view_state") else None
         position = self.pages[kind].verticalScrollBar().value()
@@ -755,6 +848,8 @@ class SetupPage(QWidget):
         Show an unsaved state without validating or writing while the user types.
         """
         self._dirty.add(kind)
+        if kind == "securities":
+            self.security_suggestions.hide()
         self._messages.pop(kind, None)
         self.errors[kind].clear()
         self.errors[kind].hide()
@@ -830,78 +925,6 @@ class SetupPage(QWidget):
         """
         self.errors[kind].setText(message)
         self.errors[kind].show()
-
-    def _save(self, kind: str) -> bool:
-        """
-        Persist validated settings through the shared service, preserving local input when saving fails.
-        """
-        if self._busy or self._missing or kind not in self.forms or kind not in self.documents:
-            return False
-        if kind not in self._dirty:
-            return True
-        if kind == "accounts" and (self._account_roles_dirty or "budget" in self._dirty):
-            return self._save_account_budget()
-        try:
-            document = save_configuration(self.documents[kind], self.forms[kind].value())
-        except (ValueError, OSError, TypeError) as error:
-            self._show_error(kind, _configuration_error(error))
-            self._update_labels()
-            return False
-        self.documents[kind] = document
-        for other, original in tuple(self.documents.items()):
-            if other != kind:
-                self.documents[other] = replace(
-                    original, originals={**original.originals, kind: document.originals[kind]},
-                )
-        self._dirty.discard(kind)
-        if self._dirty:
-            self._load(kind, self._choices())
-            self._sync_account_budget()
-        else:
-            self.refresh(force=True)
-        self._messages[kind] = kind.title() + " saved"
-        self._update_labels()
-        self.changed.emit()
-        return True
-
-    def _save_account_budget(self) -> bool:
-        """
-        Validate account edits and their budget roles together before acknowledging either draft.
-        """
-        kinds = ("accounts", "budget")
-        if self._busy or self._missing or any(
-            kind not in self.forms or kind not in self.documents for kind in kinds
-        ):
-            self._show_error("accounts", "Reload Accounts and Budget before saving account settings.")
-            return False
-        try:
-            saved = save_configurations(
-                {kind: self.documents[kind] for kind in kinds},
-                {kind: self.forms[kind].value() for kind in kinds},
-            )
-        except (ValueError, OSError, TypeError) as error:
-            self._show_error("accounts", _configuration_error(error))
-            self._update_labels()
-            return False
-        self.documents.update(saved)
-        originals = saved["accounts"].originals
-        for kind, document in tuple(self.documents.items()):
-            if kind not in saved:
-                self.documents[kind] = replace(document, originals=dict(originals))
-        self._dirty.difference_update(kinds)
-        self._account_roles_dirty = False
-        if self._dirty:
-            choices = self._choices()
-            for kind in kinds:
-                self._load(kind, choices)
-            self._sync_account_budget()
-        else:
-            self.refresh(force=True)
-        self._messages["accounts"] = "Accounts saved"
-        self._messages["budget"] = "Budget saved"
-        self._update_labels()
-        self.changed.emit()
-        return True
 
     def _reload(self, kind: str) -> None:
         """

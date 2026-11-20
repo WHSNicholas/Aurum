@@ -34,14 +34,15 @@ from PIL import Image
 # Aurum imports
 from aurum.finance.budget import BudgetReport, BudgetRow
 from aurum.finance.reports import (
-    BalanceSheet, IncomeStatement, InvestmentReport, InvestmentRow, ReportRow, Reports, ReportSettings,
+    BUDGET_COLOURS, BalanceSheet, IncomeStatement, InvestmentReport, InvestmentRow, ReportRow, Reports,
+    ReportSettings,
 )
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 STYLES = Path(__file__).with_name("styles.css")
 CHART_FONT_SIZE = 16
 
-# Keep the supplied silhouettes; normal icons are tinted in memory to match each palette or page mode.
+# Both report surfaces tint the same bundled silhouettes for the active report theme.
 ICON_FILES = {
     "assets": "asset.png",
     "liabilities": "liability.png",
@@ -49,11 +50,13 @@ ICON_FILES = {
     "income": "income.png",
     "expenses": "expense.png",
     "net_income": "net_income.png",
+    "savings": "savings.png",
+    "invested_cost": "invested_cost.png",
     "market_value": "market_value.png",
     "unrealised_gain": "unrealised_gain.png",
 }
 BUNDLED_ASSETS = ("Geist.ttf", "GeistMono.ttf", "Cormorant.ttf", *ICON_FILES.values())
-HIGHLIGHT_ICONS = {"net_worth.png", "net_income.png", "unrealised_gain.png"}
+HIGHLIGHT_ICONS = {"net_worth.png", "net_income.png", "savings.png", "unrealised_gain.png"}
 
 
 # %% 1. PDF Reports ------------------------------------------------------------------------------------------
@@ -144,6 +147,10 @@ def _theme_styles(settings: ReportSettings) -> str:
     colours = {
         name.replace("_", "-"): value for name, value in mode.model_dump().items() if value is not None
     }
+    # Both report renderers use an opaque series fill over a 20% tint of the same colour.
+    for kind, colour in BUDGET_COLOURS.items():
+        colours[kind + "-fill"] = colour
+        colours[kind + "-track"] = colour + "33"
     colours.update({
         "primary": primary,
         "table-header": theme.table_header or palette[2],
@@ -161,6 +168,10 @@ def _theme_styles(settings: ReportSettings) -> str:
             "page": theme.fixed.page, "surface": theme.fixed.surface,
             "divider": theme.fixed.divider, "group": theme.fixed.group,
         })
+    if theme.summary_card is not None:
+        colours["card"] = theme.summary_card
+    elif settings.colour_scheme == "sunset_hues":
+        colours["card"] = palette[-1]
     return "\n:root { " + " ".join(f"--report-{name}: {value};" for name, value in colours.items()) + " }\n"
 
 
@@ -665,7 +676,7 @@ def _budget_report_html(report: BudgetReport, settings: ReportSettings, generate
     cards = _cards((
         ("income", "Income", report.total_income, _budget_target(report.income_target)),
         ("expenses", "Expenses", report.total_expenses, _budget_target(report.expense_target)),
-        ("net_income", "Total Savings", report.total_savings, _budget_target(report.savings_target)),
+        ("savings", "Total Savings", report.total_savings, _budget_target(report.savings_target)),
     ))
     first_capacity = 19 if report.draft_reasons else 20
     left = _budget_pages((
@@ -776,7 +787,7 @@ def _investment_report_html(report: InvestmentReport, settings: ReportSettings, 
     """
     recorded = any(row.security_key is None for row in report.positions)
     cards = _cards((
-        ("assets", "Total Invested", report.total_cost, _count(len(report.positions), "position")),
+        ("invested_cost", "Total Invested", report.total_cost, _count(len(report.positions), "position")),
         (
             "market_value", "Portfolio Value" if recorded else "Market Value", report.total_value,
             "Includes recorded balances" if recorded else
@@ -802,7 +813,7 @@ def _investment_report_html(report: InvestmentReport, settings: ReportSettings, 
     capacity = (12 if chart else 20) - 2 * bool(report.draft_reasons)
     pages = _investment_pages(report, groups, capacity)
     return _document(
-        "Investment Report", f"Summary of Investment Portfolio as of {_date(report.as_of, superscript=True)}",
+        "Investment Report", f"Summary of Investment Holdings as of {_date(report.as_of, superscript=True)}",
         settings.display_name, cards + chart, pages, [], report.draft_reasons, generated_on,
         "investment-report", full_width=True,
     )

@@ -105,13 +105,47 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   expenses and savings. Use the shared report calculation with posted entries and the latest valid saved
   security close on or before the cutoff, matching the security and provider symbol. Both the quote's original
   requested date and price date must be on or before the cutoff; choose the newest price date and skip invalid
-  records without altering them. Refresh stays read-only and never fetches prices. Net Worth's caption uses
+  records without altering them. Overview refresh reads locally saved prices. Net Worth's caption uses
   one As of cutoff-date line (today for the current month); keep market-price dates only in its tooltip.
   When no valid saved quote exists, or a manual valuation is ambiguous, retain recorded holding values as
   in reports; mark the card
   Provisional and name affected holdings in its tooltip. Whole-account cost questions do not make their
   recorded values provisional. Apply deterministic cash-budget rules and signed refunds; incomplete budget targets
   must not block these actuals.
+  Analysis sits between Reports and Setup in the sidebar. Net Worth spans the page. At viewport widths of
+  890px and above, stack Cash Flow and Account Balances on the left with a 16px gap. Spending by Category
+  spans their combined height on the right. Keep category rows top-aligned and allow a long category list
+  to expand the account plot. At narrower widths stack Cash Flow, Account Balances and Spending by Category.
+  Net Worth and Account Balances show daily closing values
+  through the selected reporting cutoff. The 4W and 12W lines show the last 28 and 84 days. The 6M (default),
+  1Y and All lines start at the first included reporting month or posting. Carry balances
+  through quiet days. Use Sunday ticks for 4W and 12W, and calendar-month starts for longer views.
+  Right-align the Net Worth amount at 32px. Under both daily balances show the change since the first
+  visible day with a vertical bar before its percentage. Put the inspected date beside the Net Worth change.
+  Account Balances offers all balance-sheet accounts by name and uses their daily report presentation,
+  including liability signs, earnings rollover and market adjustments. Centre the
+  13px Assets and Liabilities readout below the Net Worth plot. Show exact Analysis amounts with cents and
+  ungrouped digits in charts, footers, tooltips and accessible descriptions. Keep compact chart axis labels.
+  Cash Flow groups signed Income, Expenses and Savings into one, three, six, twelve or all reporting months.
+  Centre the legend below the bars. When inspecting, show the month above the plot and amounts in the legend.
+  Give 4W and 12W wider bars. Clip full-width semicircular ends at zero for short bars. Mark the inspected month with a vertical guide
+  and the inspected value with a horizontal guide. Match daily x-axis ticks to the horizontal gridlines.
+  Use regular Cormorant small caps for all four Analysis section titles, 30px for Net Worth and 26px for
+  the other three. Place the Cash Flow month and the account selector 3px below their headings. Use the same
+  muted 11px Geist text for both. Align the account name with the heading and omit its fill and chevron.
+  Spending by Category shows one reporting month with signed amounts and shares of its total expenses.
+  Synchronise daily and monthly inspections while preserving the workspace month and selected account.
+  Click a day to pin it and click it again or press Escape to release. Use a point cue for keyboard focus.
+  Omit the plot outline, range caption and Clear selection action. Keep chart tooltips to the date and value,
+  or category, amount and percentage. Keep full valuation information in accessible descriptions.
+  Opening or refreshing Analysis shows cached history first, then fills missing completed AUD closes for
+  securities held during the visible dates. Extending the range fills its missing history. Keep daily
+  market history in a private workspace cache, separate from immutable trade quotes and published reports.
+  Keep a missing weekday close eligible for retry even if an older cache marked the surrounding range
+  complete. Briefly defer repeat requests for that date and carry forward the last eligible close quietly.
+  Log price retrieval errors in the activity log and retain valuation dates in the accessible chart details.
+  Overview and new reports share eligible saved closes. Retain recorded values for missing or ambiguous
+  valuations, and expose the dates of usable closes when current market data is unavailable.
   Lead the shared financial summary with Net Worth. Keep its cutoff date and Savings' Income less expenses
   caption. Income and Expenses show their included transaction counts: each posted journal event counts once per side,
   including manual events, gifts and signed refunds, without multiplying split postings. Use the same
@@ -125,12 +159,15 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Omit the Overview header's Updated timestamp; refresh activity stays in its existing spinner and status.
   Use local replaceable Solar Bold SVG icons and four Sources → Journal → Review → Reports cards without
   a Workflow heading. Keep the Overview quote below the cards.
-  Keep the original outline set unchanged in gui/assets/ui, with Solar assets in gui/assets/solar_bold.
+  Preserve the original outline artwork and provide corresponding outline assets for new desktop roles.
+  Keep Solar Bold artwork in gui/assets/solar_bold.
   ICON_SET in gui/icons.py selects solar_bold or outline on restart; the same resolver supplies themed
   stylesheet icons. Retain the four thin open navigation/disclosure chevrons instead of filled triangles.
   Preserve theme tinting, transparent interior details, tooltips and accessible names. Keep source URLs,
   creator attribution, licence and adaptation notes with the downloaded assets; PDF icons are independent.
-  Retain each stage's original icon on the left; completed stages use a highlighted background and an
+  Match each stage's left icon to its sidebar destination. Use a trend graph for Analysis, documents for
+  Reports, a briefcase for Securities, sliders for report settings, a cardholder for Accounts, a pie chart
+  for Budget and a palette for Theme. Completed stages use a highlighted background and an
   upper-right tick instead of status micro-labels. Align stage icons, titles and counts consistently;
   show only the title and count as text rows, with supporting details in tooltips and accessibility text.
   Use 12px normal-weight stage counts. Every unfinished stage shares one lighter panel colour;
@@ -139,8 +176,11 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   saved-activity caveat. Counts still reflect saved activity, not proof all expected statements were supplied.
   Distinguish queued answers from questions/retries and include investment classifications affecting reports.
   Each whole workflow card opens its corresponding page:
-  Sources opens Statements; Journal, Review and Reports open their namesakes. Retain keyboard activation,
+  Sources opens Transactions; Journal, Review and Reports open their namesakes. Retain keyboard activation,
   accessible names and a quiet title underline on hover or focus without introducing another stage fill.
+  Fade accepted sidebar selections over 120ms and Overview title underlines over 100ms. Emphasize a newly
+  pinned Analysis marker for 120ms. Keep page changes, chart inspection and keyboard input immediate.
+  All three effects and the range and report selectors honour the system's Reduce Motion preference.
   Omit the next-step panel entirely, including routine prompts, All done text and reserved spacing.
   Keep source scope, prerequisites and completion qualifications in relevant card tooltips and accessibility
   text. Actual workspace failures remain visible; the sidebar spinner supplies loading feedback.
@@ -171,19 +211,36 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Keep other monetary formatting unchanged. Centre the theme name on the card,
   allowing equal space on either side
   of its text. The theme popup uses rounded rows, palette previews and a checkmark for the current selection.
-  Put palette swatches on a white rounded pill in both the card and popup so each shade stays visible;
-  keep the adjustable Light/Dark control outside that preview pill.
+  Back the palette swatches with a black pill in dark workspaces and a white pill in light workspaces,
+  both in the card and the popup. Keep the adjustable Light/Dark control outside that preview pill.
   Use the same rounded popup surface and selection treatment for other dropdowns, including native outer corners.
-  Buttons retain hover, pressed and keyboard-focus backgrounds without borders or macOS focus-ring outlines.
+  Standalone action buttons have pill ends, with circular backgrounds for square icon actions. Size the
+  radius to half the shorter side. Preserve hit areas and show hover, pressed and keyboard focus through
+  borderless fills. Transparent buttons and button-like selectors show the logs button's themed highlight
+  across their hit area on hover outside table bodies. Table cells and their embedded controls retain their
+  current appearance on hover, including selected rows. Use the sidebar hover colour for sidebar actions.
+  Suppress the native macOS focus ring. Give sidebar row highlights and closed dropdowns
+  pill ends and internal padding. Use borderless fills on editable fields and inline editors, preserving
+  validation and keyboard focus. Use rounded translucent tooltip surfaces with opaque text.
+  Round activity tables and the Accounts and Securities lists at 10px. Start table scrollbars below the
+  header and match the scrollbar gutter to the table surface. Keep Journal preview outlines continuous and native report headers smoothly rounded.
+  Use pill ends for search and Setup text entries, including single-line account notes. Preserve saved
+  multiline notes through unrelated edits. Budget amounts and links share the table background at rest.
+  Omit dropdown arrows throughout and retain full-field mouse and keyboard operation.
+  Use compact 32 by 28 pixel dark pills for the Redbark and ChatGPT logo actions.
+  Entry dialogs use pill-shaped single-line fields and method tabs, with rounded text areas and tables.
   Keep the selected month and budget readiness in the card's tooltip. Align main navigation with the brand;
   indent Setup's four children.
   Keep the shared month selector at the right of the current page title on every page and Setup section.
+  On Transactions, Review and Journal, place a shared 1M / All pill below the month controls.
+  Default to 1M for each window. All browses every recorded date, independently of the working month used for
+  processing, new entries and reports. Keep Review's status filter independent and retain hidden drafts.
   Show its inclusive scheduled reporting range in 10px text beneath the month name.
   Omit years from the visible range and align its right edge
   with the final year digit in the month label, before the arrows. Retain full dates in tooltips and
   accessibility text. Use the same reporting-period calculation as reports, without shortening to today's cutoff.
   Align month and title text baselines on the same row; keep the exact reporting range in the month tooltip.
-  Align sidebar Aurum with the page title; retain Personal Finance beneath the wordmark at 13px.
+  Align sidebar Aurum with the page title and its 13px Personal Finance tagline with the report subtitle.
   Centre Aurum and Personal Finance horizontally within the sidebar. Place a short, attributed quotation
   between Setup navigation and the sidebar footer, with another centred at the bottom of Overview.
   Centre the sidebar quote and attribution together vertically between Reports and the owner's name. Keep
@@ -203,7 +260,7 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Use Solar Bold Refresh Circle for the shared refresh role and preserve the former
   artwork in the archive. Keep the month selector at the upper right.
   Empty or fully filtered activity tables show No entries inside their viewport, without a synthetic row or
-  a no-matches label above the table. Preserve useful populated counts and actual error messages.
+  a no-matches label above the table. Hide routine result counts on Transactions, Review and Journal. Show actual errors.
   Setup summary-card headings use full uppercase: ACCOUNTS, BUDGET and THEME.
   Only Budget's targets depend on that month; other Setup settings remain global.
   Reordering controls use thin local chevrons matching the month selector, never native filled arrow glyphs.
@@ -211,12 +268,13 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   and supplies generated report headers/footers; regenerate PDFs to update saved snapshots after renaming.
   Use accessible icon buttons for routine actions
   and fixed 32px Save/Reload controls in the shared bottom activity row beside the logs icon, visible only
-  in Setup. Keep explicit unsaved/error/saved states; omit idle No unsaved changes text.
+  in Setup. Show unsaved changes, validation errors and actionable warnings. Clear the footer on an
+  ordinary successful save.
   Navigation uses a compact centred Save/Discard/Cancel dialog without a question-mark graphic and never
   saves silently. Cancel and Escape retain the draft; navigation waits for an acknowledged successful save.
   Preserve selection and scroll after saving. Protect separate drafts and stale versions across multi-file saves.
   Reuse clean Setup forms when all configuration bytes are unchanged; explicit reloads still rebuild them.
-  Group accounts and securities by type and indent their entries without reordering saved definitions. Keep
+  Group accounts and securities by type. Show each type in saved order until the user reorders it. Keep
   account fields top-aligned at fixed vertical spacing. Infer bank details from BSB/account-number text; both
   blank means no bank details, while a partial pair must pass normal validation before saving. Empty bank fields
   stay editable with muted styling. Closing date is optional text, with no enable checkbox or calendar popup.
@@ -230,30 +288,43 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Budget retains monthly targets and category-account links; omit its separate cash-flow account controls.
   Review's missing repayment-category action opens Accounts and selects the affected liability.
   Display the share instrument type as Equities and label market as Exchange / market, retaining stored values.
-  Use adjacent accessible plus/bin icon buttons at the top right of each account/security list.
+  Left-align plus, bin, up and down above each account/security list. The arrows reorder within one type
+  and preserve the selected record, pending field edits, opening-balance drafts, keys and UUIDs.
+  On Setup Save, check Yahoo Finance for new securities and changes to type, symbol, market or price symbol.
+  A confirmed invalid ticker blocks the coordinated save. Offer available AUD suggestions with ticker,
+  instrument name and exchange. Applying one stages only the market data symbol for the next explicit save.
+  Save with a warning on an outage or rate limit. Skip lookups for renames and reordering alone.
+  Run validation in the background, keep quote storage untouched and recheck revisions before publishing.
+  Failed or cancelled saves retain drafts and cancel pending navigation.
   The three system equity
   accounts have fixed names, types and role mappings in Setup; retain existing legacy values without renaming.
   The theme card exposes Light/Dark only for themes with adjustable appearance; omit Fixed palette text.
   Use Cormorant regular title case at 26px for main Setup section headings and 22px for nested headings.
   Omit redundant Accounts/Securities list titles and selected-record headings above the Name field.
-  Retain grouped list labels, counts, regular Geist fields and adjacent plus/bin controls. Start Name beside
+  Give group labels and counts a permanent inset pill, with indented hover and selection pills for entries.
+  Retain regular Geist fields and adjacent plus/bin controls. Start Name beside
   the grouped list, below the plus/bin toolbar, in both Accounts and Securities. Reports' nested group titles
   use regular Geist, retaining Cormorant only for the main section heading.
-  Budget's Income, Expenses and Savings table headings use centred 16px regular Geist, without repeated totals.
+  Centre Budget’s 16px regular Geist section headings between the left add/remove and right reorder controls.
   Keep main title small caps and body/status/monetary typography unchanged. Remove generic instructional page
   copy, retaining actionable errors and necessary review guidance. Shared search fields use borderless themed backgrounds
   with hover and keyboard-focus fills, preserving the existing icon/text insets and native clearing.
   Keep detailed palette definitions
   out of the GUI, preserving existing custom settings.
-  GUI appearance follows the saved report theme on a successful workspace refresh. Keep canvas, cards and
-  controls visibly distinct using the palette, while retaining fixed light/dark appearance and sidebar identity.
-  Report colours remain unchanged. Keep it scoped to each workspace window; retain the current appearance
-  on invalid or failed refreshes. Unsaved theme choices do not change the GUI. Adapt controls, popups, icons
-  and selections for contrast while preserving budget and positive/negative meanings.
+  Apply the saved report appearance immediately on an acknowledged Setup save and on workspace refresh.
+  Keep canvas, cards and controls visibly distinct using the palette, while retaining fixed light/dark
+  appearance and sidebar identity.
+  Scope appearance to each workspace window and retain it on failed saves or refreshes. Unsaved choices
+  update the swatch preview only. Adapt controls, popups, icons and selections for contrast while preserving
+  budget and positive/negative meanings.
   Use the primary theme colour for consequential actions, clear filled selections for tabs and controls,
   and restrained table headers. Activity tables use horizontal row separators without vertical grids.
-  Sunset Hues uses its fourth palette shade (dusty rose) for GUI panels instead of the pale-yellow report
-  group fill. Keep this desktop override out of report configuration and PDF rendering.
+  Sunset Hues uses deep teal for navigation, actions and the featured report figure. Use a softer teal on
+  the Net Worth chart, cool grey-green on supporting cards, and soft sage for report section headings.
+  Darker blue-grey bands mark column headings and totals, with a faint dusty-rose tint for grouped rows.
+  Cash Flow and the other secondary chart panels share the table-body fill.
+  Desktop pages and native reports share a light canvas. PDFs retain their configured paper
+  and table surfaces. Workspace overrides take precedence.
   Assign each asset account through one
   Account / Report Group table, with direct moves and an unassigned Other Assets choice. Keep referenced missing
   keys visible for repair. Stack Asset Groups and Account-based Investments on one Reports page under the
@@ -277,7 +348,9 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Create missing workspace files explicitly before editing; failed reloads must not leave stale forms active.
 - Setup's ChatGPT settings are workspace-wide and stay inline under Accounts → Connections. Put status below
   each connection name in small muted text, with aligned API-key/model fields and two right-aligned routine
-  icon actions per row. Match field heights, backgrounds, padding and typography. Use short Not connected,
+  icon actions per row. Use the official Redbark and OpenAI marks on matching dark connection buttons.
+  The masked Redbark field shows API key or Saved API key. Match field heights, backgrounds, padding and
+  typography. Use short Not connected,
   Not checked, Connected and
   Needs attention states, with actual errors inline and explanations in tooltips. Display the saved friendly
   model in the picker before checking
@@ -292,11 +365,11 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Display friendly model labels such as GPT 6.1 - Sol while retaining exact stored model identifiers.
   Failed or cancelled checks must not claim success or navigate away from an unsaved choice.
   Keep sign-in and connection checks behind explicit actions. Discard does not undo completed authentication.
-- Statements prioritises bank Sync in the shared header-action position above the month's transactions.
+- Transactions places bank Sync and New entry in the shared header-action position above the month's transactions.
   Centre Amount, Source and Status cell contents beneath their headers. Size Date, Amount and Status from
-  their contents; use Account and Source's natural widths when possible and wrap them fully when narrow.
-  Description fills the remainder and may elide. Measure and paint wrapped text consistently, including
-  long unbroken filenames, growing rows without horizontal overflow at supported widths.
+  their contents. Account and Source use their natural widths when space permits. Description fills the
+  remainder. Keep every row 36px tall and elide overflowing cells on the right, including multiline entries.
+  Preserve full text in tooltips, search and details. Align New entry with Review's Save button.
   Read-only monetary table cells always display two decimals; keep missing values and intentional dashes.
   Omit routine connected-account counts. The PDF icon beside search opens the file chooser directly.
   Choosing or dropping PDFs reveals the pending count and explicit import controls. Keep actionable errors
@@ -325,7 +398,7 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   button with a light symbol; retain clear/retry controls and per-file outcomes in import feedback tooltips.
   Left-align the PDF chooser/count/action group and feedback within the import panel. Align chooser and search
   text with balanced icon insets; search icons sit twelve pixels inside the left edge and remain vertically
-  centred. Use the same search spacing for Statements, Manual, Review and Journal, retaining native editing
+  centred. Use the same search spacing for Transactions, Review and Journal, retaining native editing
   and clearing without shifting the prompt or icon on focus.
   Keep report-folder and backup-PDF icons centred in 36px square buttons aligned with their adjacent fields.
   Display transaction and journal descriptions in uppercase in read-only tables and detail cards;
@@ -334,9 +407,9 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Selecting a transaction shows compact details below the table, with status, signed dollar amount, dates,
   account, reference and full source wording; transaction selection never opens a popup.
   Lay statement date, effective date, account, reference and statement filename out in one horizontal metadata
-  row in Statements. Keep Review's compact transaction layout readable in its narrower pane.
+  row in Transactions for ordinary bank activity. Keep Review's compact transaction layout readable in its narrower pane.
   Display -$40.00 AUD for negative amounts and show the .pdf filename from the stored canonical stem.
-- Rename downloaded PDFs through Statements' choose/drop preparation. Keep validation, collision and stale-file
+- Rename downloaded PDFs through Transactions' choose/drop preparation. Keep validation, collision and stale-file
   checks in the shared workflow; do not maintain a separate terminal renamer.
 - GUI reviews and manual instructions save directly to SQLite without inference. Process the selected reporting
   month plus complete linked transfers/corrections; inspect global evidence without writing unrelated months.
@@ -366,7 +439,7 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   without Answer/Sources tabs. Keep an effective 24px gap from the active viewer to the question/response section.
   Answerable questions appear as the Response placeholder, tooltip and accessible description, never as
   answer content or a separate label. Keep action guidance visible for issues without a response editor.
-  The Response label is 13px medium weight above its fixed-height editor.
+  Use Review the transactions as the default placeholder and keep Response as the accessible name.
   Put Save beside Process with matching 32 by 28 pixel bounds and an 8px gap, followed by the unsaved-response
   count and discard-all-drafts control. Keep pending-answer discard beside its response, with no bottom save bar.
   Batch-save errors remain page-wide below the actions until addressed, including across selection changes.
@@ -374,17 +447,15 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Remove clipboard Copy buttons from all shared transaction and journal viewers. Their trailing header action
   accepts the owning page's icon-only edit route, preserving manual ownership, source IDs and investment focus.
   Keep bank-feed conflict decisions explicitly labelled, and use a settings icon for budget configuration issues.
-  Keep Response and its textbox together at a fixed natural height
-  when the window grows. The question displays saved AI guidance, processing explanation or required next action;
-  the card's Posted badge and postings show the accounting state. Manual shows one
-  saved-history list for instructions and direct journal entries, keyed by manual identity; latest human outcome
-  identifies a direct entry without duplicating its event.
-  Direct-entry list descriptions use the first nonempty posting description, matching the journal card;
-  instruction entries retain their instruction text. These are presentation choices, never stored-text rewrites.
-  Manual's table shows Date, Description, Amount, Source and Status, with no Account column. Source identifies
-  Instruction or Manual journal; retain linked/posting account names in tooltips and details. Unknown facts show
-  an em dash. Centre status values, including Posted, and use unsigned event totals for posted journal work.
-  Manual is the input surface: New entry directly opens the shared Manual Entry popup in Instruction mode.
+  Keep the response textbox at a fixed natural height when the window grows. The question displays saved AI guidance, processing explanation or required next action;
+  the card's Posted badge and postings show the accounting state. Transactions combines the bank and manual histories in the statement table,
+  with Date, Account, Description, Amount, Source and Status. Standalone instructions and direct entries use
+  Manual Journal as their source. Display their saved instruction or first posting description and unsigned
+  total debits when available. Use an em dash for an unknown amount. Each posted bank-backed manual event
+  appears through its actual linked bank movements. Retain each movement's date, signed amount and source.
+  Selecting a posted manual event shows all ordered postings on the right and transaction metadata on the left.
+  List distinct posting accounts and use the journal date for a standalone event. Filter each bank row by its
+  bank date, including cross-month events. New entry beside Sync opens the shared popup in Instruction mode.
   Retain the Instruction / Journal entry switcher only inside the popup, with separate text and posting drafts.
   Keep one shared typed-date field and icon-labelled Bank Transactions picker above both methods. Carry their
   values across switching; replacing edited postings needs a discard confirmation before rebuilding source rows.
@@ -397,16 +468,16 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   while switching or reloading the other method. Save only the selected method, clearly distinguishing queued
   instructions from immediate journal posting. Keep virtual savings allocations out of direct journal mode.
   Keep an always-visible Bank Transactions picker button and thin chevrons for saved outcomes. Keep Process beneath the title
-  in Review and Journal, covering saved instructions and bank transactions for the month. Manual has no separate
+  in Review and Journal, covering saved instructions and bank transactions for the month. Transactions has no separate
   Process or response editor. Editing an instruction preserves its saved response bytes and revision.
-  Read only editor-specific context when opening Manual; do not rebuild unrelated review queues. Keep a scrollbar
+  Read only editor-specific context when opening the manual editor; do not rebuild unrelated review queues. Keep a scrollbar
   gutter and show all ordinary journal posting rows without an inner table scrollbar.
   Account fields are selection-only dropdowns that open across the whole field, with keyboard navigation and
   no editable text or completer. Centre the add-posting icon in the posting table's final 48px header column;
   centre each 30px bin button beneath it with equal horizontal inset. Use Debit/Credit headings without a totals calculator; validate exact
   balance on save. Size posting options to their current budget/investment controls. Omit the Starting bank
   balance checkbox; direct new bank openings go through Setup while corrections preserve saved opening provenance.
-  Manual has search and saved history without a status filter. Omit persistent unsaved and inactive-method
+  Transactions has search and saved history without a status filter. Omit persistent unsaved and inactive-method
   discard notices. Use the shared compact, centred Discard unsaved changes? dialog for local draft discards,
   with centred Cancel/Discard text buttons and no graphic. Cancel is default and Escape keeps the draft.
   Show fixed save controls and validation errors; preserve dirty input and its original revision
@@ -420,13 +491,12 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   indicator during desktop work, with stage text only in the activity log. An unavailable investment queue prevents workflow completion.
 - Journal separates monthly processing from selected-entry actions and has no CSV exchange controls.
   Selecting an event opens a read-only panel below the table with exact debit/credit totals,
-  named postings, full source details and explicit edit/review/manual actions. Manual and Journal use the same
-  JournalDetails widget: one unsigned total-debit event amount, description, left-aligned accounting date,
+  named postings, full source details and explicit edit/review/manual actions. JournalDetails shows one unsigned total-debit event amount, description, left-aligned accounting date,
   source and linked bank account names together in one horizontal row, with a narrower posting table
   on the right capped at 480px. Stack the table
   below metadata in Review's compact pane with extra separation above the table. Use compact posting rows and
   a shared text inset for amounts, descriptions, metadata, account names, Status and Response. Leave an 18px
-  gap between saved-record tables and their detail cards in Statements, Manual and Journal. Hide the gap when
+  gap between saved-record tables and their detail cards in Transactions and Journal. Hide the gap when
   no detail card is selected. Keep Response text aligned with the card's text rather than its outer border.
   Measure actual styled row heights so up to five postings remain
   fully visible, and let the surrounding detail panel follow its content height. Omit a Sources tab. Keep
@@ -439,12 +509,41 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   categories or the reason. Cash-to-Cash events show Savings transfer without adding to report totals.
   Keep budget-impact information out of all detail viewers and editors; do not build expensive monthly impact
   previews or editor impact contexts for this UI. Preserve finance calculation APIs and accounting validation.
-  Reports has one preview view, a rounded report-type picker and an icon-only Generate play button.
-  Keep draft/error messages
-  inline, with accounting issues in Review and settings under Setup. No attention tab or report-settings button.
+  Reports uses native read-only cards, charts and selectable tables reproducing the PDF presentation,
+  with an icon-only Generate play button and a keyboard-accessible Balance, Income, Budget and Investment
+  switcher. Animate its selected segment in theme colours. Use the shared 44px Cormorant small-caps title
+  with a short report subtitle. Keep dates in the month selector. Omit the author line and page furniture.
+  Paint smooth report corners at the display scale. Give each section a rounded top heading flush with
+  its bottom-rounded body. Round both ends of table headers, group bands, totals and budget progress fills.
+  Keep scrolling content inside the rounded report canvas. Keep cells selectable for copying without
+  highlighting the selection.
+  Align the outer columns left and right in both headers and rows. Centre the middle Budget and Investment
+  columns, keep row dividers visible behind progress pills, indent securities equally within their groups,
+  and left-align expense amounts in their chart bars. In the native Income Statement, centre the span
+  from the leftmost visible category text to the longest bar under Expense Breakdown. Draw bars 25px
+  high with 8px between rows and 6px above and below the group.
+  Retain report fonts and saved report colours. Sunset Hues shares its section, summary and table colours
+  across native and printed reports. Native and generated
+  reports share icons by financial measure. Use a safe for Total Savings, banknotes for Total Invested,
+  a price tag for Market or Portfolio Value and plus/minus for Investment P&L. In two-column
+  layouts, align section tops and final totals. A single panel takes up spare height above its total.
+  Keep Liabilities and Equity on Balance, and Income and Savings on Budget, at their natural heights
+  with any spare space between them. At narrow widths stack sections at their natural heights.
+  Use one continuous vertical scroll, with investment-table horizontal scrolling
+  only when needed to retain complete figures. Keep the PDF renderer, stylesheet and assets unchanged.
+  Generation publishes a versioned .aurum-report-view.json beside the four monthly PDFs, using the exact
+  same Reports, ReportSettings and generation date. Stage all outputs and publish the dashboard snapshot
+  last; failed publication never claims success or replaces the last dashboard result. Reading snapshots
+  is read-only, validates month/version and warns when PDF hashes differ. Existing months require one
+  Generate to create native report data. Reopening, month changes and refresh restore the last generated
+  figures. Display them with the workspace's currently saved report colours while keeping their original
+  period and financial content. Theme changes reach the saved PDFs on the next explicit Generate.
+  Viewing a report never recalculates accounting or fetches prices. No database migration.
+  Keep actionable errors inline and draft reasons in Generate's tooltip. Show a report icon before a first
+  generation. Accounting issues live in Review and settings under Setup.
   Show the output folder in Generate's tooltip; omit saved timestamps, external-open and save-copy controls.
   Saved files and last-generation messages never certify that reports reflect later changes.
-  Preserve preview choices for unchanged files, clear stale previews when files/months change and distinguish
+  Preserve report selection and scroll for unchanged data, clear views on month/output-directory changes and distinguish
   missing or unreadable output from generation failure. Cancelled work must not claim completion.
   Keep inspection available while preventing competing writes.
 - Direct journal editing saves a complete balanced event immediately, without AI. Preserve imported bank facts,
@@ -494,7 +593,10 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Map external account/transaction IDs permanently to immutable Aurum transaction UUIDs in additive feed
   tables. Repeat unchanged observations are no-ops. Missing observations never delete transactions.
   Compare same-ID descriptions and extended descriptions case-insensitively and amounts numerically, keeping
-  original payloads and stored transactions unchanged. Preserve strict integer-cent validation for new provider
+  original payloads and stored transactions unchanged. Missing, null and blank extended descriptions are
+  compatible with earlier wording. Retain the richest compatible observation. Two differing nonblank values
+  conflict even when separated by a sparse observation. Recheck saved conflicts on each successful
+  account sync and show the last accepted and incoming values for genuinely differing fields. Preserve strict integer-cent validation for new provider
   observations. Casing/formatting-only conflicts clear atomically on a successful sync; substantive fact
   changes still require Review.
   Deduplicate Redbark observations only by their external account/transaction IDs. Import unseen IDs
@@ -515,7 +617,7 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   An enabled connection always runs one startup sync after the first workspace display. Retire automatic-sync
   checkboxes and ignore legacy false preferences without rewriting them on refresh. Ordinary refresh remains
   read-only and never schedules another startup sync. Sync is
-  also available on Statements and never runs Process or AI. Keep feed errors and last successful checks
+  also available on Transactions and never runs Process or AI. Keep feed errors and last successful checks
   visible without claiming live-bank freshness. Feed-owned periods do not require final PDF statements;
   current periods remain Up to date, while missing coverage or conflicts withhold workflow completion.
   Disconnect removes the local credential and stops syncing while retaining all source and journal history.
@@ -610,8 +712,8 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Show every configured account in its relevant financial statement, including unused accounts at $0.00.
   Group Superannuation and Real Estate with the other Investments on the balance sheet.
 - Choose `colour_scheme` in `config/reports.yaml`: a configured theme key or the built-in `teal` (default),
-  `navy_blue`, `plum_purple`, `forest_green`, `burgundy`, `copper`, `tranquil_earth`, `warm_neutrals`,
-  `velvet_neutrals`, `twilight_mauve` or `sunset_hues`. Ship all eleven in the tracked `DEFAULT_THEMES`
+  `navy_blue`, `plum_purple`, `forest_green`, `burgundy`, `tranquil_earth`, `warm_neutrals`,
+  `velvet_neutrals`, `twilight_mauve` or `sunset_hues`. Ship all ten in the tracked `DEFAULT_THEMES`
   catalogue so cloned and new workspaces have them without private configuration. Local theme definitions
   override built-ins; keep personal report configuration excluded from Git. Apply themes to report accents,
   icons and charts.
@@ -680,24 +782,31 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   `YYYY-MM Investment Report.pdf` under the configured output folder's `YYYY-MM/` subfolder
   (default `data/reports/YYYY-MM/`). Render all four before replacing previous outputs.
 - Keep ordered budget categories, monthly fixed targets and overrides in private
-  `config/budget.yaml`. The desktop edits fixed dollar targets only, with no transaction tracking in Setup.
+  `config/budget.yaml`. Setup Budget accepts whole-dollar monthly targets. Show existing fractional
+  amounts exactly for correction before saving that month's budget. Use the clock icon for Use last month's
+  budget. Keep transaction tracking out of Setup.
   New workspaces use independent monthly plans: absent months have blank amounts and Copy last month explicitly
   stages a copy. Persist the cutoff in optional monthly_plans_from; earlier months retain legacy defaults and
   overrides. Load older plans unchanged; the first explicit budget edit adopts monthly plans from that month
   and materializes existing future overrides before changing targets. Never convert merely on viewing a month.
   Show income above separate expense and savings segmented pills on one shared amount scale, with blue/red/green
-  category shades and exact hover amounts. Use a consistent muted blue/red/green GUI palette independent of
-  saved report-theme budget overrides. Keep this chart beneath the Budget heading outside the amounts
+  category shades and exact hover amounts. In both appearances use #2D6EB6 for Income, #CE4346 for
+  Expenses and #75C876 for Savings in Setup allocations, Analysis Cash Flow and Budget Report progress fills.
+  Give equal allocations the same shade and mix in up to 55% white across successively smaller amounts.
+  Budget Report fills use the solid base colours over subdued tracks in both the app and PDF.
+  Keep this chart beneath the Budget heading outside the amounts
   scroll area. Sort each pill's segments by descending amount, darkest to lightest; keep thick rounded ends
   and visible positive allocations at a 10px minimum, without changing exact labels. Place expense/savings
   totals above their pills, using opposite edges when needed for readable labels. Omit the positive balance
   notice and routine incomplete-amount instructions; retain actionable validation and imbalance errors.
   Add space between the fixed chart and the amount tables. Keep Income, Expenses and Savings side by side
   at every supported width, including the minimum window. Each table scrolls vertically independently while
-  the chart stays fixed. Use compact Category, Amount and Links columns without vertical cell dividers,
-  reserving at least 104px for Amount, then sharing remaining width 40/60 between Category and Links while
-  retaining legible headers. Links shows complete account names and a thin dropdown chevron; wrap names and
-  expand rows as needed, keeping amount inputs compact and vertically centred. Use an anchored multi-select dropdown;
+  the chart stays fixed. Divide each table viewport equally between Category, Amount and Links, allowing
+  a one-pixel rounding difference. Match the Transactions table's body font for category names, their editors
+  and links. Round the outer table corners across the header and scrollbar gutter.
+  Keep the monetary font for Amount. Centre linked names in the same muted colour as Auto and keep the entire
+  field clickable without a chevron. Wrap names and expand rows as needed, keeping amount inputs compact
+  and vertically centred. Use an anchored multi-select dropdown;
   automatic destinations show Auto. Preserve category selection and each table's scroll through rebuilds.
   Keep malformed legacy categories reachable in a repair dialog that changes only the Setup draft.
   Use borderless action icons and no Section action. Long names and amounts remain available without creating
@@ -766,7 +875,7 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Display unavailable investment figures as `-`, including summary cards and totals. Indent holding symbols
   beneath their asset-class headings using the balance sheet's account indentation. Use Cryptocurrencies
   as the report class label; keep the instrument-type value `crypto` separate from account keys and names.
-  Use Summary of Investment Portfolio as of the cutoff date as the subtitle. Portfolio Allocation labels
+  Use Summary of Investment Holdings as the subtitle and append the cutoff date in the PDF. Portfolio Allocation labels
   use the expense chart's fonts at a 20% larger rendered size: Geist labels and Geist Mono values.
   Assign investment donut colours from medium to lighter shades in the existing asset-class order for all
   themes and page modes. Evenly sample 25%–65% of the palette for the displayed class count, blending shades
@@ -784,6 +893,8 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   outside-labelled allocation donut and compact holdings table with asset-class subtotal bands.
 - Whole-account investment postings carry explicit contribution, earnings or opening-cost treatment in the
   optional `journal_account_investments` table. Net contributions add cost; earnings change value but not cost.
+  UniSuper taxes, administration fees and rebates adjust capital by their signed amounts. A two-line fund
+  charge against expense or income may reduce basis. A withdrawal into an asset retains disposal validation.
   For UNISUPER, credit Unrealised Capital Gains for fund earnings, keeping them outside personal income/budget
   income. Opening cost must be supplied separately from opening value. Unclassified movements keep cost unknown.
   Preserve metadata in atomic corrections and revisions; omit absent fields to retain older snapshot identities.
@@ -792,7 +903,7 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Reports links to that queue. Open complete events at the indicated posting in the direct editor. Classification
   and opening historical cost require explicit human choices. Refresh the queue after saves and regenerate
   reports to clear resolved draft notices.
-  Investment treatment uses an explicit Qt list popup with a visible thin chevron in the posting's details.
+  Investment treatment uses an explicit Qt list popup in the posting's details.
   Show it only for configured account-based holdings or existing treatment metadata. Label the choices
   Unclassified, Capital in / out, Return or fee and Opening balance, with a brief cost-basis explanation.
   Unclassified preserves an existing absent or explicit unclassified value until deliberately changed.

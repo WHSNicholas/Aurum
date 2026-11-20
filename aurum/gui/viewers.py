@@ -13,9 +13,10 @@ from copy import deepcopy
 from decimal import Decimal
 import json
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QPainter, QPainterPath
 from PySide6.QtWidgets import (
-    QAbstractItemView, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QGraphicsEffect, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
     QPlainTextEdit, QSizePolicy, QTableWidget, QTableWidgetItem, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -108,7 +109,8 @@ class TransactionDetails(QWidget):
     action_requested = Signal(str, object)
     dismissed = Signal()
 
-    def __init__(self, parent=None, *, dismissible: bool = True, compact: bool = False):
+    def __init__(self, parent=None, *, dismissible: bool = True, compact: bool = False,
+                 manual_postings: bool = False):
         """
         Build an inline inspector that leaves remaining page space for the transaction table.
         """
@@ -132,13 +134,16 @@ class TransactionDetails(QWidget):
             self.amount.setWordWrap(False)
             self.amount.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
         summary.addWidget(self.amount)
-        self.status = _value("", "viewerStatus")
+        self.status = _status_badge()
         summary.addWidget(self.status)
         summary.addStretch()
-        self.edit_button = _icon_button("Edit transaction", "pen")
+        self.edit_button = _icon_button("Edit transaction", "edit")
         self.edit_button.clicked.connect(self._edit)
         self.edit_button.hide()
         summary.addWidget(self.edit_button)
+        self.review_button = _icon_button("Open instruction in Review", "review")
+        self.review_button.hide()
+        summary.addWidget(self.review_button)
         close = _icon_button("Hide transaction details", "close")
         close.clicked.connect(self.dismissed.emit)
         close.setVisible(dismissible)
@@ -153,8 +158,19 @@ class TransactionDetails(QWidget):
         self.description.document().setDocumentMargin(0)
         self.description.setAccessibleName("Full bank description")
         self.description.setFixedHeight(46)
-        self.layout.addWidget(self.description)
+        content = QHBoxLayout()
+        content.setSpacing(16)
+        left = QVBoxLayout()
+        content.addLayout(left, 3)
+        left.addWidget(self.description)
+        self.layout.addLayout(content)
+        self.postings = _PostingPreview() if manual_postings else None
+        if self.postings is not None:
+            self.postings.setMaximumWidth(480)
+            content.addWidget(self.postings, 2, Qt.AlignmentFlag.AlignTop)
         facts = QGridLayout()
+        self._facts_layout = facts
+        self._fact_labels = []
         facts.setContentsMargins(10, 0, 0, 0)
         facts.setHorizontalSpacing(24)
         facts.setVerticalSpacing(3)
@@ -166,6 +182,7 @@ class TransactionDetails(QWidget):
             columns = 2 if compact else 5
             column, row = index % columns, (index // columns) * 2
             caption = _label(label)
+            self._fact_labels.append(caption)
             facts.addWidget(caption, row, column)
             if key == "date":
                 self.date_caption = caption
@@ -184,12 +201,14 @@ class TransactionDetails(QWidget):
             facts.setColumnStretch(5, 1)
         source_row, source_column = (4, 0) if compact else (0, 4)
         span = 2 if compact else 1
-        facts.addWidget(_label("Source"), source_row, source_column, 1, span)
+        self._fact_labels.append(_label("Source"))
+        facts.addWidget(self._fact_labels[-1], source_row, source_column, 1, span)
         self.source = _value()
         if not compact:
             self.source.setMaximumWidth(240)
         facts.addWidget(self.source, source_row + 1, source_column, 1, span)
-        self.layout.addLayout(facts)
+        left.addLayout(facts)
+        left.addStretch()
         self.update_record(None, {})
 
     def set_busy(self, busy: bool) -> None:
@@ -224,22 +243,42 @@ class TransactionDetails(QWidget):
             if addition != status:
                 status += " · " + addition
         self.status.setText(status)
+        lines = record.get("postings") or []
+        if self.postings is not None:
+            self.postings.set_postings(lines)
+            columns = 3 if lines else 5
+            facts = self._facts_layout
+            facts.setHorizontalSpacing(12 if lines else 24)
+            pairs = zip(self._fact_labels, [*self.fields.values(), self.source])
+            for index, (caption, value) in enumerate(pairs):
+                row, column = divmod(index, columns)
+                facts.addWidget(caption, row * 2, column)
+                facts.addWidget(value, row * 2 + 1, column)
+                facts.setColumnMinimumWidth(index, 0 if lines else (108, 108, 136, 96, 200)[index])
+            facts.setColumnStretch(3, int(bool(lines)))
+            facts.setColumnStretch(5, int(not lines))
         for key, value in self.fields.items():
             text = str(record.get(key) or "—")
             if key == "transfer_reference" and text != "—":
                 text = "#" + text
+            if key == "account" and self.postings is not None and lines:
+                text = "\n".join(dict.fromkeys(line["account"] for line in lines if line.get("account"))) or text
             value.setText(text)
             value.setToolTip(text)
-        self.fields["account"].setToolTip(
-            str(record.get("account") or "") + "\nAccount ID: " + str(record.get("account_id") or "")
-        )
+        if record.get("account_id") and not lines:
+            self.fields["account"].setToolTip(
+                str(record.get("account") or "") + "\nAccount ID: " + str(record["account_id"])
+            )
         evidence = record.get("bank_source") or {}
         source_file = str(record.get("source_file") or "")
         from_feed = source_file.casefold().startswith("redbark:") or record.get("kind") == "feed"
-        self.date_caption.setText("Booking date" if from_feed else "Statement date")
+        bank_booking = from_feed and not record.get("manual_entry_id")
+        self.date_caption.setText("Booking date" if bank_booking else "Statement date")
         source_label = str(record.get("source_label") or "Redbark · ANZ Plus") if from_feed else (
             _statement_name(source_file)
         )
+        if record.get("source_label") == "Manual Journal":
+            source_label = "Manual Journal"
         self.source.setText(source_label)
         source_details = source_label
         if evidence:
@@ -266,7 +305,7 @@ class TransactionDetails(QWidget):
 
     def set_header_action(
         self, label: str | None, callback: Callable[[], None] | None = None,
-        *, symbol: str = "pen", enabled: bool = True,
+        *, symbol: str = "edit", enabled: bool = True,
     ) -> None:
         """
         Let the owning page supply its exact edit route without weakening snapshot availability guards.
@@ -284,6 +323,8 @@ class TransactionDetails(QWidget):
         """
         Allow the page's header action only for a selected, current transaction while no job is running.
         """
+        self.review_button.setVisible(bool(self.record.get("show_review")))
+        self.review_button.setEnabled(self._available())
         self.edit_button.setVisible(self._show_actions)
         self.edit_button.setEnabled(
             self._show_actions and self._available() and self._header_enabled and callable(self._header_callback)
@@ -307,7 +348,7 @@ class JournalDetails(_RecordPanel):
 
     def __init__(self, parent=None, *, actions: bool = True, dismissible: bool = True, compact: bool = False):
         """
-        Build the shared inline journal card used by Journal, Manual and Review.
+        Build the shared inline journal card used by Journal and Review.
         """
         super().__init__("Journal entry", 960, 300, parent)
         self.setMinimumHeight(0)
@@ -325,11 +366,10 @@ class JournalDetails(_RecordPanel):
         self.amount.setWordWrap(False)
         self.summary = self.amount
         summary.addWidget(self.amount)
-        self.status = QLabel()
-        self.status.setObjectName("viewerStatus")
+        self.status = _status_badge()
         summary.addWidget(self.status)
         summary.addStretch()
-        self.edit_button = _icon_button("Edit journal entry", "pen")
+        self.edit_button = _icon_button("Edit journal entry", "edit")
         self.edit_button.clicked.connect(self._edit)
         self.edit_button.setVisible(actions)
         summary.addWidget(self.edit_button)
@@ -368,24 +408,11 @@ class JournalDetails(_RecordPanel):
             value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             facts.addWidget(value, 1, index)
             self.fields[key] = value
-        facts.setColumnStretch(1, 1)
-        facts.setColumnStretch(2, 1)
+        facts.setColumnStretch(3, 1)
         metadata_layout.addLayout(facts)
         content.addWidget(metadata, 0 if compact else 3, Qt.AlignmentFlag.AlignTop)
-        self.postings = _table(("Account", "Debit", "Credit"))
-        self.postings.setObjectName("journalPostingPreview")
-        self.postings.setWordWrap(False)
-        self.postings.verticalHeader().setMinimumSectionSize(28)
+        self.postings = _PostingPreview()
         self.postings.setMaximumWidth(720 if compact else 480)
-        self.postings.setMinimumWidth(0)
-        self.postings.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.postings.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        header = self.postings.horizontalHeader()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (1, 2):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-            self.postings.setColumnWidth(column, 94)
         content.addWidget(self.postings, 0 if compact else 2, Qt.AlignmentFlag.AlignTop)
         self.layout.addLayout(content)
         self.update_record(None, {})
@@ -448,23 +475,7 @@ class JournalDetails(_RecordPanel):
         self.description.setToolTip(str(
             (self._owner or {}).get("instruction") or record.get("description") or ""
         ))
-        self.postings.setRowCount(len(lines))
-        for row, line in enumerate(lines):
-            for column, field in enumerate(("account", "debit", "credit")):
-                value = line.get(field)
-                text = str(value or "") if field == "account" else (
-                    _aud(value, code=False) if Decimal(str(value or 0)) else "—"
-                )
-                item = QTableWidgetItem(text)
-                item.setToolTip(_facts(line, internal=False))
-                if column:
-                    item.setFont(monetary_font(self.postings.font()))
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.postings.setItem(row, column, item)
-        self.postings.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff if len(lines) <= 5 else Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-        self.postings.setVisible(bool(lines))
+        self.postings.set_postings(lines)
         self._update_actions()
         self._size_to_content()
 
@@ -480,15 +491,7 @@ class JournalDetails(_RecordPanel):
         Keep the inline panel only as tall as its visible metadata and ordinary posting rows.
         """
         self.ensurePolished()
-        self.postings.ensurePolished()
-        row_height = max(28, self.postings.fontMetrics().height() + 8)
-        for row in range(self.postings.rowCount()):
-            self.postings.setRowHeight(row, row_height)
-        header = self.postings.horizontalHeader()
-        # Qt's styled row minimum can exceed a requested row height; measure the actual visible sections.
-        height = max(header.height(), header.sizeHint().height()) + 2 * self.postings.frameWidth()
-        height += sum(self.postings.rowHeight(row) for row in range(min(5, self.postings.rowCount())))
-        self.postings.setFixedHeight(height)
+        self.postings.fit_rows()
         self._metadata.layout().invalidate()
         self._metadata.layout().activate()
         self._metadata.updateGeometry()
@@ -507,7 +510,7 @@ class JournalDetails(_RecordPanel):
 
     def set_header_action(
         self, label: str | None, callback: Callable[[], None] | None = None,
-        *, symbol: str = "pen", enabled: bool = True,
+        *, symbol: str = "edit", enabled: bool = True,
     ) -> None:
         """
         Override the trailing edit action while preserving the owning page's source and review routes.
@@ -548,6 +551,99 @@ class JournalDetails(_RecordPanel):
             self._request("open_manual_editor", {
                 "manual_entry_id": self.record["manual_entry_id"], "mode": "instruction",
             })
+
+class _PostingPreview(QTableWidget):
+    """
+    Keep row selection inside the Journal posting table's rounded outline.
+    """
+
+    def __init__(self) -> None:
+        """
+        Show ordered account names and both posting amounts as read-only rows.
+        """
+        super().__init__(0, 3)
+        self.setHorizontalHeaderLabels(("Account", "Debit", "Credit"))
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.verticalHeader().hide()
+        self.verticalHeader().setDefaultSectionSize(36)
+        self.setShowGrid(False)
+        self.viewport().setGraphicsEffect(_PostingClip(self.viewport()))
+        self.setObjectName("journalPostingPreview")
+        self.setWordWrap(False)
+        self.verticalHeader().setMinimumSectionSize(28)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        header = self.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in (1, 2):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.setColumnWidth(column, 94)
+
+    def set_postings(self, lines: list[dict]) -> None:
+        """
+        Display the selected event's ordered debit and credit lines.
+        """
+        self.setRowCount(len(lines))
+        for row, line in enumerate(lines):
+            for column, field in enumerate(("account", "debit", "credit")):
+                value = line.get(field)
+                text = str(value or "") if field == "account" else (
+                    _aud(value, code=False) if Decimal(str(value or 0)) else "—"
+                )
+                item = QTableWidgetItem(text)
+                item.setToolTip(_facts(line, internal=False))
+                if column:
+                    item.setFont(monetary_font(self.font()))
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.setItem(row, column, item)
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff if len(lines) <= 5 else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.setVisible(bool(lines))
+        self.fit_rows()
+
+    def fit_rows(self) -> None:
+        """
+        Fit up to five complete styled rows and scroll longer events.
+        """
+        self.ensurePolished()
+        row_height = max(28, self.fontMetrics().height() + 8)
+        for row in range(self.rowCount()):
+            self.setRowHeight(row, row_height)
+        header = self.horizontalHeader()
+        # Qt's styled row minimum can exceed a requested row height; measure the actual visible sections.
+        height = max(header.height(), header.sizeHint().height()) + 2 * self.frameWidth()
+        height += sum(self.rowHeight(row) for row in range(min(5, self.rowCount())))
+        self.setFixedHeight(height)
+
+
+class _PostingClip(QGraphicsEffect):
+    """
+    Paint row selections inside the curved inner edge at the device's native resolution.
+    """
+
+    def draw(self, painter: QPainter) -> None:
+        """
+        Clip the complete viewport, including the native selection painted behind each cell.
+        """
+        viewport = self.parent()
+        table = viewport.parentWidget()
+        inset = table.frameWidth()
+        inner = QRectF(table.rect().adjusted(inset, inset, -inset, -inset))
+        inner.translate(-viewport.x(), -viewport.y())
+        path = QPainterPath()
+        path.addRoundedRect(inner, 7, 7)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+        pixels = self.sourcePixmap(Qt.CoordinateSystem.LogicalCoordinates, None, self.PixmapPadMode.NoPad)
+        painter.drawPixmap(0, 0, pixels)
+        painter.restore()
+
 
 # %% 4. Helpers ----------------------------------------------------------------------------------------------
 def _set_action_icon(button: QToolButton, symbol: str) -> None:
@@ -606,6 +702,18 @@ def _value(text: str = "", name: str = "viewerValue") -> QLabel:
     return label
 
 
+def _status_badge() -> QLabel:
+    """
+    Centre the status in a compact pill that hugs its text.
+    """
+    label = _value("", "viewerStatus")
+    label.setWordWrap(False)
+    label.setFixedHeight(24)
+    label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    return label
+
+
 def _icon_button(label: str, symbol: str) -> QToolButton:
     """
     Expose a compact named viewer action without relying on an unexplained glyph alone.
@@ -620,21 +728,6 @@ def _icon_button(label: str, symbol: str) -> QToolButton:
     button.setToolTip(label)
     button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     return button
-
-
-def _table(labels: tuple[str, ...]) -> QTableWidget:
-    """
-    Create a read-only single-row-selection table for ordered saved facts.
-    """
-    table = QTableWidget(0, len(labels))
-    table.setHorizontalHeaderLabels(labels)
-    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-    table.verticalHeader().hide()
-    table.verticalHeader().setDefaultSectionSize(36)
-    table.setShowGrid(False)
-    return table
 
 
 def _selected_row(table: QTableWidget) -> int:

@@ -277,7 +277,7 @@ def _counterpart_question(
     if account.key in budget.investment_accounts and row.amount > 0:
         return (
             "Was this cash from an already recorded sale, a security sale, or a balance-only fund withdrawal? "
-            "Supply the sale units and proceeds, or confirm the fund value and cost basis in Manual."
+            "Supply the sale units and proceeds, or confirm the fund value and cost basis in Transactions."
         )
     if (
         account.account_type == AccountType.EQUITY and row.amount < 0

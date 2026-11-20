@@ -48,6 +48,10 @@ TransparentColour = Annotated[
 ]
 ColourScheme = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$", strict=True)]
 
+# Shared chart colours. Smaller allocations mix in up to this fraction of white.
+BUDGET_COLOURS = {"income": "#2D6EB6", "expenses": "#CE4346", "savings": "#75C876"}
+BUDGET_ALLOCATION_TINT = 0.55
+
 
 # %% 1. Report Models ----------------------------------------------------------------------------------------
 class ReportColours(BaseModel):
@@ -153,7 +157,8 @@ class ReportTheme(BaseModel):
 
     Palette colours run from darkest to lightest, with at least three quoted six-digit hex values. The first
     three shades colour major headings, highlighted cards and column headings unless explicitly overridden.
-    Total bands share the column-heading colours. Highlight_text overrides highlighted-card subtext;
+    Total bands share the column-heading colours. Summary_card can give ordinary metrics a separate fill.
+    Highlight_text overrides highlighted-card subtext;
     otherwise it uses the last palette shade. Group colours shade asset-class rows with optional alpha bytes.
     Page colours cover the whole sheet, including margins; surfaces fill cards and tables.
     Divider colours apply to header, footer and table-row lines. Cards and panels have no visible outlines.
@@ -165,6 +170,7 @@ class ReportTheme(BaseModel):
 
     palette: tuple[HexColour, ...] = Field(min_length=3)
     primary: HexColour | None = None
+    summary_card: HexColour | None = None
     table_header: HexColour | None = None
     highlight: HexColour | None = None
     highlight_text: HexColour | None = None
@@ -196,9 +202,6 @@ DEFAULT_THEMES: Mapping[ColourScheme, ReportTheme] = MappingProxyType({
     ),
     "burgundy": ReportTheme(
         palette=("#462331", "#623545", "#82465a", "#9f6374", "#bb8793", "#d2adb5", "#e8d4d8"),
-    ),
-    "copper": ReportTheme(
-        palette=("#462e22", "#654431", "#875e43", "#a37a5e", "#be997d", "#d7bca4", "#eadacf"),
     ),
     "tranquil_earth": ReportTheme(
         palette=("#73877B", "#839788", "#BDBBB5", "#E5D1CF", "#F5E4D7"),
@@ -274,13 +277,14 @@ DEFAULT_THEMES: Mapping[ColourScheme, ReportTheme] = MappingProxyType({
     ),
     "sunset_hues": ReportTheme(
         palette=("#4D6A6D", "#798478", "#A0A083", "#C9ADA1", "#EAE0CC"),
-        primary="#4D6A6D", table_header="#A0A083", highlight="#798478", highlight_text="#080B0B",
+        primary="#CCD4CE", summary_card="#D8E0DF", table_header="#AFBDBB",
+        highlight="#4D6A6D", highlight_text="#F7F3EB",
         fixed=ReportAppearance(
-            page="#D6D0C4", surface="#F7F3EB", divider="#999983", group="#D9D9BA",
+            page="#D6D0C4", surface="#E0E6E4", divider="#999983", group="#C9ADA138",
             colours=ReportColours(
                 heading_text="#080B0B", group_text="#080B0B", icon="#4D6A6D", chart_text="#080B0B",
-                text="#080B0B", muted="#4D6A6D", on_primary="#F7F3EB", on_table_header="#080B0B",
-                on_highlight="#080B0B", positive="#677066", negative="#796861", remaining="#080B0B",
+                text="#080B0B", muted="#4D6A6D", on_primary="#263B3C", on_table_header="#303E3D",
+                on_highlight="#F7F3EB", positive="#677066", negative="#796861", remaining="#080B0B",
                 budget_income="#4D6A6D", budget_expenses="#796861", budget_savings="#677066",
                 income_track="#C9ADA1", income_fill="#73635C",
                 expenses_track="#C9ADA1", expenses_fill="#73635C",
@@ -826,8 +830,7 @@ def build_reports(
                     current_profit += net_credit
             if line.account_id == retained.id and entry.date < period.year_start:
                 earlier_retained += net_credit
-    balances[capital.id] = balances.get(capital.id, 0) - earlier_profit - earlier_retained
-    balances[retained.id] = balances.get(retained.id, 0) - current_profit + earlier_retained
+    apply_equity_earnings(balances, capital.id, retained.id, earlier_profit, current_profit, earlier_retained)
 
     common_drafts = tuple(dict.fromkeys(draft_reasons))
     notes = [
@@ -879,6 +882,18 @@ def build_reports(
     )
 
 
+def holding_market_value(units: Decimal, price: Decimal) -> Decimal:
+    """
+    Value one account's security holding in AUD, rounding the complete position to the nearest cent.
+    """
+    with localcontext() as context:
+        context.prec = max(
+            50, len(units.as_tuple().digits) + len(price.as_tuple().digits)
+            + max(0, units.adjusted() + price.adjusted()) + 5,
+        )
+        return (units * price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def recorded_net_worth(
     entries: Iterable[JournalEntry], accounts: AccountRegistry, cutoff: date,
 ) -> Decimal:
@@ -899,6 +914,17 @@ def recorded_net_worth(
 
 
 # %% 4. Helpers ----------------------------------------------------------------------------------------------
+def apply_equity_earnings(
+    balances: dict[UUID, int], capital: UUID, retained: UUID, earlier_profit: int,
+    current_profit: int, earlier_retained: int,
+) -> None:
+    """
+    Present prior earnings in Capital and current reporting-year earnings in Retained Earnings.
+    """
+    balances[capital] = balances.get(capital, 0) - earlier_profit - earlier_retained
+    balances[retained] = balances.get(retained, 0) - current_profit + earlier_retained
+
+
 def _validate_settings(settings: ReportSettings, accounts: AccountRegistry) -> None:
     """
     Require existing equity presentation accounts and valid, uniquely grouped assets.
@@ -1067,12 +1093,7 @@ def _value_holdings(
                 or quote.symbol != price_symbol(security)
             ):
                 raise ValueError("The supplied quote must match the security and be on or before the cutoff")
-            with localcontext() as context:
-                context.prec = max(
-                    50, len(holding.units.as_tuple().digits) + len(quote.price.as_tuple().digits)
-                    + max(0, holding.units.adjusted() + quote.price.adjusted()) + 5,
-                )
-                market_value = (holding.units * quote.price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            market_value = holding_market_value(holding.units, quote.price)
             adjustment = _cents(market_value) - _cents(holding.cost_basis)
             gain = _money(adjustment)
             positions.append(InvestmentRow(

@@ -80,11 +80,11 @@ class BudgetForm(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(8)
         self.copy_month = QToolButton(self)
-        self.copy_month.setIcon(icon("copy", size=18))
+        self.copy_month.setIcon(icon("clock", size=18))
         self.copy_month.setIconSize(QSize(18, 18))
         self.copy_month.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.copy_month.setFixedSize(30, 30)
-        self.copy_month.setAccessibleName("Copy last month's budget")
+        self.copy_month.setAccessibleName("Use last month's budget")
         self.copy_month.clicked.connect(self._copy_previous)
         self.copy_month.hide()
         self.chart = BudgetAllocationChart()
@@ -131,13 +131,18 @@ class BudgetForm(QWidget):
             title = QLabel(name)
             title.setObjectName("budgetSection")
             title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            section.addWidget(title)
             action_row = QWidget()
             action_row.setFixedHeight(28)
             actions = QHBoxLayout(action_row)
             actions.setContentsMargins(0, 0, 0, 0)
             actions.setSpacing(4)
-            actions.addStrut(28)
+            left = QHBoxLayout()
+            left.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            right = QHBoxLayout()
+            right.setAlignment(Qt.AlignmentFlag.AlignRight)
+            actions.addLayout(left, 1)
+            actions.addWidget(title)
+            actions.addLayout(right, 1)
             controls = []
             for symbol, label, callback in (
                 ("add", "Add category", lambda _checked=False, selected=kind: self._add_category(selected)),
@@ -149,22 +154,23 @@ class BudgetForm(QWidget):
                 button.setObjectName("budgetAction")
                 button.setAutoRaise(True)
                 button.setFixedSize(28, 28)
-                size = 14 if symbol in {"up", "down"} else 18
+                size = 22 if symbol in {"up", "down"} else 18
                 button.setIcon(icon(symbol, size=size))
                 button.setIconSize(QSize(size, size))
                 button.setToolTip(label)
                 button.setAccessibleName(label)
                 button.clicked.connect(callback)
-                actions.addWidget(button)
+                group = right if symbol in {"up", "down"} else left
+                group.addWidget(button)
                 controls.append(button)
             controls[0].setVisible(kind not in {"unknown", "savings"})
             if kind == "savings":
                 for control in controls:
                     control.hide()
-            actions.addStretch()
             section.addWidget(action_row)
             table = _BudgetCategoryTable()
             table.setObjectName("budgetCategoryTable")
+            table.setProperty("roundedTable", True)
             table.setMinimumSize(0, 0)
             table.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
             table.setShowGrid(False)
@@ -214,6 +220,23 @@ class BudgetForm(QWidget):
         Return the whole draft for shared validation and comment-preserving configuration persistence.
         """
         return deepcopy(self.data)
+
+    def validate_targets(self) -> None:
+        """
+        Require whole-dollar targets for the displayed month without rounding saved or draft amounts.
+        """
+        for key, amount in _raw_targets(self.data, self._month).items():
+            if amount is None or str(amount).strip() == "":
+                continue
+            name = self.categories.get(key, {}).get("name", key)
+            try:
+                value = Decimal(str(amount))
+            except InvalidOperation:
+                raise ValueError(f"{name}: enter a whole-dollar amount.") from None
+            if not value.is_finite() or value != value.to_integral_value():
+                raise ValueError(
+                    f"{name}: enter a whole-dollar amount; existing cents have not been rounded."
+                )
 
     def account_roles(self) -> dict:
         """
@@ -298,6 +321,11 @@ class BudgetForm(QWidget):
             key = watched.property("budgetCategory")
             if key in self.categories:
                 self._select_key(key)
+        elif event.type() == QEvent.Type.FocusOut and isinstance(watched, QLineEdit):
+            if watched.property("budgetCategory") in self.categories:
+                watched.blockSignals(True)
+                watched.setText(_target_text(watched.text()))
+                watched.blockSignals(False)
         return super().eventFilter(watched, event)
 
     def changeEvent(self, event) -> None:
@@ -375,13 +403,14 @@ class BudgetForm(QWidget):
                     name.setFlags(name.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 table.setItem(row, 0, name)
                 amount = targets.get(key)
-                editor = QLineEdit("" if amount is None else str(amount))
+                editor = QLineEdit(_target_text(amount))
                 editor.setProperty("monetary", True)
                 editor.setObjectName("budgetAmount")
                 editor.setMinimumWidth(0)
                 editor.setPlaceholderText("Amount")
                 editor.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 editor.setAccessibleName(f"{category.get('name', key)} monthly amount")
+                editor.setToolTip("Whole-dollar monthly target")
                 editor.setProperty("budgetCategory", key)
                 editor.installEventFilter(self)
                 editor.textChanged.connect(lambda text, selected=key: self._set_amount(selected, text))
@@ -404,7 +433,7 @@ class BudgetForm(QWidget):
                     automatic.setObjectName("budgetAutomatic")
                     automatic.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     automatic.setToolTip(
-                        "Calculated from cash movements and account roles in Setup → Accounts."
+                        "From cash movements and account roles"
                     )
                     account_button.deleteLater()
                     table.setCellWidget(row, 2, automatic)
@@ -526,12 +555,13 @@ class BudgetForm(QWidget):
         self._copy_available = any(value is not None for value in previous_targets.values())
         self.copy_month.setEnabled(self.isEnabled() and self._copy_available)
         self.copy_month.setToolTip(
-            f"Replace this month's amounts with {_month_name(previous)}."
+            f"Use last month's budget · {_month_name(previous)}. Replaces this month's amounts."
             if previous else "There is no earlier month."
         )
         status, detail, display_detail = "incomplete", "", ""
         totals = {kind: None for kind in KINDS}
         try:
+            self.validate_targets()
             settings = BudgetSettings.model_validate(self.data)
             totals = budget_plan_totals(settings, self._month)
             if self.categories:
@@ -722,7 +752,7 @@ class _AccountLinkButton(QToolButton):
 
     def __init__(self, parent=None) -> None:
         """
-        Reserve a small trailing chevron while the label uses the rest of the cell.
+        Keep the full cell clickable while names use the same centred text treatment as Auto.
         """
         super().__init__(parent)
         self._text = ""
@@ -747,21 +777,18 @@ class _AccountLinkButton(QToolButton):
         """
         Give the table enough room for every linked account at the current column width.
         """
-        text = wrapped_text_layout(self._text, self.font(), width - 24, Qt.AlignmentFlag.AlignCenter)
+        text = wrapped_text_layout(self._text, self.font(), width - 16, Qt.AlignmentFlag.AlignCenter)
         return max(42, ceil(text.boundingRect().height()) + 16)
 
     def paintEvent(self, event) -> None:
         """
-        Retain native interaction fills and draw the shared thin disclosure chevron at the trailing edge.
+        Retain native interaction fills while centring names with equal space on both sides.
         """
         super().paintEvent(event)
         painter = QPainter(self)
-        text = wrapped_text_layout(self._text, self.font(), self.width() - 24, Qt.AlignmentFlag.AlignCenter)
-        painter.setPen(QColor(gui_colour(self, "text")))
-        text.draw(painter, QPointF(4, (self.height() - text.boundingRect().height()) / 2))
-        icon("chevron_down", gui_colour(self, "icon"), 10).paint(
-            painter, self.width() - 16, (self.height() - 10) // 2, 10, 10,
-        )
+        text = wrapped_text_layout(self._text, self.font(), self.width() - 16, Qt.AlignmentFlag.AlignCenter)
+        painter.setPen(QColor(gui_colour(self, "muted")))
+        text.draw(painter, QPointF(8, (self.height() - text.boundingRect().height()) / 2))
 
 
 class _BudgetCategoryTable(QTableWidget):
@@ -780,18 +807,13 @@ class _BudgetCategoryTable(QTableWidget):
 
     def eventFilter(self, watched, event) -> bool:
         """
-        Reserve a usable amount field and give account names most of the remaining space.
+        Divide the visible viewport equally, assigning any leftover pixels to the first columns.
         """
         if watched is self.viewport() and event.type() == QEvent.Type.Resize:
-            width = max(0, self.viewport().width())
-            amount = min(width, max(104, round(width * 0.25)))
-            heading = self.horizontalHeaderItem(0)
-            minimum = (
-                self.horizontalHeader().fontMetrics().horizontalAdvance(heading.text()) + 10 if heading else 0
-            )
-            category = min(width - amount, max(minimum, round((width - amount) * 0.4)))
-            for column, size in enumerate((category, amount, width - amount - category)):
-                self.setColumnWidth(column, size)
+            columns = self.columnCount()
+            width, remainder = divmod(self.viewport().width(), columns)
+            for column in range(columns):
+                self.setColumnWidth(column, width + int(column < remainder))
             self.resize_link_rows()
         return super().eventFilter(watched, event)
 
@@ -996,11 +1018,26 @@ class _CenteredCategoryDelegate(QStyledItemDelegate):
         """
         editor = super().createEditor(parent, option, index)
         if isinstance(editor, QLineEdit):
+            editor.setObjectName("budgetCategoryName")
             editor.setAlignment(Qt.AlignmentFlag.AlignCenter)
         return editor
 
 
 # %% 3. Helpers ----------------------------------------------------------------------------------------------
+def _target_text(value: object) -> str:
+    """
+    Display integral targets without decimals while retaining fractional or invalid text for repair.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        return text
+    return format(amount, ".0f") if amount.is_finite() and amount == amount.to_integral_value() else text
+
+
 def _raw_targets(data: dict, month: str) -> dict:
     """
     Resolve editable values while retaining incomplete decimal text that cannot yet form a valid model.

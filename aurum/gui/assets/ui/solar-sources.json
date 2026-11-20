@@ -1,0 +1,135 @@
+{
+  "commit": "44017167688b49109d88ae6a98979b23d8950db0",
+  "creator": "480 Design / Damir Tuarshe",
+  "licence": "CC BY 4.0",
+  "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+  "adaptation": "Aurum removes fixed dimensions and uses currentColor for themed fills and strokes.",
+  "icons": [
+    {
+      "role": "analysis",
+      "name": "Graph Up",
+      "path": "icons/SVG/Outline/Business, Statistic/Graph Up.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Business%2C%20Statistic/Graph%20Up.svg",
+      "original_sha256": "3488823863bbcf665a8ed8757d58a95780e5b353e576e08e78f286cc2c8c1163"
+    },
+    {
+      "role": "reports",
+      "name": "Documents",
+      "path": "icons/SVG/Outline/Notes/Documents.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Notes/Documents.svg",
+      "original_sha256": "19f647f2150e782dbd9ceb63582f45931997ac561a5489def9daf48d38f5c354"
+    },
+    {
+      "role": "securities",
+      "name": "Case Minimalistic",
+      "path": "icons/SVG/Outline/School/Case Minimalistic.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/School/Case%20Minimalistic.svg",
+      "original_sha256": "2efe912209c4dd14aaac58438586a15b1cf44f911426db5c8661bcde19b8ae2b"
+    },
+    {
+      "role": "theme",
+      "name": "Palette",
+      "path": "icons/SVG/Outline/Design, Tools/Palette.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Design%2C%20Tools/Palette.svg",
+      "original_sha256": "dbf775b9266dc8f9b50b87e6fec617a66c8fe471a8fec01694ce530e782f2135"
+    },
+    {
+      "role": "report_settings",
+      "name": "Tuning Square",
+      "path": "icons/SVG/Outline/Settings, Fine Tuning/Tuning Square.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Settings%2C%20Fine%20Tuning/Tuning%20Square.svg",
+      "original_sha256": "090f90a86b2c6a9d3665c71b38240d8e273b587f36a2fee8ca758ca154fa2708"
+    },
+    {
+      "role": "accounts",
+      "name": "Cardholder",
+      "path": "icons/SVG/Outline/Money/Cardholder.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Money/Cardholder.svg",
+      "original_sha256": "c8efa8d200375ae8201f45db437b035ac43826a504fc789aba05fb653d8e5bca"
+    },
+    {
+      "role": "budget",
+      "name": "Pie Chart",
+      "path": "icons/SVG/Outline/Business, Statistic/Pie Chart.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Business%2C%20Statistic/Pie%20Chart.svg",
+      "original_sha256": "798679b2591355298d03ecb36e07d3ac63d7bba8c41ef7995429004a85e26bf3"
+    },
+    {
+      "role": "connect_bank",
+      "name": "Plug Circle",
+      "path": "icons/SVG/Outline/Electronic, Devices/Plug Circle.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Electronic%2C%20Devices/Plug%20Circle.svg",
+      "original_sha256": "926e6c11fe688354f5b19d9816d8924ce6de8af9b47505952a950357ae33c5b0"
+    },
+    {
+      "role": "sync_bank",
+      "name": "Transfer Horizontal",
+      "path": "icons/SVG/Outline/Arrows/Transfer Horizontal.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Arrows/Transfer%20Horizontal.svg",
+      "original_sha256": "6416e53abfc6582ac7c826cb11706ccf921185485576b8736b4efadfcb227d36"
+    },
+    {
+      "role": "check_connection",
+      "name": "Shield Check",
+      "path": "icons/SVG/Outline/Security/Shield Check.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Security/Shield%20Check.svg",
+      "original_sha256": "c599318fa4c2f9fe36f589a3f309add7c8de8bb683c0fd3e66df4f7a264ba151"
+    },
+    {
+      "role": "retry",
+      "name": "Restart Square",
+      "path": "icons/SVG/Outline/Arrows/Restart Square.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Arrows/Restart%20Square.svg",
+      "original_sha256": "86981c288f708fa4c10c6846d59c03fefbf633ac39b222abf5fe960c62d14e71"
+    },
+    {
+      "role": "edit",
+      "name": "Pen",
+      "path": "icons/SVG/Outline/Messages, Conversation/Pen.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Messages%2C%20Conversation/Pen.svg",
+      "original_sha256": "ec6f0c557d7617e9ec0b60e3a75e2157e7453202d4ca136e468f334ab38dbd7a"
+    },
+    {
+      "role": "attach_evidence",
+      "name": "Paperclip",
+      "path": "icons/SVG/Outline/Messages, Conversation/Paperclip.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Messages%2C%20Conversation/Paperclip.svg",
+      "original_sha256": "515a3c60570f3c93526287f215ec8f06c9d4f4f13f4f7dde383b8aa69422ddc8"
+    },
+    {
+      "role": "investment_disposal",
+      "name": "Hand Money",
+      "path": "icons/SVG/Linear/Hands/Hand Money.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Linear/Hands/Hand%20Money.svg",
+      "original_sha256": "8d7892637a7c51ce0e8865b7a60e316cc84999bb77ab5c0f1f7d3c724c516736"
+    },
+    {
+      "role": "post",
+      "name": "Bill Check",
+      "path": "icons/SVG/Outline/Money/Bill Check.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Money/Bill%20Check.svg",
+      "original_sha256": "8f3d91126568a6c03422e6ee860a774c28bba1282949983d5095791f0d49a760"
+    },
+    {
+      "role": "undo",
+      "name": "Undo Left Round",
+      "path": "icons/SVG/Outline/Arrows Action/Undo Left Round.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Arrows%20Action/Undo%20Left%20Round.svg",
+      "original_sha256": "03c7e5943d5ff7df9545867a4d2b47152de0b9cab3722b64f535202ba80b3365"
+    },
+    {
+      "role": "choose_pdf",
+      "name": "File",
+      "path": "icons/SVG/Outline/Files/File.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Files/File.svg",
+      "original_sha256": "248ffe810cb5b581e4d50d2cc2a450af23727b483156b2622e0f107277ca96ac"
+    },
+    {
+      "role": "manual",
+      "name": "Pen New Square",
+      "path": "icons/SVG/Outline/Messages, Conversation/Pen New Square.svg",
+      "download_url": "https://raw.githubusercontent.com/480-Design/Solar-Icon-Set/44017167688b49109d88ae6a98979b23d8950db0/icons/SVG/Outline/Messages%2C%20Conversation/Pen%20New%20Square.svg",
+      "original_sha256": "4bf0693b1d74653cea4548e802a1890fb642f45f772df514bc8ca1aa706f5bce"
+    }
+  ]
+}

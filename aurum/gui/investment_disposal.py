@@ -116,7 +116,7 @@ class InvestmentDisposalDialog(QDialog):
         self.cancel_button = _action("Cancel disposal", "close")
         self.cancel_button.clicked.connect(self.reject)
         actions.addWidget(self.cancel_button)
-        self.post_button = _action("Post investment disposal", "save")
+        self.post_button = _action("Post investment disposal", "post")
         self.post_button.clicked.connect(self._post)
         actions.addWidget(self.post_button)
         layout.addLayout(actions)

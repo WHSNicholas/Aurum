@@ -22,13 +22,10 @@ from PySide6.QtWidgets import (
 )
 
 # Aurum imports
-from aurum.finance.reports import ReportSettings
+from aurum.finance.reports import BUDGET_ALLOCATION_TINT, BUDGET_COLOURS, ReportSettings
 from aurum.gui.icons import (
     RefreshButton, Spinner, icon_path, icon_source_colour, recolour_icon, recolour_pixmap,
 )
-
-# Keep budget meanings recognisable across every workspace theme.
-BUDGET_COLOURS = {"income": "#527ca3", "expense": "#c94c5c", "savings": "#228b62"}
 
 _ASSETS = {}
 _OBSERVER = None
@@ -36,6 +33,7 @@ _COLOUR_ROLES = {
     "page": "#f5f7f6",
     "surface": "#ffffff",
     "card": "#e7efeb",
+    "field": "#edf2f0",
     "panel": "#e3eeea #eaf1ed #edf3f0 #edf3ef #f5f8f6 #f0f4f1 #e9efeb #e6ede9",
     "text": "#243b3b #31584e #2e5147",
     "heading": "#235b58 #204e48 #285f53 #365850 #355f58 #426d64 #456a5c",
@@ -81,66 +79,84 @@ def resolve_gui_theme(settings: ReportSettings) -> dict[str, str]:
         page = theme.dark_page if settings.dark_mode else theme.light_page
         surface = theme.dark_surface if settings.dark_mode else theme.light_surface
         group = theme.dark_group if settings.dark_mode else theme.light_group
-    if settings.colour_scheme == "sunset_hues":
-        # Dusty rose supplies desktop tints; the report's pale-yellow group fill stays in PDFs.
-        group = theme.palette[min(3, len(theme.palette) - 1)]
     primary = theme.primary or theme.palette[0]
+    highlight = theme.highlight or theme.palette[1]
     dark = _luminance(page) < 0.18
-    # Keep controls light while letting cards carry the palette instead of whitening every layer.
-    surface = _mix(page, surface, 0.55) if dark else _mix("#ffffff", surface, 0.60)
     if settings.colour_scheme == "sunset_hues":
-        surface = _mix("#ffffff", group, 0.08)
-        page = _mix("#ffffff", group, 0.10)
-    tint = _composite(group, surface) if group else theme.palette[2]
-    card = _card_surface(surface, tint, page, 0.12 if dark else 0.55 if group else 0.18)
-    panel = _mix(surface, tint, 0.20 if dark else 0.42 if group else 0.12)
-    table_header = _mix(surface, primary, 0.16 if dark else 0.07)
-    selected = _mix(surface, theme.highlight or primary, 0.26 if dark else 0.18)
-    hover = _mix(surface, theme.highlight or primary, 0.12 if dark else 0.07)
-    focus = _mix(surface, theme.highlight or primary, 0.32 if dark else 0.23)
-    backgrounds = (page, surface, card, panel, table_header, hover, selected, focus)
+        # Navigation uses the deepest swatch independently of the report's broad section bands.
+        primary = theme.palette[0]
+        sand = theme.palette[-1]
+        page = surface = _mix("#ffffff", _mix(primary, sand, 0.55), 0.18)
+        content = theme.fixed.surface if theme.fixed is not None else _mix(surface, primary, 0.10)
+        card = theme.summary_card or sand
+        featured = _mix(surface, highlight, 0.52)
+        table_header = theme.table_header or theme.palette[2]
+        panel = _composite(group, content) if group else _mix(content, theme.palette[-2], 0.5)
+        interaction = theme.palette[2]
+    else:
+        surface = _mix(page, surface, 0.55) if dark else _mix("#ffffff", surface, 0.60)
+        content = surface
+        table_header = _mix(surface, primary, 0.16 if dark else 0.07)
+        tint = _composite(group, surface) if group else theme.palette[2]
+        card = _card_surface(surface, tint, page, 0.12 if dark else 0.55 if group else 0.18)
+        featured = card
+        panel = _mix(surface, tint, 0.20 if dark else 0.42 if group else 0.12)
+        interaction = theme.highlight or primary
+    selected = _mix(surface, interaction, 0.26 if dark else 0.18)
+    hover = _mix(surface, interaction, 0.12 if dark else 0.07)
+    focus = _mix(surface, interaction, 0.32 if dark else 0.23)
+    field = _mix(surface, colours.text, 0.09 if dark else 0.06)
+    backgrounds = (page, surface, content, card, featured, panel, field, hover, selected, focus)
+    if settings.colour_scheme != "sunset_hues":
+        backgrounds += (table_header,)
     text = _readable(colours.text, backgrounds)
     muted = _readable(colours.muted, backgrounds)
     heading = _readable(colours.heading_text or primary, backgrounds)
     accent = primary
-    on_accent = _readable(colours.on_primary, (accent,))
+    action_text = (theme.fixed.surface if settings.colour_scheme == "sunset_hues" and theme.fixed
+                   else colours.on_primary)
+    on_accent = _readable(action_text, (accent,))
     accent_hover = _interaction_surface(accent, on_accent, 0.10)
     accent_focus = _interaction_surface(accent, on_accent, 0.20)
     sidebar = primary
-    sidebar_text = _readable(colours.on_primary, (sidebar,))
+    sidebar_text = on_accent
     sidebar_hover = _interaction_surface(sidebar, sidebar_text, 0.08)
     sidebar_selected = _interaction_surface(sidebar, sidebar_text, 0.16)
-    warning_bg = _mix(surface, tint, 0.78) if settings.colour_scheme == "sunset_hues" else (
+    warning_bg = panel if settings.colour_scheme == "sunset_hues" else (
         _mix(surface, colours.draft_border, 0.22) if dark else _mix(surface, colours.draft_bg, 0.55)
     )
     roles = {
         "name": settings.colour_scheme, "dark": "true" if dark else "false",
+        "swatch_backing": "#000000" if dark else "#ffffff",
         "page": page, "surface": surface, "card": card, "panel": panel, "text": text, "muted": muted,
+        "content": content, "featured": featured,
         "heading": heading, "icon": _readable(colours.icon or heading, backgrounds),
         "accent": accent, "on_accent": on_accent,
         "accent_hover": accent_hover, "accent_focus": accent_focus,
         "accent_disabled": _mix(surface, accent, 0.45),
         "border": _mix(surface, text, 0.18 if dark else 0.14),
         "control_border": _readable(_mix(surface, text, 0.28), (surface,), minimum=3),
-        "hover": hover, "focus": focus,
+        "field": field, "hover": hover, "focus": focus,
         "selected": selected, "on_selected": _readable(text, (selected,)),
         "alternate": _mix(surface, primary, 0.025),
         "sidebar": sidebar, "sidebar_text": sidebar_text,
         "sidebar_muted": _readable(_mix(sidebar_text, sidebar, 0.25), (sidebar,)),
         "sidebar_hover": sidebar_hover, "sidebar_selected": sidebar_selected,
         "table_header": table_header,
-        "on_table_header": _readable(muted, (table_header,)),
+        "on_table_header": _readable(colours.on_table_header if settings.colour_scheme == "sunset_hues"
+                                     else muted, (table_header,)),
         "disabled": _mix(text, surface, 0.52), "disabled_bg": _mix(surface, page, 0.55),
         "scroll": _mix(surface, text, 0.25), "scroll_hover": _mix(surface, text, 0.45),
-        "positive": _readable(colours.positive, (page, surface)),
-        "negative": _readable(colours.negative, (page, surface)),
+        "positive": _readable(colours.positive, (page, surface, content)),
+        "negative": _readable(colours.negative, (page, surface, content)),
         "success_bg": _mix(surface, colours.positive, 0.15),
         "danger_bg": _mix(surface, colours.negative, 0.15),
         "warning_bg": warning_bg,
         "warning_text": _readable(colours.draft_text, (warning_bg, page, surface)),
         "warning_border": _mix(warning_bg, colours.draft_border, 0.35),
-        "budget_income": BUDGET_COLOURS["income"], "budget_expenses": BUDGET_COLOURS["expense"],
-        "budget_savings": BUDGET_COLOURS["savings"],
+        **{"budget_" + kind: colour for kind, colour in BUDGET_COLOURS.items()},
+        "analysis_category": _readable(theme.palette[1] if settings.colour_scheme == "sunset_hues"
+                                       else highlight, (content,), minimum=3),
     }
     return roles
 
@@ -151,6 +167,15 @@ def gui_colour(widget: QObject | None, role: str, fallback: str = "#355653") -> 
     """
     theme = _owning_theme(widget)
     return str(theme.get(role, fallback))
+
+
+def budget_colour(widget: QObject | None, field: str, *, tint: float = 0.0) -> str:
+    """
+    Return the budget series colour, optionally lightened by its relative rank in an allocation pill.
+    """
+    kind = "expenses" if field == "expense" else field
+    base = gui_colour(widget, "budget_" + kind, BUDGET_COLOURS[kind])
+    return _mix(base, "#ffffff", tint * BUDGET_ALLOCATION_TINT) if tint else base
 
 
 def monetary_font(base: QFont) -> QFont:
@@ -227,7 +252,16 @@ def theme_stylesheet(theme: dict[str, str]) -> str:
     )
     selectors = ", ".join(f"QLabel#{name}" for name in headings)
     selectors += ', QLabel[headingLevel="2"], QLabel[headingLevel="3"]'
-    return _themed_styles(source, theme) + f"\n{selectors} {{ color: {theme['heading']}; }}\n"
+    stylesheet = _themed_styles(source, theme) + f"\n{selectors} {{ color: {theme['heading']}; }}\n"
+    if theme["name"] == "sunset_hues":
+        stylesheet += f"""
+            QFrame#overviewFinancials, QFrame#analysisPosition {{ background: {theme['featured']}; }}
+            QTableView, QFrame#analysisSection, QWidget#budgetAllocationChart,
+            QTableView QWidget#qt_scrollarea_vcontainer, QTableView QScrollBar:vertical {{
+                background: {theme['content']};
+            }}
+        """
+    return stylesheet
 
 
 class _ThemeObserver(QObject):
@@ -277,6 +311,11 @@ def _refresh_widget(widget: QWidget, theme: dict[str, str], *, template_owner: Q
     """
     Refresh local stylesheet overrides and registered icons without changing displayed facts or swatches.
     """
+    owner = widget
+    while owner is not None:
+        if owner.property("aurumReportTheme"):
+            return
+        owner = owner.parentWidget()
     style = widget.styleSheet()
     if widget is not template_owner and widget.property("aurumGuiTheme") is None and style and any(
         name in style for name in ("QComboBox", "QListView", "QScrollBar", "QFrame#aurumComboPopup")
@@ -368,6 +407,9 @@ def _themed_styles(source: str, theme: dict[str, str]) -> str:
             Replace colour values without mistaking object names or filenames for colour literals.
             """
             name, separator, value = item.groups()
+            if selector.strip() == "QToolTip" and name == "background":
+                red, green, blue = _channels(theme["sidebar"])
+                return f"{name}{separator}rgba({red}, {green}, {blue}, 240);"
             value = re.sub(
                 r"#[0-9a-fA-F]{6}\b|\bwhite\b",
                 lambda colour: _style_colour(selector, name, colour.group(), theme), value,
@@ -377,11 +419,7 @@ def _themed_styles(source: str, theme: dict[str, str]) -> str:
         return selector + "{" + re.sub(r"([\w-]+)(\s*:\s*)([^;]+);", declaration, body) + "}"
 
     result = re.sub(r"([^{}]+)\{([^{}]*)\}", rule, source)
-    assets = _theme_assets(theme)
-    return re.sub(
-        r"url\([\"']?[^)\"']*/?(chevron_down|check)\.svg[\"']?\)",
-        lambda match: f'url("{assets[match.group(1)]}")', result,
-    )
+    return result.replace("aurumui:check.svg", _theme_checkmark(theme["on_accent"]))
 
 
 def _style_colour(selector: str, declaration: str, colour: str, theme: dict[str, str]) -> str:
@@ -389,8 +427,7 @@ def _style_colour(selector: str, declaration: str, colour: str, theme: dict[str,
     Distinguish shared white/teal literals used on buttons, sidebars, tables and ordinary surfaces.
     """
     if "#setupPalettePill" in selector and declaration == "background":
-        # Palette chips need a neutral backing even when the chosen theme uses their colour for cards.
-        return "#ffffff"
+        return theme["swatch_backing"]
     if "#sidebarFooterDivider" in selector and declaration == "background":
         return _mix(theme["sidebar"], theme["sidebar_text"], 0.24)
     foreground = declaration in {"color", "selection-color"}
@@ -412,7 +449,7 @@ def _style_colour(selector: str, declaration: str, colour: str, theme: dict[str,
             )) else "sidebar_text"]
         return theme["sidebar_selected" if ":selected" in selector or ":pressed" in selector else
                      "sidebar_hover" if ":hover" in selector or ":focus" in selector else "sidebar"]
-    if "QHeaderView" in selector:
+    if "QHeaderView" in selector or "#tableHeaderGutter" in selector:
         role = "on_table_header" if foreground else "border" if "border" in declaration else "table_header"
         return theme[role]
     filled_tab = "QTabBar" in selector and "::tab:selected" in selector and not any(
@@ -429,10 +466,6 @@ def _style_colour(selector: str, declaration: str, colour: str, theme: dict[str,
                      else "accent"]
     if not foreground and ":focus" in selector:
         return theme["icon" if "border" in declaration else "focus"]
-    if "border" in declaration and any(name in selector for name in (
-        "QLineEdit", "QPlainTextEdit", "QTextEdit", "QDateEdit", "QSpinBox", "QDoubleSpinBox",
-    )) and ":disabled" not in selector:
-        return theme["control_border"]
     key = colour.lower()
     if key in {"white", "#ffffff"}:
         return theme["text" if foreground else "surface"]
@@ -448,22 +481,18 @@ def _style_colour(selector: str, declaration: str, colour: str, theme: dict[str,
     return theme.get(role, colour) if role else colour
 
 
-def _theme_assets(theme: dict[str, str]) -> dict[str, str]:
+def _theme_checkmark(colour: str) -> str:
     """
-    Keep small tinted Qt stylesheet arrows and checkbox ticks in temporary, process-owned files.
+    Keep the tinted checkbox tick available to Qt for the lifetime of its stylesheet.
     """
-    assets = tuple(
-        (name, icon_path(name), colour)
-        for name, colour in (("chevron_down", theme["icon"]), ("check", theme["on_accent"]))
-    )
-    key = tuple((str(path), colour) for _, path, colour in assets)
+    source = icon_path("check")
+    key = source, colour
     if key not in _ASSETS:
         temporary = TemporaryDirectory(prefix="aurum-theme-icons-")
-        directory = Path(temporary.name)
-        for name, path, colour in assets:
-            source = path.read_text(encoding="utf-8")
-            (directory / f"{name}.svg").write_text(source.replace("currentColor", colour), encoding="utf-8")
-        _ASSETS[key] = temporary, {name: str(directory / f"{name}.svg") for name in ("chevron_down", "check")}
+        target = Path(temporary.name) / "check.svg"
+        artwork = source.read_text(encoding="utf-8").replace("currentColor", colour)
+        target.write_text(artwork, encoding="utf-8")
+        _ASSETS[key] = temporary, str(target)
     return _ASSETS[key][1]
 
 

@@ -3,7 +3,7 @@
 #                                                     Gui - Manual                                                     #
 # -------------------------------------------------------------------------------------------------------------------- #
 """
-Aurum's manual-entry screen lists saved instructions and direct events, opening separate editors on request.
+Aurum's manual instruction form and source picker support the shared manual-entry dialog.
 
 The form keeps a stable identity when correcting an earlier event. Saving submits a request to the controller;
 it never calls AI or changes postings directly. Questions and responses belong to the shared Review queue.
@@ -25,398 +25,13 @@ from PySide6.QtWidgets import (
 
 # Aurum imports
 from aurum.finance.dates import parse_input_date
-from aurum.gui.activity import ActivityPage, _posting_total, _postings_text, _status_text, _text
-from aurum.gui.controls import DateField, HeaderActionButton
+from aurum.gui.activity import _postings_text, _status_text, _text
+from aurum.gui.controls import DateField
 from aurum.gui.icons import icon
 from aurum.gui.theme import gui_colour, monetary_font, monetary_text
-from aurum.gui.viewers import DETAIL_SECTION_GAP, JournalDetails
 
 
-# %% 1. Manual Instructions ----------------------------------------------------------------------------------
-class ManualPage(ActivityPage):
-    """
-    Browse saved instructions and direct journal entries, opening a separate editor only on request.
-    """
-
-    def __init__(self, parent=None):
-        """
-        Keep creation prominent above saved history, with one named action for the selected entry.
-        """
-        super().__init__(
-            "Manual", "Add an instruction or a journal entry, and inspect saved entries.",
-            (("date", "Date"), ("summary", "Description"),
-             ("display_amount", "Amount"), ("source_label", "Source"), ("status_label", "Status")),
-            "manual_entry_id", parent,
-        )
-        self._workspace_available = False
-        self._workspace_error = ""
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(12)
-        self.search.setPlaceholderText("Search entries")
-        self.search.setAccessibleName("Search saved manual entries")
-        self.new_button = HeaderActionButton("New entry", icon_only=True)
-        self.new_button.setIcon(icon("add", colour="#ffffff", size=16))
-        self.new_button.setAccessibleName("New manual entry")
-        self.new_button.setToolTip("Add a manual entry")
-        self.new_button.clicked.connect(lambda: self._new("instruction"))
-        self.subtitle_row.insertWidget(0, self.new_button, 0, Qt.AlignmentFlag.AlignLeft)
-        self.table.setObjectName("manualHistory")
-        self.table.setMinimumHeight(160)
-        self.table.verticalHeader().setDefaultSectionSize(38)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.doubleClicked.connect(lambda _index: self._open_selected())
-        self.layout.removeWidget(self.empty)
-        self.layout.insertWidget(2, self.empty)
-        self.empty.setObjectName("workspaceHint")
-        self.empty.setWordWrap(True)
-        self.detail_layout.setContentsMargins(0, DETAIL_SECTION_GAP - self.layout.spacing(), 0, 0)
-        self.viewer = JournalDetails(self.detail, actions=False)
-        self.viewer.action_requested.connect(self.action_requested.emit)
-        self.viewer.dismissed.connect(self._hide_details)
-        self.detail_layout.addWidget(self.viewer)
-        self.instruction_detail = QWidget()
-        self.instruction_detail.setObjectName("statementDetailPanel")
-        self.instruction_detail.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        instruction_layout = QVBoxLayout(self.instruction_detail)
-        instruction_layout.setContentsMargins(14, 12, 14, 12)
-        instruction_layout.setSpacing(8)
-        instruction_heading = QHBoxLayout()
-        instruction_heading.setContentsMargins(10, 0, 0, 0)
-        self.instruction_status = QLabel()
-        self.instruction_status.setObjectName("workspaceSection")
-        instruction_heading.addWidget(self.instruction_status)
-        instruction_heading.addStretch()
-        self.open_button = self._icon_button("Edit instruction", "pen")
-        self.open_button.clicked.connect(self._open_selected)
-        instruction_heading.addWidget(self.open_button)
-        close = self._icon_button("Hide instruction details", "close")
-        close.clicked.connect(self._hide_details)
-        instruction_heading.addWidget(close)
-        instruction_layout.addLayout(instruction_heading)
-        self.instruction_text = QPlainTextEdit()
-        self.instruction_text.setObjectName("statementDescription")
-        self.instruction_text.setReadOnly(True)
-        self.instruction_text.document().setDocumentMargin(0)
-        self.instruction_text.setAccessibleName("Saved instruction")
-        self.instruction_text.setFixedHeight(80)
-        instruction_layout.addWidget(self.instruction_text)
-        self.instruction_metadata = QLabel()
-        self.instruction_metadata.setObjectName("workspaceHint")
-        self.instruction_metadata.setContentsMargins(10, 0, 0, 0)
-        self.instruction_metadata.setWordWrap(True)
-        instruction_layout.addWidget(self.instruction_metadata)
-        self.detail_layout.addWidget(self.instruction_detail)
-        actions = QHBoxLayout()
-        self.review_button = QPushButton("Open Review")
-        self.review_button.setIcon(icon("review", size=16))
-        self.review_button.setAccessibleName("Open this instruction in Review")
-        self.review_button.clicked.connect(self._open_review)
-        actions.addWidget(self.review_button)
-        actions.addStretch()
-        self.detail_layout.addLayout(actions)
-        self.detail.hide()
-        self.layout.removeWidget(self.splitter)
-        self.table.setParent(self)
-        self.detail.setParent(self)
-        self.splitter.hide()
-        self.detail_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.layout.addWidget(self.table)
-        self.layout.addWidget(self.detail, 0, Qt.AlignmentFlag.AlignTop)
-        self.layout.addStretch(1)
-        self._update_actions()
-        self._filter_changed()
-        QWidget.setTabOrder(self.new_button, self.search)
-
-    def refresh(self, snapshot: dict) -> None:
-        """
-        Read the current saved history without opening an editor or retaining stale actionable rows.
-        """
-        super().refresh(snapshot)
-        self._workspace_available = snapshot.get("ready") is not False and not snapshot.get("error")
-        self._workspace_error = str(snapshot.get("error") or "Check the workspace files in Setup.")
-        rows = []
-        if self._workspace_available:
-            entries = {row.get("journal_entry_id"): row for row in snapshot.get("entries", [])}
-            sources = {str(row["transaction_id"]): row for row in snapshot.get("transactions", [])}
-            for record in snapshot.get("manuals", []):
-                direct = record.get("entry_mode") == "direct"
-                entry = entries.get(record.get("journal_entry_id"), {})
-                postings = entry.get("postings") or record.get("postings", [])
-                if direct:
-                    summary = next((
-                        line["description"] for line in postings
-                        if str(line.get("description") or "").strip()
-                    ), entry.get("description") or "Journal entry")
-                else:
-                    summary = record.get("instruction") or record.get("summary") or ""
-                names = list(dict.fromkeys(
-                    str(sources[str(identifier)]["account"])
-                    for identifier in record.get("source_transactions", [])
-                    if str(identifier) in sources and sources[str(identifier)].get("account")
-                ))
-                if not names:
-                    names = list(dict.fromkeys(
-                        str(line["account"]) for line in postings if line.get("account")
-                    ))
-                status = str(record.get("status") or "")
-                status_label = (
-                    "Posted" if record.get("journal_entry_id") and status in {"applied", "posted"} else
-                    "Ready" if status in {"pending", "submitted", "ready"} else
-                    "Review" if status in {
-                        "needs_review", "unsupported", "failed", "error", "requesting",
-                    } else
-                    _status_text(status)
-                )
-                rows.append({
-                    **record, "summary": summary, "status_label": status_label,
-                    "source_label": "Manual journal" if direct else "Instruction",
-                    "account_names": names, "display_amount": _posting_total(postings) or "—",
-                })
-        self._set_records(rows)
-        for index, record in enumerate(rows):
-            if record.get("entry_mode") == "direct" and record.get("instruction"):
-                self.table.item(index, 1).setToolTip(
-                    f"{record['summary']}\n\n{record['instruction']}"
-                )
-            self.table.item(index, 2).setToolTip(
-                "Total journal debits; this amount has no cash-flow direction."
-                if record["display_amount"] != "—" else "No journal amount is available yet."
-            )
-            self.table.item(index, 3).setToolTip("\n".join((
-                record["source_label"], *record["account_names"],
-            )))
-            self.table.item(index, 4).setToolTip(str(
-                record.get("question") or record.get("error") or _status_text(record.get("status"))
-            ))
-            for column in (2, 3, 4):
-                self.table.item(index, column).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._size_columns()
-        self._update_actions()
-
-    def _size_columns(self) -> None:
-        """
-        Match statement-table proportions while reserving the remaining width for each saved description.
-        """
-        for column, width in ((0, 108), (2, 104), (3, 128), (4, 100)):
-            self.table.setColumnWidth(column, width)
-
-    def has_unsaved_changes(self) -> bool:
-        """
-        Keep editing state in the popup; this saved-history page never owns an unsaved form.
-        """
-        return False
-
-    def set_busy(self, busy: bool) -> None:
-        """
-        Allow read-only history inspection while disabling new editors and competing processing jobs.
-        """
-        self._busy = busy
-        self.viewer.set_busy(busy)
-        self._update_actions()
-
-    def action_failed(self, action: str, message: str) -> None:
-        """
-        Prevent opening stale history after an unsuccessful workspace refresh.
-        """
-        if action == "refresh":
-            self._workspace_available = False
-            self._workspace_error = message
-            self._set_records([])
-            self._update_actions()
-
-    def select_record(self, identifier: str) -> bool:
-        """
-        Open a requested saved entry through the same popup route as the visible edit action.
-        """
-        if self._busy or not self._workspace_available:
-            return False
-        if not super().select_record(identifier):
-            return False
-        self._open_selected()
-        return True
-
-    def _filter_changed(self) -> None:
-        """
-        Count matching saved entries and close the outcome preview if its selected row disappears.
-        """
-        super()._filter_changed()
-        shown = sum(not self.table.isRowHidden(index) for index in range(len(self.records)))
-        if not self._workspace_available:
-            message = "Saved entries are unavailable. " + self._workspace_error
-        elif not shown:
-            message = ""
-        else:
-            message = (
-                f"{shown} entries" if shown == len(self.records) else f"{shown} of {len(self.records)} entries"
-            )
-        self.empty.setText(message)
-        self.empty.setVisible(bool(message))
-        selected = next((index for index, row in enumerate(self.records)
-                         if self.current and row.get(self.identity) == self.current.get(self.identity)), None)
-        if selected is None or self.table.isRowHidden(selected):
-            self._loading = True
-            self.table.clearSelection()
-            self.table.setCurrentCell(-1, -1)
-            self.current = None
-            self._show_record(None)
-            self._loading = False
-        if hasattr(self, "open_button"):
-            self._update_actions()
-            self._fit_history()
-
-    def _show_record(self, record: dict | None) -> None:
-        """
-        Inspect posted accounting or the saved instruction without borrowing an empty journal card.
-        """
-        if not hasattr(self, "viewer"):
-            return
-        self.detail.setVisible(bool(record))
-        entry = None
-        if record:
-            entry_id = record.get("journal_entry_id")
-            entry = next(
-                (item for item in self.snapshot.get("entries", [])
-                 if entry_id and item.get("journal_entry_id") == entry_id), None,
-            )
-            if entry is None and record.get("postings"):
-                entry = {**record, "description": record.get("summary") or record.get("instruction") or ""}
-        self.viewer.update_record(entry, self.snapshot)
-        self.viewer.set_busy(self._busy)
-        self.instruction_detail.setVisible(bool(record) and entry is None)
-        if record:
-            self.instruction_status.setText(
-                "Needs answer" if record.get("status") == "needs_review"
-                else _status_text(record.get("status"))
-            )
-            self.instruction_text.setPlainText(str(record.get("instruction") or record.get("summary") or ""))
-            metadata = str(record.get("date") or "")
-            metadata += " · Manual instruction"
-            self.instruction_metadata.setText(metadata)
-            self.instruction_metadata.setToolTip("\n".join(record.get("account_names", [])))
-        self._fit_history()
-        self._update_actions()
-
-    def _fit_history(self) -> None:
-        """
-        Keep short saved lists beside their details while allowing longer histories to scroll normally.
-        """
-        if not hasattr(self, "instruction_detail"):
-            return
-        shown = [index for index in range(self.table.rowCount()) if not self.table.isRowHidden(index)]
-        natural = self.table.horizontalHeader().sizeHint().height() + 2 * self.table.frameWidth()
-        natural += sum(self.table.rowHeight(index) for index in shown[:8])
-        natural += self.table.horizontalScrollBar().sizeHint().height()
-        detail = self.detail.sizeHint().height() if self.current else 0
-        available = self.height() - self.heading_block.height() - self.search.height() - detail - 80
-        self.table.setFixedHeight(max(110, min(natural, max(110, available))))
-
-    def resizeEvent(self, event) -> None:
-        """
-        Reserve room for the selected instruction when the workspace changes height.
-        """
-        super().resizeEvent(event)
-        self._size_columns()
-        self._fit_history()
-
-    def _hide_details(self) -> None:
-        """
-        Clear selection without changing saved manual instructions or postings.
-        """
-        self.table.clearSelection()
-        self.table.setCurrentCell(-1, -1)
-        self.current = None
-        self._show_record(None)
-
-    def _selected_index(self) -> int:
-        """
-        Read the highlighted row independently of Qt's later current-cell update on native clicks.
-        """
-        selected = self.table.selectionModel().selectedRows()
-        return selected[0].row() if selected else -1
-
-    def _selection_changed(self) -> None:
-        """
-        Preview the actual selected row without relying on the current-cell signal order.
-        """
-        if self._loading:
-            return
-        index = self._selected_index()
-        self.current = self.records[index] if 0 <= index < len(self.records) else None
-        self._show_record(self.current)
-
-    def _icon_button(self, label: str, symbol: str) -> QToolButton:
-        """
-        Expose compact, named actions to mouse, keyboard and assistive technology.
-        """
-        button = QToolButton()
-        button.setObjectName("manualIconAction")
-        button.setAutoRaise(True)
-        button.setFixedSize(32, 32)
-        button.setIconSize(QSize(18, 18))
-        button.setIcon(icon(symbol, size=18))
-        button.setToolTip(label)
-        button.setAccessibleName(label)
-        button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        return button
-
-    def _update_actions(self) -> None:
-        """
-        Name the selected entry's edit and Review destinations while preventing competing actions.
-        """
-        available = not self._busy and self._workspace_available
-        self.new_button.setEnabled(available)
-        index = self._selected_index()
-        selected = 0 <= index < len(self.records) and not self.table.isRowHidden(index)
-        record = self.records[index] if selected else {}
-        direct = record.get("entry_mode") == "direct"
-        label = "Edit journal entry" if direct else "Edit instruction"
-        self.open_button.setToolTip(label)
-        self.open_button.setAccessibleName(label)
-        self.open_button.setEnabled(available and selected)
-        self.viewer.set_header_action(
-            label if selected else None, self._open_selected, symbol="pen", enabled=available and selected,
-        )
-        review = bool(record.get("question") or record.get("human_response") or record.get("error"))
-        review = review or bool(record) and not direct and record.get("status") not in {
-            "applied", "posted", "withdrawn", "superseded",
-        }
-        self.review_button.setVisible(review)
-        self.review_button.setEnabled(available and selected)
-
-    def _new(self, mode: str) -> None:
-        """
-        Request a fresh editor in the explicitly chosen instruction or direct-entry mode.
-        """
-        if not self._busy and self._workspace_available:
-            self.action_requested.emit("open_manual_editor", {"mode": mode})
-
-    def _open_selected(self) -> None:
-        """
-        Open the selected saved identity without guessing its entry mode from accounting status.
-        """
-        index = self._selected_index()
-        if self._busy or not self._workspace_available or not 0 <= index < len(self.records):
-            return
-        if self.table.isRowHidden(index):
-            return
-        record = self.records[index]
-        self.action_requested.emit("open_manual_editor", {
-            "manual_entry_id": record["manual_entry_id"],
-            "journal_entry_id": record.get("journal_entry_id") or None,
-            "mode": "direct" if record.get("entry_mode") == "direct" else "instruction",
-        })
-
-    def _open_review(self) -> None:
-        """
-        Open the saved instruction's conversation in the shared Review queue.
-        """
-        if not self._busy and self._workspace_available and self.current:
-            self.action_requested.emit("open_manual_review", {
-                "manual_entry_id": self.current["manual_entry_id"],
-            })
-
-# %% 2. Instruction Editor ----------------------------------------------------------------------------------
+# %% 1. Instruction Editor -----------------------------------------------------------------------------------
 class InstructionForm(QWidget):
     """
     Collect one revision-bound manual instruction inside the separate entry editor.
@@ -451,7 +66,7 @@ class InstructionForm(QWidget):
         self.date.setMaximumWidth(190)
         top.addWidget(self.date)
         self.source_button = QPushButton("Bank transactions")
-        self.source_button.setIcon(icon("statement", size=16))
+        self.source_button.setIcon(icon("attach_evidence", size=16))
         self.source_button.setAccessibleName("Choose linked bank transactions")
         self.source_button.clicked.connect(self._choose_sources)
         top.addWidget(self.source_button)
@@ -649,7 +264,7 @@ class InstructionForm(QWidget):
             self._edited()
 
 
-# %% 3. Bank Evidence Selection ------------------------------------------------------------------------------
+# %% 2. Bank Evidence Selection ------------------------------------------------------------------------------
 class SourcePicker(QDialog):
     """
     Select imported bank evidence by readable facts while keeping stable transaction references internally.
@@ -660,6 +275,7 @@ class SourcePicker(QDialog):
         Build a searchable checklist and retain previously selected references outside its supplied snapshot.
         """
         super().__init__(parent)
+        self.setObjectName("bankEvidencePicker")
         self.setWindowTitle("Choose bank evidence")
         self.resize(920, 480)
         self.records = transactions
@@ -670,6 +286,8 @@ class SourcePicker(QDialog):
         self.search.setPlaceholderText("Search by account, date, description or amount")
         layout.addWidget(self.search)
         self.table = QTableWidget(len(transactions), 5)
+        self.table.setProperty("roundedTable", True)
+        self.table.setShowGrid(False)
         self.table.setHorizontalHeaderLabels(["Use", "Date", "Account", "Description", "Amount"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)

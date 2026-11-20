@@ -25,6 +25,7 @@ from aurum.gui.controls import DateField, confirm_discard
 from aurum.gui.editor import JournalEditor
 from aurum.gui.icons import icon
 from aurum.gui.manual import InstructionForm, SourcePicker
+from aurum.gui.theme import gui_colour
 
 
 # %% 1. Manual Entry Composer --------------------------------------------------------------------------------
@@ -44,6 +45,7 @@ class ManualEditor(QDialog):
         self._busy = False
         self._saved = False
         self._pending_sources = None
+        self.setObjectName("manualEntryEditor")
         self.setWindowTitle("Manual Entry")
         self.setModal(True)
         self.setMinimumSize(820, 580)
@@ -61,7 +63,7 @@ class ManualEditor(QDialog):
         self.modes.addTab("Instruction")
         self.modes.addTab("Journal entry")
         self.modes.setAccessibleName("Manual entry method")
-        layout.addWidget(self.modes)
+        layout.addWidget(self.modes, 0, Qt.AlignmentFlag.AlignLeft)
         metadata = QHBoxLayout()
         metadata.setSpacing(10)
         initial_date = context.get("entry", {}).get("date") or ""
@@ -73,7 +75,7 @@ class ManualEditor(QDialog):
         self.date.setMaximumWidth(190)
         metadata.addWidget(self.date)
         self.source_button = QPushButton("Bank transactions")
-        self.source_button.setIcon(icon("statement", size=16))
+        self.source_button.setIcon(icon("attach_evidence", size=16))
         self.source_button.setAccessibleName("Choose linked bank transactions")
         self.source_button.clicked.connect(self._choose_sources)
         metadata.addWidget(self.source_button)
@@ -125,7 +127,6 @@ class ManualEditor(QDialog):
         actions.addWidget(self.cancel_button)
         self.save_button = QToolButton()
         self.save_button.setObjectName("viewerIconAction")
-        self.save_button.setIcon(icon("save", size=20))
         self.save_button.setIconSize(QSize(20, 20))
         self.save_button.setFixedSize(36, 36)
         self.save_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -281,6 +282,9 @@ class ManualEditor(QDialog):
         self.reload_button.setVisible(bool(selected.error.text()))
         self.reload_button.setEnabled(not self._busy)
         action = "Save instruction" if instruction else "Post journal entry"
+        if self.save_button.accessibleName() != action:
+            symbol = "save" if instruction else "post"
+            self.save_button.setIcon(icon(symbol, gui_colour(self, "icon", "#355653"), size=20))
         self.save_button.setToolTip(action)
         self.save_button.setAccessibleName(action)
         self.save_button.setAccessibleDescription(
