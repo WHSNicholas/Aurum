@@ -107,6 +107,14 @@ account choices remain authoritative. Do not infer contributions from all positi
 opening cost or create fee/tax splits. Missing classification, opening basis or withdrawal facts require a
 focused Review question. Preserve existing metadata when correcting other details.
 
+For a whole-account UniSuper fund identified by the supplied fund provider or the user's instruction,
+use `contribution` (Capital in / out) for contributions, rollovers, contribution taxes, fund administration
+fees and their tax rebates. Use the signed amount on the fund line. Money in and rebates add to cost basis.
+Tax withheld and fees deducted from the fund reduce it. If a contribution is already net of tax, use the
+net amount once. Preserve the stated counterpart; ask if the necessary account or amount is unclear.
+Use `earnings` for a posted investment return or loss. Leave an interim estimate unposted.
+A transfer of withdrawal proceeds to another asset still follows the fund withdrawal workflow.
+
 ## Deterministic budget policy
 
 Budget is a projection of supported posted cash movements, never an AI allocation. Return no budget labels,

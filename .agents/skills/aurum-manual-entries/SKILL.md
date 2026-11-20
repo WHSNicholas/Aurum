@@ -90,6 +90,14 @@ non-bank asset line; its own `kind: opening` is distinct from the event's kind:
 - `unclassified`: the human explicitly clears a previous classification; cost remains unknown. Otherwise
   leave the field null where no classification is established. Preserve existing treatment during corrections.
 
+For a whole-account UniSuper fund identified by the supplied fund provider or the user's instruction,
+use `contribution` (Capital in / out) for contributions, rollovers, contribution taxes, fund administration
+fees and their tax rebates. Use the signed amount on the fund line. Money in and rebates add to cost basis.
+Tax withheld and fees deducted from the fund reduce it. If a contribution is already net of tax, use the
+net amount once. Preserve the stated counterpart; ask if the necessary account or amount is unclear.
+Use `earnings` for a posted investment return or loss. Leave an interim estimate unposted.
+A transfer of withdrawal proceeds to another asset still follows the fund withdrawal workflow.
+
 Only `opening` supplies `cost_basis`; use null for other kinds. Do not infer contributions from every positive
 movement, guess withdrawals' cost, or invent fees/tax splits. Unknown treatment or missing cost prevents an
 automatic investment posting and requires Review. Share and crypto holdings continue using the separate

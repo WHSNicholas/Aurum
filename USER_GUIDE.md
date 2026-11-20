@@ -418,6 +418,10 @@ completed work and learns eligible accepted-review guidance. Stop finishes the c
 
 Include `#remember` in a human instruction or response when you want that guidance retained.
 Saved tagged text contributes to Aurum's private application memory and is supplied to relevant future AI work.
+New workspaces also receive Aurum's built-in AI rules. For a UniSuper whole-account investment, ordinary
+descriptions of contributions, contribution tax, administration fees and rebates select **Capital in / out**.
+A posted investment return selects **Return or fee**. Identify the fund as UniSuper in the account's
+institution, report label or instruction. Personal notes and learned guidance stay in the workspace.
 This is application guidance, not model training, and it does not rewrite unrelated posted events.
 
 Accepted bank reviews can also produce narrow, evidence-linked guidance during Process.

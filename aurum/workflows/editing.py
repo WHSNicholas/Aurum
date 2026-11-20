@@ -31,7 +31,7 @@ from aurum.finance.budget import BudgetSettings, budget_revision, validate_budge
 from aurum.finance.journal import JournalEntry, JournalLine
 from aurum.finance.investments import (
     AccountWithdrawalInstruction, InvestmentInstruction, build_account_withdrawal, build_security_sale,
-    investment_postings_match,
+    investment_postings_match, is_fund_cost_deduction,
 )
 from aurum.finance.manual import ManualCase, ManualInput, ManualOutcome
 from aurum.finance.accounts import Account
@@ -196,11 +196,7 @@ def load_journal_edit(
         "replace_unposted_sources": replace_unposted_sources,
         "manual_context_revision": current_manual_revision,
         "revision": revision, "entry": seed, "source_ids": [str(key) for key in sorted(sources, key=str)],
-        "protected_trade": any(
-            line.investment is not None or line.account_investment is not None
-            and line.account_investment.kind == "contribution" and line.credit > 0
-            for entry in entries for line in entry.lines
-        ),
+        "protected_trade": any(_is_protected_trade(entry, accounts) for entry in entries),
         "investment_disposals": {
             "accounts": [item.model_dump(mode="json") for item in accounts.accounts.values()],
             "securities": [item.model_dump(mode="json") for item in securities.securities.values()]
@@ -337,7 +333,7 @@ def _apply_journal_edit(
     if not entries and any(old.id == entry.id for old in load_journal_entries(connection, accounts)):
         raise ValueError("This event identity already belongs to another journal entry.")
     if disposal is None:
-        _protect_trades(entries, entry)
+        _protect_trades(entries, entry, accounts)
         _check_plain_investment_receipt(connection, entry, accounts, budget)
     _check_journal_sources(connection, entry, accounts)
     validate_budget_labels(
@@ -421,14 +417,22 @@ def _apply_journal_edit(
     return entry
 
 
-def _protect_trades(previous: list[JournalEntry], entry: JournalEntry) -> None:
+def _is_protected_trade(entry: JournalEntry, accounts: AccountRegistry) -> bool:
+    """
+    Protect security trades and withdrawals while leaving fund charges editable.
+    """
+    return any(
+        line.investment is not None or line.account_investment is not None
+        and line.account_investment.kind == "contribution" and line.credit > 0
+        for line in entry.lines
+    ) and not is_fund_cost_deduction(entry, accounts)
+
+
+def _protect_trades(previous: list[JournalEntry], entry: JournalEntry, accounts: AccountRegistry) -> None:
     """
     Permit wording and budget edits while preserving every economic fact of an existing security trade.
     """
-    protected = [old for old in previous if any(
-        line.investment is not None or line.account_investment is not None
-        and line.account_investment.kind == "contribution" and line.credit > 0 for line in old.lines
-    )]
+    protected = [old for old in previous if _is_protected_trade(old, accounts)]
     if protected:
         if (
             len(previous) != 1 or entry.date != previous[0].date

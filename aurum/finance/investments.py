@@ -282,6 +282,25 @@ def investment_cash_available(
     return amount if amount > 0 else None
 
 
+def is_fund_cost_deduction(entry: JournalEntry, accounts: AccountRegistry) -> bool:
+    """
+    Recognise a charge explicitly taken from invested capital and offset against expense or income.
+
+    Existing journals can record the charge as a reduction of contribution income. A transfer to another
+    asset always requires the normal withdrawal checks, regardless of its description.
+    """
+    if len(entry.lines) != 2:
+        return False
+    credit, debit = entry.lines if entry.lines[0].credit else reversed(entry.lines)
+    if (credit.account_investment is None or credit.account_investment.kind != "contribution"
+            or debit.transaction_id or debit.investment or debit.account_investment):
+        return False
+    by_id = {account.id: account for account in accounts.accounts.values()}
+    fund = by_id[credit.account_id]
+    return (fund.account_type == AccountType.ASSET and fund.bank_details is None
+            and by_id[debit.account_id].account_type in {AccountType.EXPENSE, AccountType.INCOME})
+
+
 def validate_investment_change(
     entry: JournalEntry, history: Iterable[JournalEntry], accounts: AccountRegistry,
     *, replacing: Iterable[JournalEntry] = (),
@@ -315,7 +334,7 @@ def validate_investment_change(
             ]
             if security_sales:
                 _validate_security_sale(item, combined, accounts, security_sales)
-            if principal_returns:
+            if principal_returns and not is_fund_cost_deduction(item, accounts):
                 _validate_account_withdrawal(item, combined, accounts, principal_returns)
     # A new acquisition or corrected event must not create negative units or leave cost without units.
     for cutoff in sorted({item.date for item in combined if any(

@@ -29,7 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
 from aurum.ai.skills import (
-    Skill, explicit_memory_context, guidance_context, load_categorisation_skill, retired_budget_guidance,
+    Skill, explicit_memory_context, fund_context, guidance_context, load_categorisation_skill,
+    retired_budget_guidance,
 )
 from aurum.finance.accounts import AccountRegistry, AccountType
 from aurum.finance.budget import (
@@ -39,7 +40,7 @@ from aurum.finance.journal import (
     AccountInvestmentDetails, JournalEntry, JournalLine,
     preserve_account_investments, preserve_budget_categories,
 )
-from aurum.finance.investments import investment_cash_available
+from aurum.finance.investments import investment_cash_available, is_fund_cost_deduction
 from aurum.finance.reports import ReportSettings
 from aurum.finance.review import Guidance, GuidanceResult, ReviewCase, ReviewOutcome
 from aurum.finance.transaction import Transaction
@@ -326,9 +327,7 @@ def _request_context(
         report_settings.unrealised_gains_account if report_settings else None
     )
     for account in payload["accounts"]:
-        account["whole_account_investment"] = bool(
-            report_settings and account["key"] in report_settings.account_investments
-        )
+        account.update(fund_context(accounts.accounts[account["key"]], report_settings))
     return references, sources, guidance_refs, payload
 
 
@@ -598,6 +597,8 @@ def _build_entries(
         if issues:
             raise _AccountingClarification(" ".join(issue.message for issue in issues))
         for entry in entries:
+            if is_fund_cost_deduction(entry, accounts):
+                continue
             for key in budget.investment_accounts:
                 if key not in accounts.accounts:
                     continue

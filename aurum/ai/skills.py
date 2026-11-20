@@ -21,9 +21,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # Aurum imports
 from aurum.ai.privacy import redact_bank_details
-from aurum.finance.accounts import AccountRegistry
+from aurum.finance.accounts import Account, AccountRegistry
 
 if TYPE_CHECKING:
+    from aurum.finance.reports import ReportSettings
     from aurum.finance.review import Guidance
 
 DEFAULT_SKILL = Path(__file__).resolve().parents[2] / ".agents/skills/aurum-categorisation/SKILL.md"
@@ -64,6 +65,19 @@ def load_manual_skill(path: Path | str = DEFAULT_MANUAL_SKILL) -> Skill:
     Read manual-entry interpretation instructions and their content version.
     """
     return _load_skill(path, "aurum-manual-entries")
+
+
+def fund_context(account: Account, settings: "ReportSettings | None") -> dict:
+    """
+    Identify whole-account holdings and expose the UniSuper rule only for an explicitly named fund.
+    """
+    configured = settings is not None and account.key in settings.account_investments
+    context = {"whole_account_investment": configured}
+    if configured:
+        labels = (account.institution, account.name, account.key, settings.investment_symbols.get(account.key))
+        if any(label and label.strip().casefold() == "unisuper" for label in labels):
+            context["fund_provider"] = "UniSuper"
+    return context
 
 
 def guidance_context(

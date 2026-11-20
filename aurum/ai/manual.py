@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 # Aurum imports
 from aurum.ai.chatgpt import ChatGPTConnection
 from aurum.ai.privacy import redact_bank_details
-from aurum.ai.skills import Skill, explicit_memory_context, guidance_context, load_manual_skill
+from aurum.ai.skills import Skill, explicit_memory_context, fund_context, guidance_context, load_manual_skill
 from aurum.finance.accounts import AccountRegistry, AccountType
 from aurum.finance.budget import (
     BudgetSettings, budget_policy, project_budget_entry, validate_budget_labels,
@@ -38,7 +38,7 @@ from aurum.finance.journal import (
 )
 from aurum.finance.investments import (
     AccountWithdrawalInstruction, InvestmentInstruction, PriceQuote, build_account_withdrawal,
-    build_security_sale, calculate_investment, investment_cash_available,
+    build_security_sale, calculate_investment, investment_cash_available, is_fund_cost_deduction,
 )
 from aurum.finance.manual import ManualCase, ManualOutcome
 from aurum.finance.reports import ReportSettings
@@ -572,9 +572,7 @@ def _request_context(
             {
                 "key": key, "name": _safe_text(account.name, accounts, {}),
                 "type": account.account_type.value, "is_bank": account.bank_details is not None,
-                "whole_account_investment": bool(
-                    report_settings and key in report_settings.account_investments
-                ),
+                **fund_context(account, report_settings),
                 "purpose": _safe_text(account.notes or "", accounts, {}),
             }
             for key, account in accounts.accounts.items()
@@ -769,7 +767,7 @@ def _build_entry(
     )
     entry = preserve_budget_categories((entry,), affected)[0]
     entry = preserve_account_investments((entry,), affected)[0]
-    if budget is not None and not investment_build:
+    if budget is not None and not investment_build and not is_fund_cost_deduction(entry, accounts):
         for key in budget.investment_accounts:
             account = accounts.accounts.get(key)
             if account is None:
