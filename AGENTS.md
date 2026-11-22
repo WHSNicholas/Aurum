@@ -479,7 +479,8 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   centre each 30px bin button beneath it with equal horizontal inset. Use Debit/Credit headings without a totals calculator; validate exact
   balance on save. Size posting options to their current budget/investment controls. Omit the Starting bank
   balance checkbox; direct new bank openings go through Setup while corrections preserve saved opening provenance.
-  Transactions has search and saved history without a status filter. Omit persistent unsaved and inactive-method
+  Transactions has search and saved history without a status filter. Its Status column uses Review, Posted
+  and Ready for both bank and manual rows. Omit persistent unsaved and inactive-method
   discard notices. Use the shared compact, centred Discard unsaved changes? dialog for local draft discards,
   with centred Cancel/Discard text buttons and no graphic. Cancel is default and Escape keeps the draft.
   Show fixed save controls and validation errors; preserve dirty input and its original revision

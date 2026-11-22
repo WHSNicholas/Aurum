@@ -327,7 +327,8 @@ The **Source** column shows Redbark, the PDF filename or **Manual Journal**. Sel
 date and full description. Descriptions display in uppercase; saved wording and copied source evidence
 remain unchanged. The source tooltip retains the additional bank evidence.
 Table amounts always include two decimal places. Each transaction occupies one row. Hover over a shortened
-cell to read its full value, or select the transaction to see its details. Search includes the full wording.
+cell to read its full value, or select the transaction to see its details. The **Status** column shows
+**Review**, **Posted** or **Ready**. Search includes the full wording.
 When Redbark corroborates a transaction already imported from a PDF, its original PDF source and statement
 date stay visible. The additional Redbark dates and references appear in the source tooltip.
 

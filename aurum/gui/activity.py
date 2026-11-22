@@ -348,7 +348,7 @@ class TransactionsPage(ActivityPage):
             "Transactions", "Inspect bank transactions and manual journal entries.",
             (
                 ("date", "Date"), ("account", "Account"), ("description", "Description"),
-                ("amount", "Amount"), ("source_file", "Source"), ("status", "Status"),
+                ("amount", "Amount"), ("source_file", "Source"), ("status_label", "Status"),
             ),
             "row_id", parent,
         )
@@ -2365,6 +2365,7 @@ def _transaction_rows(snapshot: dict) -> list[dict]:
         review = reviews.get(identifier, {})
         record = {**source, "row_id": f"bank:{identifier}", "status": review.get("status") or "imported",
                   "review_status": review.get("review_status") or ""}
+        record["status_label"] = _transaction_status_label(record["status"], review)
         if review.get("manual_entry_id") and review.get("journal_entry_id"):
             record["show_review"] = _manual_review_available(manuals.get(review["manual_entry_id"], {}))
             record.update({key: review.get(key) for key in (
@@ -2399,12 +2400,28 @@ def _transaction_rows(snapshot: dict) -> list[dict]:
             "description": description or manual.get("instruction") or "", "account": ", ".join(accounts),
             "amount": _posting_total(postings) or "—", "source_label": "Manual Journal",
             "status": display_status,
+            "status_label": _transaction_status_label(display_status),
             "show_review": _manual_review_available(manual),
             "postings": postings if posted else [],
         })
     if not snapshot.get("activity_all") and snapshot.get("period_start") and snapshot.get("period_end"):
         rows = [row for row in rows if snapshot["period_start"] <= row["date"] <= snapshot["period_end"]]
     return sorted(rows, key=lambda row: row["date"])
+
+
+def _transaction_status_label(status: str | None, review: dict | None = None) -> str:
+    """
+    Show posting and processing readiness in Transactions while retaining the underlying detail state.
+    """
+    if status == "posted":
+        return "Posted"
+    if review:
+        review_status = review.get("review_status")
+        if review_status in {"pending", "submitted"} and str(review.get("human_review") or "").strip():
+            return "Ready"
+        if review_status in {"needs_review", "needs_answer", "stale", "failed", "requesting", "interrupted"}:
+            return "Review"
+    return "Ready" if status in {"imported", "pending", "ready", "submitted"} else "Review"
 
 
 def _manual_review_available(record: dict) -> bool:
