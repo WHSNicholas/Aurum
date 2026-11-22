@@ -77,7 +77,6 @@ class ActivityPage(QWidget):
         self.title_row.addStretch()
         heading_layout.addLayout(self.title_row)
         self.subtitle_row = PageActionRow()
-        self.subtitle_row.setContentsMargins(0, 0, 0, 0)
         self.subtitle_row.addStrut(28)
         self.subtitle_row.addStretch(1)
         heading_layout.addLayout(self.subtitle_row)

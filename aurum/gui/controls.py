@@ -430,6 +430,13 @@ class PageActionRow(QHBoxLayout):
     Align primary actions within the compact row beneath each page title.
     """
 
+    def __init__(self, parent=None) -> None:
+        """
+        Leave room above the controls for descending letters in the page title.
+        """
+        super().__init__(parent)
+        self.setContentsMargins(0, 4, 0, 0)
+
     def setGeometry(self, rectangle: QRect) -> None:
         """
         Keep primary actions at the top of their row and optically lift other buttons.
