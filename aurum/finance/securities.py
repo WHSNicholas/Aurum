@@ -59,8 +59,8 @@ class Security(BaseModel):
         security_type: Share or crypto classification.
         symbol: Trading symbol, qualified by the market and security type.
         market: Exchange or instrument namespace that distinguishes otherwise identical symbols.
-        currency: AUD, the supported bookkeeping and quote currency for this first version.
-        price_symbol: Optional Yahoo identifier; otherwise use an AUD crypto pair or an ASX .AX symbol.
+        currency: AUD, the currency used for bookkeeping and holding valuations.
+        price_symbol: Optional Yahoo identifier overriding the default for the security's market.
 
     A registry rejects duplicate instruments after ignoring case and surrounding whitespace in market and
     symbol. It preserves the original text for display. To change a security, validate a replacement model

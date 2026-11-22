@@ -21,7 +21,10 @@ import warnings
 
 # Aurum imports
 from aurum.database.market_history import cached_ranges, market_update_lock, save_market_batch
-from aurum.finance.investments import PriceQuote, PriceUnavailable, completed_yahoo_bar, price_symbol
+from aurum.finance.investments import (
+    DollarConversion, PriceQuote, PriceUnavailable, completed_yahoo_bar, price_symbol,
+    supports_quote_currency, usd_exchange_rates,
+)
 from aurum.finance.journal import JournalEntry
 from aurum.finance.securities import Security, SecurityRegistry, SecurityType
 
@@ -242,7 +245,7 @@ class _YahooHistory:
 
     def __call__(self, security: Security, start: date, end: date) -> MarketCloseBatch:
         """
-        Require the configured instrument, AUD currency, raw daily Close and completed sessions.
+        Require the configured instrument, supported currency, raw daily Close and completed sessions.
         """
         import yfinance as yf
         from yfinance.exceptions import YFPricesMissingError
@@ -277,8 +280,8 @@ class _YahooHistory:
                 metadata = ticker.get_history_metadata()
                 if str(metadata.get("symbol", "")).casefold() != symbol.casefold():
                     raise PriceUnavailable("Yahoo did not confirm the requested instrument.")
-                if metadata.get("currency") != "AUD":
-                    raise PriceUnavailable("Yahoo did not confirm an AUD quote currency.")
+                if not supports_quote_currency(security.security_type, metadata.get("currency")):
+                    raise PriceUnavailable("Yahoo did not confirm a supported quote currency.")
                 if security.security_type == SecurityType.SHARE and symbol not in self.latest_splits:
                     self.latest_splits[symbol] = max((stamp.date() for stamp in ticker.get_splits().index),
                                                      default=None)
@@ -338,14 +341,26 @@ def _completed_closes(
         if last_split is not None and max(invalid) < last_split:
             raise PriceUnavailable("A later share split makes these historical unit values ambiguous.")
         raise PriceUnavailable("Yahoo returned invalid daily close values.")
-    quotes = tuple(PriceQuote(
-        security_id=security.id, symbol=symbol, price_date=day, requested_date=day,
-        price=value, fetched_at=now,
-    ) for day, value in sorted(prices.items()))
+    quotes = []
+    warning = ""
+    rates = None
+    if prices and metadata.get("currency") == "USD":
+        rates = usd_exchange_rates(min(prices), max(prices), now)
+    for day, value in sorted(prices.items()):
+        conversion = None
+        if rates is not None:
+            if day not in rates:
+                omitted.add(day)
+                warning = "A completed USD/AUD exchange rate is missing for one or more daily closes."
+                continue
+            conversion = DollarConversion(usd_close=value, aud_per_usd=rates[day])
+            value = conversion.aud_price()
+        quotes.append(PriceQuote(security_id=security.id, symbol=symbol, price_date=day, requested_date=day,
+                                 price=value, fetched_at=now, conversion=conversion))
     checked = []
     for ordinal in range(start.toordinal(), end.toordinal() + 1):
         day = date.fromordinal(ordinal)
         closed_session = security.security_type == SecurityType.SHARE and day.weekday() >= 5
-        if day in prices or closed_session and day not in omitted:
+        if (day in prices or closed_session) and day not in omitted:
             checked.append((day, day))
-    return MarketCloseBatch(quotes, tuple(_merged(checked)))
+    return MarketCloseBatch(tuple(quotes), tuple(_merged(checked)), warning)

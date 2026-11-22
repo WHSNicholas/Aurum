@@ -19,7 +19,7 @@ change the journal or create valuation adjustments.
 # Imports
 from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, ROUND_HALF_UP, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from hashlib import sha256
 import json
 import sqlite3
@@ -37,6 +37,25 @@ from aurum.finance.transaction import Transaction
 
 
 # %% 1. Investment Details -----------------------------------------------------------------------------------
+class DollarConversion(BaseModel):
+    """
+    Preserve the USD security close and same-date Yahoo USD/AUD rate behind an AUD valuation.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    usd_close: Decimal = Field(gt=0, allow_inf_nan=False)
+    aud_per_usd: Decimal = Field(gt=0, allow_inf_nan=False)
+
+    def aud_price(self) -> Decimal:
+        """
+        Convert one unit before the final holding value is rounded to cents.
+        """
+        with localcontext() as context:
+            context.prec = 50
+            return self.usd_close * self.aud_per_usd
+
+
 class PriceQuote(BaseModel):
     """
     Keep a positive AUD daily close and its exact date and provider together.
@@ -55,6 +74,7 @@ class PriceQuote(BaseModel):
     provider: Literal["yahoo"] = "yahoo"
     symbol: str = Field(min_length=1)
     fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    conversion: DollarConversion | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _check_dates(self) -> Self:
@@ -63,6 +83,8 @@ class PriceQuote(BaseModel):
         """
         if not 0 <= (self.requested_date - self.price_date).days <= 7:
             raise ValueError("A quote must be on the requested date or within the previous seven days")
+        if self.conversion and self.conversion.aud_price() != self.price:
+            raise ValueError("The AUD price must match the recorded USD close and conversion rate")
         if self.fetched_at.utcoffset() is None:
             raise ValueError("Quote retrieval timestamps must include a timezone")
         return self
@@ -783,9 +805,7 @@ class PriceUnavailable(ValueError):
 
 def price_symbol(security: Security) -> str:
     """
-    Resolve an explicit provider symbol, an AUD crypto pair or an ASX ticker.
-
-    Other exchanges require an explicit price_symbol whose returned currency is verified as AUD.
+    Resolve an explicit provider symbol or the default for a supported market.
     """
     if security.price_symbol is not None:
         return security.price_symbol.strip()
@@ -794,7 +814,61 @@ def price_symbol(security: Security) -> str:
     if security.market.strip().upper() == "ASX":
         symbol = security.symbol.strip().upper()
         return symbol if symbol.endswith(".AX") else symbol + ".AX"
-    raise PriceUnavailable("Configure an AUD price_symbol or supply the actual AUD unit price")
+    if security.market.strip().upper() in {"US", "USA", "NASDAQ", "NYSE", "NYSE ARCA", "NYSEARCA",
+                                           "AMEX", "NYSE AMERICAN", "CBOE BZX", "BATS"}:
+        return security.symbol.strip().upper()
+    raise PriceUnavailable("Configure the Yahoo market data symbol or supply the actual AUD unit price")
+
+
+def supports_quote_currency(kind: SecurityType, currency: str | None) -> bool:
+    """
+    Accept direct AUD pricing and USD conversions for shares and exchange-traded funds.
+    """
+    return currency == "AUD" or (kind == SecurityType.SHARE and currency == "USD")
+
+
+def usd_exchange_rates(start: date, end: date, now: datetime) -> dict[date, Decimal]:
+    """
+    Fetch completed Yahoo USD/AUD daily rates for the inclusive security close dates.
+
+    A missing, conflicting or unfinished daily rate leaves that date unavailable for conversion.
+    """
+    import yfinance as yf
+
+    try:
+        ticker = yf.Ticker("USDAUD=X")
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r"The inplace keyword in DataFrame\..* is deprecated.*",
+                module=r"yfinance\..*",
+            )
+            history = ticker.history(start=start.isoformat(), end=(end + timedelta(days=1)).isoformat(),
+                                     interval="1d", auto_adjust=False, back_adjust=False, rounding=False,
+                                     timeout=15, raise_errors=True)
+        metadata = ticker.get_history_metadata()
+        # Yahoo can report the equivalent short USD-base identifier in its history metadata.
+        pair = str(metadata.get("symbol", "")).upper()
+        if metadata.get("currency") != "AUD" or pair not in {"USDAUD=X", "AUD=X"}:
+            raise PriceUnavailable("Yahoo did not confirm the USD/AUD exchange rate.")
+        rates, invalid = {}, set()
+        for stamp, row in history.iterrows():
+            day = stamp.date()
+            if not start <= day <= end or not completed_yahoo_bar(stamp, SecurityType.SHARE, metadata, now):
+                continue
+            try:
+                rate = Decimal(str(row["Close"]))
+            except (KeyError, InvalidOperation):
+                invalid.add(day)
+                continue
+            if not rate.is_finite() or rate <= 0 or (day in rates and rate != rates[day]):
+                invalid.add(day)
+            else:
+                rates[day] = rate
+        return {day: rate for day, rate in rates.items() if day not in invalid}
+    except PriceUnavailable:
+        raise
+    except Exception:
+        raise PriceUnavailable("The historical USD/AUD exchange rate could not be retrieved.") from None
 
 
 def get_quote(
@@ -849,8 +923,11 @@ def fetch_yahoo_quote(security: Security, requested_date: date) -> PriceQuote:
                 timeout=15, raise_errors=True,
             )
             metadata = ticker.get_history_metadata()
-            if metadata.get("currency") != "AUD":
-                raise PriceUnavailable("This provider symbol is not quoted in AUD; supply an AUD unit price")
+            currency = metadata.get("currency")
+            if not supports_quote_currency(security.security_type, currency):
+                raise PriceUnavailable("Unsupported quote currency; supply the actual AUD unit price")
+            if currency == "USD" and str(metadata.get("symbol", "")).casefold() != symbol.casefold():
+                raise PriceUnavailable("Yahoo did not confirm the requested USD security.")
             if security.security_type == SecurityType.SHARE:
                 splits = ticker.get_splits()
                 if any(timestamp.date() > requested_date for timestamp in splits.index):
@@ -858,6 +935,7 @@ def fetch_yahoo_quote(security: Security, requested_date: date) -> PriceQuote:
                         "A later share split makes historical units ambiguous; supply an AUD unit price"
                     )
         now = datetime.now(UTC)
+        rates = None
         for timestamp, row in history.iloc[::-1].iterrows():
             if timestamp.tzinfo is None:
                 raise PriceUnavailable("The provider omitted the quote timezone; supply an AUD unit price")
@@ -868,9 +946,17 @@ def fetch_yahoo_quote(security: Security, requested_date: date) -> PriceQuote:
                 continue
             price = Decimal(str(row["Close"]))
             if price.is_finite() and price > 0:
+                conversion = None
+                if currency == "USD":
+                    if rates is None:
+                        rates = usd_exchange_rates(requested_date - timedelta(days=7), price_date, now)
+                    if price_date not in rates:
+                        continue
+                    conversion = DollarConversion(usd_close=price, aud_per_usd=rates[price_date])
+                    price = conversion.aud_price()
                 return PriceQuote(
                     security_id=security.id, requested_date=requested_date,
-                    price_date=price_date, price=price, symbol=symbol,
+                    price_date=price_date, price=price, symbol=symbol, conversion=conversion,
                 )
     except PriceUnavailable:
         raise
@@ -879,8 +965,10 @@ def fetch_yahoo_quote(security: Security, requested_date: date) -> PriceQuote:
             "The market close could not be retrieved; enter an AUD unit price in the Manual response "
             "or use Process to retry"
         ) from None
+    if rates is not None:
+        raise PriceUnavailable("No matching completed USD/AUD rate; supply an AUD unit price or retry")
     raise PriceUnavailable(
-        "No completed AUD close is available within seven days; "
+        "No completed close is available within seven days; "
         "enter an AUD unit price in the Manual response"
     )
 

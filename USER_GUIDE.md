@@ -115,6 +115,11 @@ Yahoo Finance. If Yahoo rejects it, the edits stay open. Apply a suggestion to f
 edit the field yourself, then save again. A rename or reorder alone skips the lookup. If Yahoo is
 unavailable or rate-limits the check, Aurum saves the settings with a warning.
 
+For a US share or ETF, choose **Equities**, enter its Yahoo ticker (for example, GOOGL) and set
+**Exchange / market** to its exchange (for example, NASDAQ or NYSE Arca). **Price symbol** can stay
+blank for those exchanges. If a different market label needs an override, enter the security's Yahoo
+ticker in **Price symbol**. Aurum looks up the USD/AUD rate separately.
+
 ### Connect ANZ Plus with Redbark
 
 Set up your bank connection in Redbark first and create an API key with **data:read** access.
@@ -568,9 +573,13 @@ Current reporting-year profit and direct current-year Retained Earnings movement
 Earlier profit and earlier Retained Earnings movements appear in Capital. Unrealised market movements remain
 outside income.
 
-Purchases and opening holdings support AUD amounts, units and stated fees. When units are estimated from a
-completed closing price, that is identified. Sales, holding transfers, staking, corporate actions and FX remain
-outside the current supported investment workflow.
+For a USD-quoted share or ETF, Aurum multiplies each completed USD close by Yahoo's AUD per USD rate
+(`USDAUD=X`) for the same trading date. Analysis uses these converted daily values. Reports and opening
+entries can use the most recent completed pair within seven days of the selected date.
+If you give units and an actual AUD total for a purchase, Aurum records that total. If you give units
+alone and identify the holding and funding accounts, Aurum can estimate the AUD amount from closing
+prices. Later valuations preserve the posted opening value or purchase cost.
+Holding transfers, staking, corporate actions and currency trades remain outside this workflow.
 
 ## Local files
 

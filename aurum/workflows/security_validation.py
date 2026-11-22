@@ -17,7 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 # Aurum imports
-from aurum.finance.investments import price_symbol, PriceUnavailable
+from aurum.finance.investments import price_symbol, PriceUnavailable, supports_quote_currency
 from aurum.finance.securities import Security, SecurityType
 
 
@@ -148,10 +148,11 @@ def _lookup_yahoo(security: Security, symbol: str) -> dict:
         currency = yf.Ticker(symbol).get_history_metadata().get("currency")
     if not currency:
         raise ValueError("Yahoo did not confirm the quote currency")
-    if str(currency).upper() != "AUD":
+    if not supports_quote_currency(security.security_type, str(currency).upper()):
+        supported = "AUD or USD" if security.security_type == SecurityType.SHARE else "AUD"
         return {
             "status": "invalid",
-            "message": f"{symbol} is quoted in {currency}; choose an AUD market-data symbol.",
+            "message": f"{symbol} is quoted in {currency}. Choose a symbol quoted in {supported}.",
             "suggestions": _suggestions(security, symbol, result.quotes),
         }
     return {"status": "verified"}
@@ -159,7 +160,7 @@ def _lookup_yahoo(security: Security, symbol: str) -> dict:
 
 def _suggestions(security: Security, symbol: str, initial: list[dict]) -> tuple[SecuritySuggestion, ...]:
     """
-    Offer supported AUD-provider candidates, preserving their original names for an explicit user choice.
+    Offer supported provider candidates, preserving their original names for an explicit user choice.
     """
     import yfinance as yf
 
@@ -189,9 +190,11 @@ def _suggestions(security: Security, symbol: str, initial: list[dict]) -> tuple[
     for item in quotes:
         candidate = str(item.get("symbol") or "")
         aud = candidate.upper().endswith("-AUD" if security.security_type == SecurityType.CRYPTO else ".AX")
-        if not candidate or candidate.casefold() == symbol.casefold() or not aud:
+        if not candidate or candidate.casefold() == symbol.casefold():
             continue
-        if item.get("quoteType") not in allowed or item.get("currency", "AUD") != "AUD":
+        currency = item.get("currency") or ("AUD" if aud else None)
+        if (item.get("quoteType") not in allowed
+                or not supports_quote_currency(security.security_type, currency)):
             continue
         found.setdefault(candidate.casefold(), SecuritySuggestion(
             symbol=candidate, name=item.get("longname") or item.get("shortname") or candidate,

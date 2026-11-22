@@ -19,7 +19,7 @@ import sqlite3
 from uuid import UUID
 
 # Aurum imports
-from aurum.finance.investments import PriceQuote
+from aurum.finance.investments import DollarConversion, PriceQuote
 
 
 # %% 1. Price Storage ----------------------------------------------------------------------------------------
@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS price_quotes (
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (security_id, requested_date, provider, symbol)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS quote_conversions (
+    security_id TEXT NOT NULL,
+    requested_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    details TEXT NOT NULL,
+    PRIMARY KEY (security_id, requested_date, symbol)
+) STRICT;
 """
 
 
@@ -48,11 +55,11 @@ def load_quote(
     Return a cached Yahoo close for this exact request, or None when it has not been fetched.
     """
     row = connection.execute(
-        "SELECT " + ", ".join(PRICE_COLUMNS) + " FROM price_quotes "
-        "WHERE security_id = ? AND requested_date = ? AND provider = 'yahoo' AND symbol = ?",
+        _quote_select(connection)
+        + " WHERE security_id = ? AND requested_date = ? AND provider = 'yahoo' AND symbol = ?",
         (str(security_id), requested_date.isoformat(), symbol),
     ).fetchone()
-    return PriceQuote.model_validate(dict(zip(PRICE_COLUMNS, row))) if row else None
+    return _decode_quote(row) if row else None
 
 
 def load_valuation_quote(
@@ -66,8 +73,7 @@ def load_valuation_quote(
     Invalid cache rows are skipped; this read never repairs records or fetches prices.
     """
     rows = connection.execute(
-        "SELECT " + ", ".join(PRICE_COLUMNS) + " FROM price_quotes "
-        "WHERE security_id = ? AND requested_date <= ? AND price_date <= ? "
+        _quote_select(connection) + " WHERE security_id = ? AND requested_date <= ? AND price_date <= ? "
         "AND currency = 'AUD' AND provider = 'yahoo' AND symbol = ? "
         "ORDER BY price_date DESC, requested_date DESC",
         (str(security_id), cutoff.isoformat(), cutoff.isoformat(), symbol),
@@ -88,8 +94,8 @@ def load_valuation_history(connection: sqlite3.Connection, cutoff: date) -> tupl
     if not available:
         return ()
     rows = connection.execute(
-        "SELECT " + ", ".join(PRICE_COLUMNS) + " FROM price_quotes "
-        "WHERE requested_date <= ? AND price_date <= ? AND currency = 'AUD' AND provider = 'yahoo'",
+        _quote_select(connection)
+        + " WHERE requested_date <= ? AND price_date <= ? AND currency = 'AUD' AND provider = 'yahoo'",
         (cutoff.isoformat(), cutoff.isoformat()),
     )
     return tuple(_valuation_quotes(rows, cutoff))
@@ -108,23 +114,53 @@ def save_quote(connection: sqlite3.Connection, quote: PriceQuote) -> PriceQuote:
     quote = PriceQuote.model_validate(quote.model_dump())
     values = quote.model_dump(mode="json")
     with connection:
-        connection.execute(
+        inserted = connection.execute(
             "INSERT INTO price_quotes (" + ", ".join(PRICE_COLUMNS)
             + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (security_id, requested_date, provider, symbol) DO NOTHING",
             tuple(values[name] for name in PRICE_COLUMNS),
         )
+        if inserted.rowcount and quote.conversion is not None:
+            connection.execute(
+                "INSERT INTO quote_conversions VALUES (?, ?, ?, ?)",
+                (str(quote.security_id), quote.requested_date.isoformat(), quote.symbol,
+                 quote.conversion.model_dump_json()),
+            )
     return load_quote(connection, quote.security_id, quote.requested_date, quote.symbol)
 
 
 # %% 2. Helpers ----------------------------------------------------------------------------------------------
+def _quote_select(connection: sqlite3.Connection) -> str:
+    """
+    Include conversion evidence while allowing read-only access to older quote databases.
+    """
+    available = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='quote_conversions'"
+    ).fetchone()
+    evidence = "details" if available else "NULL"
+    query = "SELECT " + ", ".join(PRICE_COLUMNS) + ", " + evidence + " FROM price_quotes"
+    if available:
+        query += " LEFT JOIN quote_conversions USING (security_id, requested_date, symbol)"
+    return query
+
+
+def _decode_quote(row: tuple) -> PriceQuote:
+    """
+    Validate the AUD close together with the original price and FX rate when present.
+    """
+    values = dict(zip(PRICE_COLUMNS, row))
+    if row[-1] is not None:
+        values["conversion"] = DollarConversion.model_validate_json(row[-1])
+    return PriceQuote.model_validate(values)
+
+
 def _valuation_quotes(rows: sqlite3.Cursor, cutoff: date) -> Iterator[PriceQuote]:
     """
     Skip invalid cache records and enforce both cutoff dates on validated values.
     """
     for row in rows:
         try:
-            quote = PriceQuote.model_validate(dict(zip(PRICE_COLUMNS, row)))
+            quote = _decode_quote(row)
         except ValueError:
             continue
         if quote.requested_date <= cutoff and quote.price_date <= cutoff:

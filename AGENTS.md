@@ -293,7 +293,7 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   Left-align plus, bin, up and down above each account/security list. The arrows reorder within one type
   and preserve the selected record, pending field edits, opening-balance drafts, keys and UUIDs.
   On Setup Save, check Yahoo Finance for new securities and changes to type, symbol, market or price symbol.
-  A confirmed invalid ticker blocks the coordinated save. Offer available AUD suggestions with ticker,
+  A confirmed invalid ticker blocks the coordinated save. Offer supported currency suggestions with ticker,
   instrument name and exchange. Applying one stages only the market data symbol for the next explicit save.
   Save with a warning on an outage or rate limit. Skip lookups for renames and reordering alone.
   Run validation in the background, keep quote storage untouched and recheck revisions before publishing.
@@ -678,10 +678,12 @@ Balance sheet, income, budget and investment PDFs and the Overview snapshot use 
   otherwise use a completed daily close on/before the date, within seven days. Cache quotes and interpreted
   proposals; reuse only with matching input, model, skills, accounting context and configuration.
 - Amounts mean total spent unless stated otherwise. Capitalise stated fees once and label estimated units.
-  Investment details belong on the non-bank holding line. Missing prices need a question, never zero or FX
-  substitution. Price retrieval does not create valuation journal entries.
+  Investment details belong on the non-bank holding line. For USD shares and ETFs, multiply a completed
+  USD close by Yahoo's completed USDAUD=X close for the same date. Use these AUD prices in manual entries,
+  reports and Analysis. Retain both inputs with immutable quotes. Missing prices or rates follow the
+  usual pricing fallback. Price retrieval does not create valuation journal entries.
 - Support average recorded-cost security sales and proportional confirmed-value account withdrawals through
-  shared checked builders. Holding transfers, staking, corporate actions and FX remain unsupported. Reject
+  shared checked builders. Holding transfers, staking, corporate actions and FX trades remain unsupported. Reject
   backdated corrections that invalidate a later disposal; do not silently replay or rewrite posted events.
 - Automatic inference of manual-entry guidance and cumulative goal balances remain future work. Explicit
   manual `#remember` notes and accepted bank-review learning remain supported. Retired pot/exclusion guidance
