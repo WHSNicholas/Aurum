@@ -985,7 +985,15 @@ def completed_yahoo_bar(timestamp: datetime, kind: SecurityType, metadata: dict,
     if timestamp.date() != today:
         return timestamp.date() < today
     close = metadata.get("currentTradingPeriod", {}).get("regular", {}).get("end")
-    if not close:
+    if isinstance(close, datetime):
+        if close.utcoffset() is None:
+            return False
+        session_end = close.astimezone(timestamp.tzinfo)
+    elif isinstance(close, (int, float)):
+        try:
+            session_end = datetime.fromtimestamp(close, timestamp.tzinfo)
+        except (OSError, OverflowError, ValueError):
+            return False
+    else:
         return False
-    session_end = datetime.fromtimestamp(close, timestamp.tzinfo)
     return session_end.date() == today and now >= session_end
