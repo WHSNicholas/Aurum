@@ -26,7 +26,7 @@ from aurum.finance.investments import DollarConversion, PriceQuote
 PRICE_COLUMNS = (
     "security_id", "requested_date", "price_date", "price", "currency", "provider", "symbol", "fetched_at",
 )
-PRICE_SCHEMA = """
+QUOTE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_quotes (
     security_id TEXT NOT NULL,
     requested_date TEXT NOT NULL,
@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS price_quotes (
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (security_id, requested_date, provider, symbol)
 ) STRICT;
+"""
+CONVERSION_SCHEMA = """
 CREATE TABLE IF NOT EXISTS quote_conversions (
     security_id TEXT NOT NULL,
     requested_date TEXT NOT NULL,
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS quote_conversions (
     PRIMARY KEY (security_id, requested_date, symbol)
 ) STRICT;
 """
+PRICE_SCHEMA = QUOTE_SCHEMA + CONVERSION_SCHEMA
 
 
 def load_quote(
@@ -121,6 +124,8 @@ def save_quote(connection: sqlite3.Connection, quote: PriceQuote) -> PriceQuote:
             tuple(values[name] for name in PRICE_COLUMNS),
         )
         if inserted.rowcount and quote.conversion is not None:
+            # Older workspaces first need this table when a converted quote is actually stored.
+            connection.execute(CONVERSION_SCHEMA)
             connection.execute(
                 "INSERT INTO quote_conversions VALUES (?, ?, ?, ?)",
                 (str(quote.security_id), quote.requested_date.isoformat(), quote.symbol,
